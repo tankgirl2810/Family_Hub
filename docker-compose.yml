@@ -80,6 +80,11 @@ services:
       - VPN_PROVIDER=${VPN_PROVIDER:-protonvpn}
       - SERVICES_USER=${SERVICES_USER:-}
       - SERVICES_PASSWORD=${SERVICES_PASSWORD:-}
+      - VISUALS_REPO=${VISUALS_REPO:-}
+      - VISUALS_BRANCH=${VISUALS_BRANCH:-}
+      - HOME_PLACE=${HOME_PLACE:-}
+      - HOME_LAT=${HOME_LAT:-}
+      - HOME_LON=${HOME_LON:-}
       - VPN_CONFIGURED=${VPN_WIREGUARD_KEY:+yes}${VPN_USER:+yes}
       # The nightly copy (docs/06). Only switched on when BACKUP_PATH is set in .env.
       - SECOND_DISK_DIR=${BACKUP_PATH:+/second-disk}

@@ -135,12 +135,32 @@ You need a free [GitHub](https://github.com) account and
   and topics such as `ebooks`, `self-hosted`, `calibre`, `reading-tracker`.
 - **Settings → General → Features:** switch on **Issues** (bug reports) and
   **Discussions** (questions and ideas).
-- **Settings → Branches:** add a rule for `main` requiring the tests to
-  pass before a change is merged. This stops a contribution breaking it for
-  everyone.
+- **Who can push:** on GitHub only the owner and the people added under
+  **Settings → Collaborators** can push to the repository; everyone else can
+  only open issues, fork it, and offer pull requests that you choose whether
+  to merge. Add the people who work on it with you there.
+- **Settings → Rules → Rulesets:** protect `master` from being deleted or
+  overwritten with a force-push (steps under "Protecting master" below).
 - Add a screenshot or two to the README. People decide in seconds.
 - Keep the "What has and has not been tested" table in the README honest
   and current. It is the most useful thing a new visitor can read.
+
+## Protecting master
+
+1. **Settings → Rules → Rulesets → New ruleset → New branch ruleset.**
+2. Name it `Protect master`, set **Enforcement status** to **Active**.
+3. Under **Target branches** press **Add target → Include default branch**.
+4. Tick **Restrict deletions** and **Block force pushes**. Leave **Require a
+   pull request before merging** off if the people working on it push
+   directly; switch it on if every change should be looked at by the other
+   person first.
+5. Optional: **Require status checks to pass**, adding **test**, so a change
+   that breaks the tests cannot land on `master`. With this on, changes go
+   through a pull request (the tests have to run on it first).
+6. Press **Create**.
+
+To overwrite `master` on purpose later (rare), switch the ruleset to
+**Disabled** for a moment, then back to **Active**.
 
 ## How other people contribute
 

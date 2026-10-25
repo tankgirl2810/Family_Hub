@@ -1,0 +1,20 @@
+name: An idea
+description: Suggest something Family Hub could do, or do better.
+labels: [idea]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Family Hub is looked after by two people in their spare time, for their own household first. Ideas are welcome and read, but may not be built.
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What it would do, and who in a household it would help.
+    validations:
+      required: true
+  - type: textarea
+    id: now
+    attributes:
+      label: How you manage today
+      description: Optional. What you do now without it.

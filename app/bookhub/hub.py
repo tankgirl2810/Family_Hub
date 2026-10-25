@@ -715,6 +715,11 @@ def start_background(hub, app):
                             hub.media.sync_vpn_port()
                         except Exception as exc:
                             app.logger.warning("could not pass the VPN's port to qBittorrent: %s", exc)
+                    try:  # new visuals from the household's GitHub repository, checked hourly
+                        from . import visuals
+                        visuals.sync(hub)
+                    except Exception as exc:
+                        app.logger.warning("could not check for new visuals: %s", exc)
                     try:  # downloads nobody is sharing wait at the back of the line
                         hub.media.park_stalled()
                     except Exception as exc:

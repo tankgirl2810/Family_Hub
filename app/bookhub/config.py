@@ -95,6 +95,12 @@ class Config:
         # One sign-in for the programs' own pages (Radarr, Sonarr, Prowlarr, Bazarr, qBittorrent), set on each
         # by Connect everything.
         self.services_user = os.environ.get("SERVICES_USER") or ""
+        # The visuals at the top of Home (visuals.py): where new ones come from, and the home town they use.
+        self.visuals_repo = os.environ.get("VISUALS_REPO") or ""
+        self.visuals_branch = os.environ.get("VISUALS_BRANCH") or ""
+        self.home_place = os.environ.get("HOME_PLACE") or ""
+        self.home_lat = os.environ.get("HOME_LAT") or ""
+        self.home_lon = os.environ.get("HOME_LON") or ""
         self.services_pass = os.environ.get("SERVICES_PASSWORD") or ""
         # Set by docker-compose.yml when the VPN's key or user name is filled in. The VPN itself is set in .env.
         self.vpn_configured = bool(os.environ.get("VPN_CONFIGURED"))

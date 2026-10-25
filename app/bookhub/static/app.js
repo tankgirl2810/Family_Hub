@@ -167,11 +167,43 @@ function applyLook(look) {
   setAccent(look.accent);
 }
 
+// The visuals at the top of Home run in sandboxed frames (visuals.py), which cannot read this page's
+// colours. Each is sent them, with the home town, when it is ready and whenever the look changes.
+const visualFrames = new Set();
+const VISUAL_TOKENS = ['--bg', '--panel', '--grid', '--line', '--line2', '--ink', '--dim', '--accent', '--font-label'];
+function sendLook(frame) {
+  if (!frame.contentWindow) return;
+  const cs = getComputedStyle(document.documentElement);
+  const tokens = Object.fromEntries(VISUAL_TOKENS.map((k) => [k, cs.getPropertyValue(k).trim()]));
+  frame.contentWindow.postMessage({ type: 'hub-look', tokens, place: (S.visuals && S.visuals.place) || null }, '*');
+}
+function sendLookToVisuals() {
+  for (const f of visualFrames) { if (f.isConnected) sendLook(f); else visualFrames.delete(f); }
+}
+addEventListener('message', (e) => {
+  const frame = [...visualFrames].find((f) => f.contentWindow === e.source);
+  if (!frame || !e.data || typeof e.data !== 'object') return;
+  if (e.data.type === 'hub-visual-ready') sendLook(frame);
+  else if (e.data.type === 'hub-visual' && frame.onVisual) frame.onVisual(e.data);
+});
+
+// One visual in its frame: pin is a visual's id, or '' for today's. onVisual hears its name, modes and the list.
+function visualFrame(pin, onVisual) {
+  const ver = (S.visuals && S.visuals.version) || 'builtin';
+  const frame = el('iframe', { class: 'visual-frame', title: "Today's visual", loading: 'lazy', referrerpolicy: 'no-referrer',
+    sandbox: 'allow-scripts', src: '/visuals/' + encodeURIComponent(ver) + '/frame.html' + (pin ? '?pin=' + encodeURIComponent(pin) : '') });
+  frame.onVisual = onVisual;
+  frame.addEventListener('load', () => sendLook(frame));
+  visualFrames.add(frame);
+  return frame;
+}
+
 // The accent hue on the page: none means the design's own (purple, or blue in Blueprint).
 function setAccent(hue) {
   const root = document.documentElement;
   if (hue === null || hue === undefined) { delete root.dataset.accent; root.style.removeProperty('--accent-h'); }
   else { root.dataset.accent = 'custom'; root.style.setProperty('--accent-h', hue); }
+  sendLookToVisuals();
 }
 
 let pageTitle = 'Family Hub';  // the tab title for the current screen, put back after a "ready" notice
@@ -1036,13 +1068,24 @@ function mediaCard(reload) {
 
 // ------------------------------------------------------------------ home
 
-// The Scope, the design's showpiece on Home.
+// The Scope, the design's showpiece on Home: today's visual (or the one an admin pinned), with its name and,
+// for a visual that has them, a switch for its modes in the header.
 function setPiece(look) {
-  const name = (look.scenes.find((s) => s[0] === look.scene) || look.scenes[0])[1];
+  const name = el('span', { text: '' });
+  const modes = el('span', { class: 'seg', role: 'group', hidden: true });
+  let frame = null;
+  frame = visualFrame(look.scene === 'daily' ? '' : look.scene, (v) => {
+    name.textContent = v.name || '';
+    const list = Array.isArray(v.modes) ? v.modes : [];
+    modes.hidden = !list.length;
+    modes.setAttribute('aria-label', (v.name || 'Visual') + ' view');
+    fill(modes, list.map(([id, label]) => el('button', { type: 'button', 'aria-pressed': String(id === v.mode), text: label,
+      onclick: () => frame.contentWindow.postMessage({ type: 'hub-mode', mode: id }, '*') })));
+  });
   return el('div', { class: 'dossier holo' },
     el('div', { class: 'cell dhead' }, el('span', { text: look.piece.title }), el('span', { class: 'dim', text: look.piece.state })),
-    el('div', { class: 'cell dhead' }, el('span', { class: 'dim', text: look.piece.label }), el('span', { text: name })),
-    el('div', { class: 'cell', style: 'grid-column:1/-1;line-height:0' }, SetPieces.canvas(look.design, look.scene)));
+    el('div', { class: 'cell dhead' }, name, modes),
+    el('div', { class: 'cell', style: 'grid-column:1/-1;line-height:0' }, frame));
 }
 
 async function pageHome() {
@@ -2093,16 +2136,45 @@ function appearanceCard(data, reload) {
       el('div', { class: 'row', style: 'gap:10px' },
         look.accent === null ? null : el('button', { class: 'btn sm', type: 'button', text: 'Reset to purple', onclick: () => save({ accent: null }, 'The accent is back to purple.') }),
         el('span', { class: 'small dim', text: 'Dark and Light use it as the accent; Blueprint prints everything in it. Paper is printed in black only and keeps no accent.' }))),
-    el('div', { class: 'stack' }, el('span', { class: 'lab', text: look.piece.title + ' on Home' }),
-      el('div', { class: 'row', role: 'group', 'aria-label': look.piece.title + ' mode', style: 'gap:8px' }, look.scenes.map(([id, name]) =>
-        el('button', { class: 'chip', type: 'button', 'aria-pressed': String(id === look.scene), text: name, onclick: () => save({ scene: id }, name + ' now shows on Home.') }))),
-      el('div', { style: 'border:1px solid var(--line2);line-height:0' }, SetPieces.canvas(look.design, look.scene)),
-      el('span', { class: 'small dim', text: 'This is what everyone sees at the top of Home.' })),
+    visualsChooser(look, save),
     el('div', { class: 'line' }, el('div', { class: 'grow' }, el('div', { style: 'font-weight:600', text: look.piece.transition }),
       el('div', { class: 'small dim', text: 'A sheet of grid paper passes down the page when anyone moves between screens. It stays off on devices set to reduce motion.' })),
     // Named in full, as the design has it: a bare "On" or "Off" says nothing about what it switches.
     el('button', { class: 'chip', type: 'button', 'aria-pressed': String(look.transition), text: look.transition ? 'Scan: on' : 'Scan: off',
       onclick: () => save({ transition: !look.transition }, look.transition ? 'The screen-change scan is off.' : 'The screen-change scan is on.') })));
+}
+
+// Which visual shows at the top of Home: a different one each day, or one pinned. The list comes from the
+// preview frame itself, so visuals added on GitHub appear here as soon as they arrive.
+function visualsChooser(look, save) {
+  const chips = el('div', { class: 'row', role: 'group', 'aria-label': 'Visual on Home', style: 'gap:8px' });
+  const status = el('p', { class: 'small dim', role: 'status' });
+  const nowShowing = el('span', { class: 'small dim' });
+  const preview = visualFrame(look.scene === 'daily' ? '' : look.scene, (v) => {
+    nowShowing.textContent = v.name ? (look.scene === 'daily' ? 'Today: ' + v.name : 'Showing ' + v.name) : '';
+    const list = Array.isArray(v.list) ? v.list : [];
+    fill(chips, [['daily', 'A different one each day']].concat(list.map((x) => [x.id, x.name])).map(([id, name]) =>
+      el('button', { class: 'chip', type: 'button', 'aria-pressed': String(id === look.scene), text: name,
+        onclick: () => save({ scene: id }, id === 'daily' ? 'Home now shows a different visual each day.' : name + ' now shows on Home every day.') })));
+  });
+  const check = el('button', { class: 'btn sm', type: 'button', text: 'Check for new visuals', onclick: async () => {
+    check.disabled = true;
+    try { showStatus(await api('POST', '/api/admin/visuals/check')); } catch (e) { oops(e); }
+    check.disabled = false;
+  } });
+  function showStatus(st) {
+    const where = st.source === 'github' ? 'From GitHub: ' + st.repo + ' (version ' + st.version + '), ' + plural(st.count, 'visual')
+      : (st.repo ? 'Built in for now (' + plural(st.count, 'visual') + '); ' + st.repo + ' has not been read yet' : 'Built in: ' + plural(st.count, 'visual') + '. Add your own from a GitHub repository under Connections, Visuals on Home');
+    status.className = 'small ' + (st.error ? 'bad' : 'dim');
+    status.textContent = where + (st.checked ? ' · checked ' + ago(st.checked).toLowerCase() : '') + (st.error ? ' · ' + st.error : '');
+    check.hidden = !st.repo;
+    if (S.visuals && st.version !== S.visuals.version) { S.visuals.version = st.version; toast('New visuals arrived.'); route(); }
+  }
+  api('GET', '/api/admin/visuals').then(showStatus).catch(() => {});
+  return el('div', { class: 'stack' }, el('div', { class: 'row between' }, el('span', { class: 'lab', text: 'Visual on Home' }), nowShowing),
+    chips,
+    el('div', { style: 'border:1px solid var(--line2);line-height:0' }, preview),
+    el('div', { class: 'row between', style: 'gap:8px' }, status, check));
 }
 
 // Every profile, what it may do, and adding another.
@@ -2224,7 +2296,7 @@ function connectionsCard(groups, reload, inFile) {
       const fields = g.fields.map((f) => {
         const secret = f.kind === 'secret';
         const input = f.kind === 'toggle' ? el('select', {}, el('option', { value: 'on', text: 'On', selected: f.value === 'on' }), el('option', { value: 'off', text: 'Off', selected: f.value !== 'on' }))
-          : el('input', { type: secret ? 'password' : (f.kind === 'url' ? 'url' : 'text'), inputmode: f.kind === 'number' ? 'numeric' : null, autocomplete: secret ? 'new-password' : 'off', value: f.value,
+          : el('input', { type: secret ? 'password' : (f.kind === 'url' ? 'url' : 'text'), inputmode: f.kind === 'number' ? 'numeric' : f.kind === 'coordinate' ? 'decimal' : null, autocomplete: secret ? 'new-password' : 'off', value: f.value,
             placeholder: secret ? (f.set ? 'Saved. Type a new one to replace it' : '') : (f.kind === 'url' ? 'http://' : '') });
         inputs[f.name] = input;
         const where = f.source === 'here' ? 'Saved here' : f.source === 'file' ? 'In the .env file' : (f.source === 'env' ? 'From the .env file' : (f.source === 'default' ? 'Usual setting' : 'Not set'));

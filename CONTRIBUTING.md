@@ -1,6 +1,17 @@
 # Contributing to Family Hub
 
-Thanks for helping. Small, focused changes are the easiest to review.
+Family Hub is built and looked after by two people, for their own household
+first. Only they push to the `master` branch. Everyone is welcome to use it,
+fork it and change their own copy.
+
+The most useful help from anyone else is an **issue**: something that does
+not work, a guide that is unclear, or an idea (the **Issues** tab, then
+**New issue**). Never paste your `.env`, passwords, API keys or a setup file
+into an issue; issues are public.
+
+Pull requests are read, but please open an issue first so nobody spends time
+on something that will not be merged. Small, focused changes are the easiest
+to review.
 
 ## Ways to help
 
@@ -34,14 +45,15 @@ The demo library is rebuilt whenever the `demo` folder is missing.
 | `app/bookhub/integrations.py` | Prowlarr, qBittorrent, Hardcover |
 | `app/bookhub/media.py` | Films and TV: Radarr, Sonarr, Bazarr, Jellyfin, the VPN, Connect everything |
 | `app/bookhub/mediasort.py` | Films and TV to sort: recognising videos already on the disk, filing them, deleting spare copies |
-| `app/bookhub/looks.py` | The design's colour schemes, accent and Scope modes, and the household's choice |
+| `app/bookhub/looks.py` | The design's colour schemes, accent and visual on Home, and the household's choice |
+| `app/bookhub/visuals.py` | The visuals on Home: the built-in ones, checking a GitHub repository for new ones, and the sealed frame they run in |
 | `app/bookhub/librarymanager.py` | Signing in to the library manager to merge or delete books |
 | `app/bookhub/duplicates.py` | Spare copies of a book, and the library backup before changes |
 | `app/bookhub/bookfix.py` | Books without real details: clues from the files, catalogue matches, the change through the library manager |
 | `app/bookhub/secondcopy.py` | The nightly copy to a second disk |
 | `app/bookhub/series.py` | Series by chapter (Suwayomi) |
 | `app/bookhub/settings.py` | Admin → Hub → Connections: values saved in the app |
-| `app/bookhub/static/` | The web pages: plain HTML, CSS and JavaScript, no build step. `looks/minimalist/` holds the design's stylesheets, `setpieces.js` the Scope |
+| `app/bookhub/static/` | The web pages: plain HTML, CSS and JavaScript, no build step. `looks/minimalist/` holds the design's stylesheets, `setpieces.js` the screen-change scan, `visuals/` the built-in visuals, their libraries and `frame.js` |
 | `tests/test_app.py` | Tests that run the whole app against the demo library |
 
 ## Ground rules

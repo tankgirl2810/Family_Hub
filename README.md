@@ -22,7 +22,7 @@ own small database and backed up to a plain file every day.
 | Area | What you get |
 |---|---|
 | Tidying | Books without real details: reads files for an ISBN, finds the real title and author in Open Library and Google Books. Films and TV to sort: recognises videos already on the disk, files them, deletes spare copies |
-| Look | The Minimalist Family Hub design in four colour schemes (Dark, Light, Paper, Blueprint), an accent colour, the Scope on Home and a screen-change scan. An admin picks them for the whole household |
+| Look | The Minimalist Family Hub design in four colour schemes (Dark, Light, Paper, Blueprint), an accent colour, a different animated visual on Home each day (built in, or from your own GitHub repository) and a screen-change scan. An admin picks them for the whole household |
 | Films and TV | Browse what is on the server, request films and shows (whole series, latest season or chosen seasons), see downloads with who asked, admins can pick a release by hand or remove a title. One button connects Radarr, Sonarr, Prowlarr, qBittorrent, Bazarr and Jellyfin. Guide 14 |
 | VPN | qBittorrent has no internet except through the VPN (gluetun, ProtonVPN by default), so nothing downloads over your own connection |
 | Subtitles | Bazarr fetches English subtitles, forced ones too |
@@ -84,6 +84,7 @@ both, and how two people can work on the code together.
 13. [Graphic novels, manga and series by chapter](docs/13-manga-and-series-by-chapter.md)
 14. [Films, TV shows, subtitles and the VPN](docs/14-films-tv-and-the-vpn.md)
 15. [What you need to get, and where it goes](docs/15-what-you-need.md)
+16. [Visuals on Home](docs/16-visuals-on-home.md)
 
 ## How the pieces fit
 

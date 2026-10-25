@@ -1,0 +1,26 @@
+name: Something is not working
+description: Report a bug or a problem with the guides.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Please never paste your `.env` file, passwords, API keys or a setup file here: issues are public.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where
+      description: The page or guide, the computer (Windows, Linux, macOS), and which programs were running (for example Radarr, qBittorrent).
+  - type: textarea
+    id: log
+    attributes:
+      label: Messages or log
+      description: Any error shown on the page, or the last lines of `docker logs bookhub`. Check it holds no passwords or keys first.
+      render: text

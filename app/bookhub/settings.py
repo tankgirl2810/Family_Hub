@@ -82,6 +82,13 @@ GROUPS = [
      "Make the key in Jellyfin: Dashboard, API Keys, +.",
      [("jellyfin_url", "Jellyfin address (for Family Hub)", "url"), ("jellyfin_link", "Jellyfin address (in a browser)", "url"),
       ("jellyfin_api_key", "API key", "secret")]),
+    ("visuals", "Visuals on Home",
+     "The animated pictures at the top of Home. Family Hub ships with a set; to add your own, keep them in a public "
+     "GitHub repository (the visuals README says how) and give its name here as your-name/repository-name. It is "
+     "checked every hour. The home town is for the weather visual and the globe; find its latitude and longitude on a "
+     "map (south and west are negative). It is only ever sent to Open-Meteo for the forecast.",
+     [("visuals_repo", "GitHub repository (optional)", "text"), ("visuals_branch", "Branch (optional)", "text"),
+      ("home_place", "Home town", "text"), ("home_lat", "Latitude", "coordinate"), ("home_lon", "Longitude", "coordinate")]),
     ("logins", "Sign-in for the programs' own pages",
      "One user name and password for opening Radarr, Sonarr, Prowlarr, Bazarr and qBittorrent in a browser (the links under "
      "Admin, Hub, Programs). Family Hub itself uses their API keys. Press Connect everything after changing these: it sets "
@@ -116,6 +123,8 @@ ENV_NAMES = {
     "jellyfin_url": "JELLYFIN_URL", "jellyfin_link": "JELLYFIN_LINK", "jellyfin_api_key": "JELLYFIN_API_KEY",
     "gluetun_url": "GLUETUN_URL", "gluetun_api_key": "GLUETUN_API_KEY", "second_copy": "SECOND_COPY",
     "services_user": "SERVICES_USER", "services_pass": "SERVICES_PASSWORD",
+    "visuals_repo": "VISUALS_REPO", "visuals_branch": "VISUALS_BRANCH",
+    "home_place": "HOME_PLACE", "home_lat": "HOME_LAT", "home_lon": "HOME_LON",
 }
 SAVED_HEADER = "# --- Saved from Family Hub's Admin page ----------------------------------"
 PLAIN_VALUE = re.compile(r"[A-Za-z0-9_./:@+,=%-]*")
@@ -253,6 +262,14 @@ def clean(name, value):
             raise ValueError("Addresses start with http:// or https://")
     if value and FIELDS[name] == "number" and not (value.isdigit() and int(value) > 0):
         raise ValueError("Enter a whole number.")
+    if value and FIELDS[name] == "coordinate":
+        try:
+            number = float(value)
+        except ValueError:
+            raise ValueError("Latitude and longitude are numbers, such as -33.87 or 151.21.")
+        if not -180 <= number <= 180 or (name.endswith("lat") and not -90 <= number <= 90):
+            raise ValueError("Latitude is between -90 and 90, longitude between -180 and 180.")
+        value = ("%.4f" % number).rstrip("0").rstrip(".")
     if value and FIELDS[name] == "toggle":
         value = "on" if value.lower() in ("on", "yes", "true", "1") else "off"
     return value[:500]
@@ -337,6 +354,12 @@ def test(hub, group, values):
         return hub.catalogues.test(trial)
     if group == "cwa":
         return hub.manager.test(trial)
+    if group == "visuals":
+        from . import visuals
+        if not trial.visuals_repo:
+            return {"ok": True, "message": "No repository: the visuals that come with Family Hub are used."}
+        ok, message = visuals.check(trial.visuals_repo, trial.visuals_branch)
+        return {"ok": ok, "message": message}
     if group == "logins":
         if not (trial.services_user and trial.services_pass):
             return {"ok": False, "message": "Enter both the user name and the password."}

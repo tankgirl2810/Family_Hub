@@ -17,7 +17,7 @@ import requests
 from flask import Blueprint, Response, current_app, jsonify, request, send_file, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from . import bookfix, calibre, catalogues, covers, db, devices, duplicates, goodreads, integrations, kinds, kosync, looks, media, mediasort, readers, recommend, secondcopy, series, settings
+from . import bookfix, calibre, catalogues, visuals, covers, db, devices, duplicates, goodreads, integrations, kinds, kosync, looks, media, mediasort, readers, recommend, secondcopy, series, settings
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -211,9 +211,33 @@ def state():
         "kinds": kinds.KINDS,
         "device_kinds": devices.KINDS,
         "look": looks.current(h.con()),
+        # The visuals' version (so a new one from GitHub is fetched) and, for someone signed in, the home town.
+        "visuals": {"version": visuals.version(h),
+                    "place": _home_place(h) if who else None},
         "media": {"films": h.media.configured("film"), "shows": h.media.configured("show"),
                   "jellyfin": bool(h.config.jellyfin_url and h.config.jellyfin_api_key)},
     })
+
+
+def _home_place(h):
+    c = h.config
+    try:
+        return {"name": c.home_place, "lat": float(c.home_lat), "lon": float(c.home_lon)} if c.home_lat and c.home_lon else None
+    except ValueError:
+        return None
+
+
+@bp.get("/admin/visuals")
+@admin_only
+def admin_visuals(who):
+    return jsonify(visuals.status(hub()))
+
+
+@bp.post("/admin/visuals/check")
+@admin_only
+def admin_visuals_check(who):
+    """Look at the visuals repository now, instead of waiting for the hourly check."""
+    return jsonify(visuals.sync(hub(), force=True))
 
 
 @bp.post("/setup")

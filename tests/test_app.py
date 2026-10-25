@@ -1814,18 +1814,18 @@ def test_spare_copies_are_judged_and_removed_through_the_library_manager(app, cl
 def test_household_look_is_chosen_by_an_admin(app, client):
     login(client, "You")
     look = client.get("/api/state").get_json()["look"]
-    assert (look["design"], look["theme"], look["scene"], look["transition"], look["accent"]) == ("minimalist", "dark", "orbit", True, None)
+    assert (look["design"], look["theme"], look["scene"], look["transition"], look["accent"]) == ("minimalist", "dark", "daily", True, None)
     catalogue = client.get("/api/admin/look").get_json()["designs"]
     assert len(catalogue) == 1 and [s["id"] for s in catalogue[0]["schemes"]] == ["dark", "light", "paper", "blueprint"]
     assert all(all(s["swatch"]) for s in catalogue[0]["schemes"])
-    assert client.post("/api/admin/look", json={"theme": "blueprint", "scene": "loops", "accent": 150, "transition": False}).status_code == 200
+    assert client.post("/api/admin/look", json={"theme": "blueprint", "scene": "live-sky", "accent": 150, "transition": False}).status_code == 200
     look = client.get("/api/state").get_json()["look"]
-    assert (look["theme"], look["scene"], look["accent"], look["transition"]) == ("blueprint", "loops", 150, False)
+    assert (look["theme"], look["scene"], look["accent"], look["transition"]) == ("blueprint", "live-sky", 150, False)
     page = client.get("/").get_data(as_text=True)
     assert 'data-design="minimalist" data-theme="blueprint" data-accent="custom" style="--accent-h:150"' in page
     assert "/static/looks/minimalist/bundle.css" in page and "family=Archivo" in page
     # A bad value changes nothing, not even the good values sent with it.
-    for bad in ({"theme": "vesper"}, {"scene": "feast"}, {"accent": 360}, {"accent": "teal"}, {"accent": True}):
+    for bad in ({"theme": "vesper"}, {"scene": "../etc"}, {"scene": 5}, {"accent": 360}, {"accent": "teal"}, {"accent": True}):
         assert client.post("/api/admin/look", json=dict(bad, transition=True)).status_code == 400, bad
     assert client.get("/api/state").get_json()["look"]["transition"] is False
     # The design's own purple is no accent at all, as is a reset.
@@ -2903,3 +2903,89 @@ def test_connect_everything_gives_each_program_the_same_sign_in(app, client, med
     # Radarr and Sonarr are told qBittorrent's new sign-in in the same run.
     fields = {f["name"]: f.get("value") for f in media_servers.arr["radarr"]["downloadclient"][0]["fields"]}
     assert fields["password"] == "Shared-pw-1!"
+
+
+def test_visuals_run_in_a_sealed_frame_with_their_libraries(app, client):
+    page = client.get("/visuals/builtin/frame.html")
+    assert page.status_code == 200 and "frame-ancestors 'self'" in page.headers["Content-Security-Policy"]
+    html = page.get_data(as_text=True)
+    for script in ("node_modules/d3/dist/d3.min.js", "visuals/weather.js", "visuals/live-sky.js", "daily.js", "frame.js"):
+        assert '<script src="%s">' % script in html
+    assert html.index("node_modules/d3") < html.index("visuals/cells.js") < html.index("frame.js")
+    land = client.get("/visuals/builtin/node_modules/world-atlas/land-110m.json")
+    assert land.status_code == 200 and land.headers["Access-Control-Allow-Origin"] == "*"
+    weather = client.get("/visuals/builtin/visuals/weather.js").get_data(as_text=True)
+    assert "HUB_PLACE" in weather and "Brisbane" not in weather  # no household's town in the shared files
+    for bad in ("/visuals/builtin/../api/state", "/visuals/builtin/visuals/..%2f..%2fapi.py", "/visuals/builtin/api.py",
+                "/visuals/0123456789ab/frame.html", "/visuals/builtin/node_modules/../../visuals.py"):
+        assert client.get(bad).status_code == 404, bad
+    # Signed in, the page is told the visuals' version and the home town (from .env) to hand to the frame.
+    app.hub.config.home_place, app.hub.config.home_lat, app.hub.config.home_lon = "Home", "51.5", "-0.12"
+    assert client.get("/api/state").get_json()["visuals"]["place"] is None  # nobody signed in yet
+    login(client, "Nan")
+    v = client.get("/api/state").get_json()["visuals"]
+    assert v == {"version": "builtin", "place": {"name": "Home", "lat": 51.5, "lon": -0.12}}
+
+
+def test_new_visuals_are_picked_up_from_github(app, client, monkeypatch):
+    import io
+    import zipfile
+    from bookhub import settings, visuals
+    sha = "abcdef0123456789abcdef0123456789abcdef01"
+    files = {"visuals/sea.js": "VISUALS.push({id:'sea'})", "visuals/notes.txt": "x", "lib/extra.js": "var X=1",
+             "daily.js": "function visualForDay(v){return v[0]}", "index.html": "<html>", "node_modules/big.js": "x",
+             "visuals/../../escape.js": "bad"}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, text in files.items():
+            z.writestr("repo-%s/%s" % (sha, name), text)
+    asked = []
+
+    class Answer:
+        def __init__(self, status, body=None, raw=b""):
+            self.status_code, self._body = status, body
+            self.raw = type("Raw", (), {"read": lambda _self, n, decode_content=False: raw[:n]})()
+
+        def json(self):
+            return self._body
+
+    def fake_get(url, headers=None, timeout=None, stream=False):
+        asked.append(url)
+        if url.endswith("/commits/HEAD"):
+            return Answer(200, {"sha": sha}) if "family/visuals" in url else Answer(404, {})
+        if "codeload.github.com" in url:
+            return Answer(200, raw=buf.getvalue())
+        return Answer(404)
+    monkeypatch.setattr(visuals.requests, "get", fake_get)
+    login(client, "You")
+    assert client.get("/api/admin/visuals").get_json()["source"] == "builtin"
+    with app.app_context():
+        settings.save(app.hub, {"visuals_repo": "family/visuals", "home_lat": "-33.87", "home_lon": "151.21"})
+        with pytest.raises(ValueError):
+            settings.save(app.hub, {"home_lat": "95"})
+    st = client.post("/api/admin/visuals/check").get_json()
+    assert (st["source"], st["version"], st["count"], st["error"]) == ("github", sha[:12], 1, "")
+    kept = sorted(p.relative_to(Path(app.hub.config.data_dir) / "visuals" / sha[:12]).as_posix()
+                  for p in (Path(app.hub.config.data_dir) / "visuals" / sha[:12]).rglob("*") if p.is_file())
+    assert kept == ["daily.js", "lib/extra.js", "visuals/sea.js"]  # nothing else from the repository
+    html = client.get("/visuals/%s/frame.html" % sha[:12]).get_data(as_text=True)
+    assert html.index('src="lib/extra.js"') < html.index('src="visuals/sea.js"')
+    assert client.get("/api/state").get_json()["visuals"]["version"] == sha[:12]
+    # Checked again within the hour: GitHub is not asked; pressing the button asks, and nothing changed.
+    n = len(asked)
+    with app.app_context():
+        visuals.sync(app.hub)
+    assert len(asked) == n
+    client.post("/api/admin/visuals/check")
+    assert not any("codeload" in u for u in asked[n:])
+    # A repository that is not there keeps the visuals already in use, and says why.
+    with app.app_context():
+        settings.save(app.hub, {"visuals_repo": "family/gone"})
+    st = client.post("/api/admin/visuals/check").get_json()
+    assert st["version"] == sha[:12] and "no public repository family/gone" in st["error"]
+    # No repository at all: back to the built-in visuals.
+    with app.app_context():
+        settings.save(app.hub, {"visuals_repo": ""})
+    assert client.post("/api/admin/visuals/check").get_json()["source"] == "builtin"
+    login(client, "Nan")
+    assert client.post("/api/admin/visuals/check").status_code == 403
