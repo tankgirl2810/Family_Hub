@@ -13,6 +13,23 @@ TAG_WEIGHTS = {"family": 3, "mine": 3, "community": 2, "epub": 1}
 SAME_AUTHOR_WEIGHT = 2
 
 
+
+def _grouped(finished):
+    """Recently finished, with the volumes of one series read one after another as a single line."""
+    out = []
+    for item in finished:
+        last = out[-1] if out else None
+        if item["series"] and last and last["series"].lower() == item["series"].lower() and last.get("parts") is not None:
+            last["parts"].append(item["part"])
+            continue
+        out.append(dict(item, parts=[item["part"]]) if item["series"] and item["part"] else dict(item, parts=None))
+    for g in out:
+        if g["parts"] and len(g["parts"]) > 1:
+            g["title"] = g["series"]
+            g["id"] = None
+            g["volumes"] = len(g["parts"])
+    return out
+
 class Hub:
     def __init__(self, config):
         self.config = config
@@ -265,16 +282,22 @@ class Hub:
     # --------------------------------------------------------------- pages
 
     def fill_page_counts(self, limit=None):
-        """Estimate page counts for library EPUBs that do not have one yet."""
+        """Estimate page counts for library EPUBs, and count them for comics, where there is none yet."""
         con = self.con()
         done = 0
         for book in self.library.books():
             self.ensure_meta(book["key"])
             row = con.execute("SELECT pages FROM book_meta WHERE book_key=?", (book["key"],)).fetchone()
-            if row["pages"] or "EPUB" not in book["formats"]:
+            if row["pages"]:
                 continue
-            path = self.library.file_path(book, "EPUB")
-            pages = calibre.estimate_pages(path) if path else None
+            if "EPUB" in book["formats"]:
+                path = self.library.file_path(book, "EPUB")
+                pages = (calibre.estimate_pages(path) or calibre.count_pictures(path)) if path else None  # a comic EPUB is pictures
+            elif "CBZ" in book["formats"]:
+                path = self.library.file_path(book, "CBZ")
+                pages = calibre.count_pictures(path) if path else None
+            else:
+                continue
             if pages:
                 con.execute("UPDATE book_meta SET pages=? WHERE book_key=?", (pages, book["key"]))
                 done += 1
@@ -341,6 +364,7 @@ class Hub:
         year = year or date.today().year
         index = self.tag_index(profile_id)
         keys = self.library.keys()
+        kind_of = self.kind_index()
         this_month = date.today().month if year == date.today().year else 12
         months = [{"month": m, "library": 0, "outside": 0, "pages": 0} for m in range(1, this_month + 1)]
         finished, reading_now = [], []
@@ -349,9 +373,12 @@ class Hub:
         pages_total = 0
         for r in self.reading_rows(profile_id):
             in_library = r["book_key"] in keys
+            book = keys.get(r["book_key"]) or {}
             tags = index.get(r["book_key"], {})
             item = {
-                "book_key": r["book_key"], "title": r["title"] or r["book_key"], "author": r["author"] or "",
+                "book_key": r["book_key"], "title": book.get("title") or r["title"] or r["book_key"], "author": r["author"] or "",
+                "graphic": kind_of.get(r["book_key"]) == kinds.GRAPHIC,
+                "series": book.get("series") or "", "part": book.get("part") or "",
                 "status": r["status"], "percent": r["percent"], "started": r["started"], "finished": r["finished"],
                 "source": r["source"], "device": r["device"], "updated": r["updated"], "pages": r["pages"],
                 "in_library": in_library, "id": keys[r["book_key"]]["id"] if in_library else None,
@@ -376,10 +403,18 @@ class Hub:
         finished.sort(key=lambda i: i["finished"] or "", reverse=True)
         reading_now.sort(key=lambda i: i["updated"] or "", reverse=True)
         current = "%04d-%02d" % (year, this_month)
+        month = [i for i in finished if (i["finished"] or "").startswith(current)]
+        graphic = [i for i in finished if i["graphic"]]
         return {
             "year": year,
             "read_year": len(finished),
-            "read_month": sum(1 for i in finished if (i["finished"] or "").startswith(current)),
+            "read_books": len(finished) - len(graphic),
+            "books_library": sum(1 for i in finished if i["in_library"] and not i["graphic"]),
+            "read_graphic": len(graphic),  # volumes, each counted
+            "graphic_series": len({i["series"].lower() for i in graphic if i["series"]}),
+            "read_month": len(month),
+            "month_books": sum(1 for i in month if not i["graphic"]),
+            "month_graphic": sum(1 for i in month if i["graphic"]),
             "read_library": sum(1 for i in finished if i["in_library"]),
             "pages_year": pages_total,
             "pages_unknown": sum(1 for i in finished if not i["pages"]),
@@ -389,7 +424,7 @@ class Hub:
             "top": {g: tag_counts[g].most_common(8) for g in tag_counts},
             "authors": author_counts.most_common(8),
             "reading_now": reading_now,
-            "recent": finished[:8],
+            "recent": _grouped(finished)[:8],
         }
 
     def admin_stats(self):
@@ -656,8 +691,12 @@ class Hub:
     def sort_new_books(self, limit=None):
         """Guess a kind and franchise tags for library books not looked at yet."""
         con = self.con()
-        seen = set(self.kind_index())
-        todo = [b for b in self.library.books() if b["key"] not in seen]
+        sorted_by = {r["book_key"]: (r["kind"], r["source"]) for r in con.execute("SELECT book_key, kind, source FROM book_kind")}
+        # A book whose file the library manager has not filed yet waits: without its format a comic looks unsorted.
+        # One guessed Unsorted that turns out to be all comic files is guessed again.
+        todo = [b for b in self.library.books() if b["formats"] and (
+            b["key"] not in sorted_by
+            or (sorted_by[b["key"]] == (kinds.UNSORTED, "auto") and set(b["formats"]) <= kinds.COMIC_FORMATS))]
         if not todo:
             return 0
         by_size, by_name = self._origins()
@@ -695,10 +734,20 @@ def start_background(hub, app):
                         hub.load_tagpacks()
                         kosync.index_library(hub)
                         hub.fill_page_counts(limit=200)
+                        try:  # joined series books a reading app reported progress in before they were recorded
+                            from . import joined
+                            if tick == 0:
+                                joined.record_existing(hub)
+                            joined.adopt(hub)
+                        except Exception as exc:
+                            app.logger.warning("could not match reading-app progress in joined books: %s", exc)
                     hub.intake.tidy_inbox()
                     hub.import_downloads()
                     hub.ingest_stuck = hub.intake.nudge_stuck()
                     hub.sort_new_books(limit=500)
+                    if tick % 10 == 5:  # followed series by chapter, joined into comic files as chapters arrive
+                        from . import chapterfile
+                        chapterfile.start(hub, app)
                     if tick % 10 == 3:
                         goodreads.reconcile(hub)  # books that were only on Goodreads and have now arrived
                     hub.devices.send_queued()
@@ -715,6 +764,11 @@ def start_background(hub, app):
                             hub.media.sync_vpn_port()
                         except Exception as exc:
                             app.logger.warning("could not pass the VPN's port to qBittorrent: %s", exc)
+                    try:  # a few watchlist entries that are due another look (each every six hours)
+                        from . import watchlist
+                        watchlist.run(hub)
+                    except Exception as exc:
+                        app.logger.warning("could not check the watchlists: %s", exc)
                     try:  # new visuals from the household's GitHub repository, checked hourly
                         from . import visuals
                         visuals.sync(hub)

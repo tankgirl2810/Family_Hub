@@ -1,7 +1,7 @@
 # 10. Tags
 
-Every book can carry four sorts of tag. The Library's **Search tags** box
-searches whichever of them you switch on.
+Every book can carry four sorts of tag. The Library's search box finds books
+by any of them (see "Searching the library" below).
 
 | Sort | Where it comes from | Who can change it |
 |---|---|---|
@@ -9,6 +9,64 @@ searches whichever of them you switch on.
 | Community tags | Public book catalogues and shared tag packs | Admins can hide or rename them |
 | Family tags | Typed by the family; a few are added automatically for series such as "Star Trek" | Admins and anyone allowed to edit family tags |
 | My tags | Typed by you | Only you; nobody else sees them |
+
+## Searching the library
+
+You build a search, then press **Search**. Until you do, the books shown stay
+as they were, and a note says the search has changed.
+
+Plain words typed in the box are looked for in the places switched on under
+it: **Title**, **Author**, **Series** and **Tag**. **Enter** keeps what you typed
+as terms, shown as chips under the box (Search keeps them too).
+
+Under the chips are the tags you can pick from the part of the library you
+are in, the most used first (**All tags** shows the rest, and typing narrows
+the list). First choose how a tag you click counts under **Add tags as**:
+**+ Must have**, **− Must not have** or **∨ Any of these**, then click tags to
+add them. A tag already in the search shows pressed; clicking it
+again takes it out. Each chip says what it is and has its own colour:
+
+| Chip | Colour |
+|---|---|
+| Title | olive |
+| Author | blue |
+| Series | indigo |
+| Genre (book file tags) | brown |
+| Community | coral |
+| Family | green |
+| Mine | plum |
+
+You can type more than words (**How to type a search**, under the tags,
+says the same):
+
+- `cafe in science fiction`: "cafe" in the title (or wherever is switched on),
+  tagged Science fiction. `in` takes the words up to the next keyword as a tag.
+- `by Ursula Le Guin`: an author.
+- `+word` must match, `-word` or `not word` must not.
+- `dragon OR wyvern`: either will do.
+- `"book cafe"`: these words together, in this order.
+- `mag*`: any ending (magic, magician, Magus).
+
+The sign at the front of a chip says how it counts. Click it to cycle through
+**+** (must match), **−** (must not) and **∨ or** (one of the "or" chips will
+do), and click **×** to take the chip away. All + chips must match, except
+that two of the same kind (two authors, two Family tags) mean "either".
+
+At the top of the page, beside **Books** and **Graphic novels**, are the tabs
+for that part: All, Fiction, Non-fiction, Tabletop and Unsorted for Books, and
+All, Series and One-shots for Graphic novels. They change the books straight
+away, without pressing Search, and the search covers the tab you are on.
+
+## Tags and a rating for a whole series
+
+A series' own page has **My rating of the whole series**, and family tags
+and personal tags for the series. A series followed chapter by chapter has
+them too, on its page (guide 13). They are kept apart from each volume's own
+tags and rating, but they count for every volume: a search for a series tag
+finds every volume in it, and each volume's page shows them under **From the
+whole series**, with the series rating where you have not rated the volume
+itself. The series card shows your series rating and the average of your
+volume ratings.
 
 ## Book file tags are tidied
 

@@ -147,13 +147,33 @@ details .steps { margin-top: 12px; }
 /* A visual at the top of Home, in its sandboxed frame: the 800 x 340 canvas, scaled to the width. */
 .visual-frame { display: block; width: 100%; aspect-ratio: 800 / 340; border: 0; background: var(--bg); }
 /* A visual's modes, as a small square switch in the header cell; the pressed side is solid ink. */
-.seg { display: inline-flex; border: 1px solid var(--ink); }
-.seg[hidden] { display: none; }
-.seg button { padding: 3px 9px 2px; border: 0; background: transparent; color: var(--ink); font: inherit; letter-spacing: inherit;
+.seg.mini { display: inline-flex; border: 1px solid var(--ink); }
+.seg.mini[hidden] { display: none; }
+.seg.mini button { padding: 3px 9px 2px; border: 0; background: transparent; color: var(--ink); font: inherit; letter-spacing: inherit;
   text-transform: inherit; cursor: pointer; }
-.seg button + button { border-left: 1px solid var(--ink); }
-.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
-.seg button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.seg.mini button + button { border-left: 1px solid var(--ink); }
+.seg.mini button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.seg.mini button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+/* A row of switches in the design's tab style (Books / Graphic novels, Fiction..., Personal / My books):
+   square, in the label font, and the chosen one solid ink. .sm is the smaller row that sits under or inside. */
+.tabs { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--ink); align-self: flex-start; }
+.tabs > a, .tabs > button { display: inline-flex; align-items: center; min-height: 36px; padding: 0 16px; border: 1px solid transparent;
+  border-radius: 0; background: transparent; color: var(--dim); font-family: var(--font-label); font-stretch: 75%; font-weight: 600;
+  font-size: 13px; letter-spacing: .05em; text-transform: uppercase; text-decoration: none; cursor: pointer; }
+.tabs > a:hover, .tabs > button:hover { color: var(--ink); border-color: var(--line2); }
+.tabs > a[aria-current], .tabs > button[aria-pressed="true"], .tabs > button[aria-checked="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.tabs > :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tabs.sm { border-color: var(--line2); padding: 3px; gap: 3px; }
+.tabs.sm > a, .tabs.sm > button { min-height: 30px; padding: 0 12px; font-size: 12px; }
+
+/* The library: which part and kind along the top, then the search panel. */
+.lib-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.lib-search { gap: 12px; }
+.lib-opt { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.lib-opt > .lab { min-width: 92px; }
+.lib-search details summary { cursor: pointer; width: max-content; }
+.lib-search details p { margin: 6px 0 0; max-width: 80ch; }
 
 /* Downloads → Speed: one slider from fastest to slowest. */
 .speed-now { font-size: 18px; }
@@ -173,3 +193,52 @@ details .steps { margin-top: 12px; }
 .key .k-down { background: var(--accent); }
 .key .k-up { background: var(--dim); }
 .key .k-limit { border-top: 1px dashed var(--ink); height: 0; }
+
+/* Book cards line up across a row whatever their titles and tags: every card in a row is as tall as the
+   tallest, each line has a fixed height (longer text is cut with "…", the whole of it on hover), and the
+   buttons sit at the very bottom. */
+.shelf { align-items: stretch; }
+.book { height: 100%; }
+.book .card-title { font-weight: 600; line-height: 1.3; min-height: 2.6em; display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; overflow: hidden; }
+.book .card-line { line-height: 1.4; min-height: 1.4em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.book .card-tags { display: flex; gap: 6px; align-items: center; min-height: 1.4em; overflow: hidden; white-space: nowrap; }
+.book .card-tags .lab { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.book .card-tags .more { flex: none; font-size: 11px; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; }
+.book .card-rating { min-height: 2.8em; }
+.book .card-foot { margin-top: auto; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; padding-top: 4px; }
+.book .badge { align-self: flex-start; font-size: 11px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; }
+
+/* The library search's chips, one colour per kind of term. The colour is a stripe and a light tint; the
+   words stay in the page's ink, and every chip also says what kind it is, so colour is never the only clue.
+   Checked (2026-10-26): every pair tells apart with full colour vision (OKLab difference at least 15), each
+   colour has 3:1 against the page and the chip, words on the chip 9:1 or more. No seven colours stay apart for
+   every kind of colour blindness, which is why the kind is also written on each chip. */
+:root, [data-theme="dark"] {
+  --c-title: #969c00; --c-author: #389ed1; --c-series: #425ebc; --c-epub: #995100;
+  --c-community: #e26462; --c-family: #007a58; --c-mine: #ab3f97;
+}
+[data-theme="light"], [data-theme="paper"], [data-theme="blueprint"] {
+  --c-title: #888b00; --c-author: #0094b4; --c-series: #2752c7; --c-epub: #895000;
+  --c-community: #e4535e; --c-family: #00744e; --c-mine: #7d4986;
+}
+.terms { display: flex; flex-wrap: wrap; gap: 8px; }
+.term { --c: var(--c-title); display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 4px 0 0;
+  border: 1px solid var(--c); border-left-width: 5px; background: color-mix(in srgb, var(--c) 4%, var(--panel)); color: var(--ink); font-size: 13px; }
+.term.draft { border-style: dashed; border-left-style: solid; }
+.term .kind { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; padding-left: 4px; }
+.term .val { font-weight: 600; }
+.term button { min-width: 30px; min-height: 30px; border: 0; background: transparent; color: var(--ink); cursor: pointer; font: inherit; font-weight: 700; }
+.term .sign { border-right: 1px solid var(--c); }
+.term.minus .val { text-decoration: line-through; }
+.term[data-k="title"] { --c: var(--c-title); } .term[data-k="author"] { --c: var(--c-author); }
+.term[data-k="series"] { --c: var(--c-series); } .term[data-k="epub"] { --c: var(--c-epub); }
+.term[data-k="community"] { --c: var(--c-community); } .term[data-k="family"] { --c: var(--c-family); }
+.term[data-k="mine"] { --c: var(--c-mine); } .term[data-k="tag"] { --c: var(--line2); }
+.suggest .term { cursor: pointer; padding-right: 10px; min-height: 30px; font-size: 12.5px; }
+.suggest .term:hover { background: color-mix(in srgb, var(--c) 14%, var(--panel)); }
+.suggest .term[aria-pressed="true"] { background: color-mix(in srgb, var(--c) 22%, var(--panel)); }
+.suggest .btn.sm, .terms .btn.sm { min-height: 30px; }
+
+/* The library's Search button when the query has changed since the last search. */
+.btn.attn { outline: 3px solid var(--accent); outline-offset: 2px; }

@@ -524,7 +524,14 @@ class Media:
             had = sorted({x["where"] for x in lines if x["n"] > 0})
             now["sites"] = "Asked %d site%s · %s" % (len(asked), "" if len(asked) == 1 else "s",
                                                     "%d had something (%s)" % (len(had), ", ".join(had)) if had else "none had it")
-        return {"title": title, "steps": steps, "finished": bool(done), "now": now}
+        # Downloaded but not filed yet: every download for it has finished, and Radarr or Sonarr still has to move
+        # it into the library. The corner pop-up shows this as done, with a note, so nothing looks still under way.
+        fetched = [q for q in queue if (q.get("status") or "").lower() == "completed" or ((q.get("size") or 0) and not q.get("sizeleft"))]
+        pending = [q for q in queue if q not in fetched]
+        downloaded = bool(not done and fetched and not pending)
+        stuck = downloaded and any((q.get("trackedDownloadStatus") or "").lower() in ("warning", "error") for q in fetched)
+        return {"title": title, "steps": steps, "finished": bool(done), "now": now,
+                "downloaded": downloaded, "filing": ("stuck" if stuck else "filing") if downloaded else None}
 
     def lookup(self, kind, term):
         arr = self.arr(kind)
@@ -1104,7 +1111,7 @@ class Media:
         if self._book_filed(title):
             return {"title": title, "finished": True, "now": {"text": "In the library", "state": "done", "progress": 100}}
         if t:
-            return {"title": title, "finished": False,
+            return {"title": title, "finished": False, "downloaded": True, "filing": "filing",
                     "now": {"text": "Downloaded · being added to the library", "state": "active", "progress": 95}}
         return {"title": title, "finished": False,
                 "now": {"text": "Sent to qBittorrent · waiting for it to start", "state": "wait", "progress": 5}}

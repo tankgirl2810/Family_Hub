@@ -22,6 +22,10 @@ client Prowlarr supports will work.
 
 Skip this if the home server already runs Prowlarr; use that one.
 
+Sites match whole words exactly, so Discover asks for a few spellings at once: as typed, without accents
+and apostrophes ("Savior's Café" and "Saviors Cafe"), and for a long title without its first word or two.
+Webtoons and manhwa are rarely on these sites at all; follow them chapter by chapter instead (guide 13).
+
 ```bash
 docker compose --profile search up -d
 ```
@@ -98,7 +102,18 @@ page wins over `.env`; removing it goes back to the `.env` value.
    the library stays there; delete it from its page).
 3. When the download finishes, Family Hub copies the file to the import folder
    (checked every minute) and the library manager adds it. It then appears
-   in the Library for everyone.
+   in the Library for everyone. A file qBittorrent is still downloading is
+   left alone, even when the torrent has stalled and the file looks full
+   size, so a half-finished volume never reaches the library. A file the library
+   already has, byte for byte, is not added again: it is noted in the import
+   log (from the inbox it goes to the "needs attention" folder instead).
+
+If series by chapter is switched on (guide 13), the same search also asks the
+series server's reading sites, such as Webtoon. What they find appears under
+**Series on reading sites**, above the torrent results. **Follow** keeps
+every chapter on the server. Above the search box, **Books and novels** leaves the
+reading sites out, and **Also manga and webcomic sites** asks them too. The
+choice is remembered on that device for your profile.
 
 Who can do this: admins and members. Restricted profiles cannot.
 

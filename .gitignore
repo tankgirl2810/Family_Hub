@@ -4,6 +4,8 @@
 .env.before-restore
 # A setup file (Admin, Hub, Setup file) holds every password, even though it is locked.
 family-hub-setup-*.zip
+# Its readable notes list every password; unpacked with 7-Zip they land in this folder.
+SETUP-NOTES.txt
 stack/
 demo/
 backups/

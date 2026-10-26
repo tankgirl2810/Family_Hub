@@ -54,6 +54,24 @@ def allow(hub, profile_id, on):
 
 def forget_profile(hub, profile_id):
     allow(hub, profile_id, True)
+    con = hub.con()
+    con.execute("DELETE FROM kv WHERE key=?", ("series:mine:%d" % profile_id,))
+    con.commit()
+
+
+def my_books(hub, profile_id):
+    """Series followed chapter by chapter that a person put in My books, for their reading app (opds.py)."""
+    try:
+        return [int(i) for i in json.loads(db.kv_get(hub.con(), "series:mine:%d" % profile_id) or "[]")]
+    except (ValueError, TypeError):
+        return []
+
+
+def set_my_book(hub, profile_id, series_id, on):
+    ids = [i for i in my_books(hub, profile_id) if i != series_id]
+    if on:
+        ids.insert(0, series_id)
+    db.kv_set(hub.con(), "series:mine:%d" % profile_id, json.dumps(ids))
 
 
 def _series(m):

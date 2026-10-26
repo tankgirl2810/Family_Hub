@@ -23,7 +23,7 @@ sample reading history. Delete that folder to start again from scratch.
 
 Things worth trying:
 
-- Library → type `slow` in **Search tags**, switch tag sources on and off.
+- Library → choose **− Must not have**, click the tag `slow`, then press **Search**.
 - Open a book → add a family tag, add a personal tag, give it stars.
 - Dashboard → click a filter chip, then switch between Books and Pages.
 - Admin → Books → **Back up now**, then **Download book data**.

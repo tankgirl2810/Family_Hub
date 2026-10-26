@@ -49,6 +49,10 @@ The demo library is rebuilt whenever the `demo` folder is missing.
 | `app/bookhub/visuals.py` | The visuals on Home: the built-in ones, checking a GitHub repository for new ones, and the sealed frame they run in |
 | `app/bookhub/librarymanager.py` | Signing in to the library manager to merge or delete books |
 | `app/bookhub/duplicates.py` | Spare copies of a book, and the library backup before changes |
+| `app/bookhub/watchlist.py` | The watchlist: checking authors, films and shows people are waiting for, and getting coming ones by themselves |
+| `app/bookhub/search.py` | The library search: terms with +, − and "or", which fields they look in, and how they combine |
+| `app/bookhub/chapterfile.py` | Series followed chapter by chapter, joined into comic files (CBZ) with a chapter list, in parts, as chapters arrive |
+| `app/bookhub/joined.py` | Joined series books: recording each one, and passing a reading app's progress in it on to the volumes or chapters |
 | `app/bookhub/bookfix.py` | Books without real details: clues from the files, catalogue matches, the change through the library manager |
 | `app/bookhub/secondcopy.py` | The nightly copy to a second disk |
 | `app/bookhub/series.py` | Series by chapter (Suwayomi) |

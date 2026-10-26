@@ -57,8 +57,42 @@ type your own to replace it.
    - Address: `http://<server>:8090/opds`
    - User name: your profile name, exactly as Family Hub shows it
    - Password: the sync password
-3. Open **My books** in the catalogue and download what you want. **Newest
-   in the family library** and search cover everything else.
+3. Open **My books** in the catalogue and download what you want. **The
+   whole family library** and search cover everything else.
+
+**Comic series are one book.** Graphic novels and manga kept as volumes (CBZ or CBR) are one entry in
+the catalogue. It downloads as one EPUB running from the first volume to the last, with a contents list
+entry for each volume, so the reading app's contents button jumps straight to any volume (the same pages
+as one CBZ file are offered too). Choosing any volume for My books brings the whole series. A series
+followed chapter by chapter comes the same way, with a contents entry per chapter, once you press **Add
+to my books** on its page. When a new volume arrives, the series
+comes again as a new, longer book; delete the shorter one in the reading app.
+
+A long series takes a few minutes to put together the first time. Until it is ready, My books lists it
+with "Being put together on the server" and nothing to download, and Readest's automatic download picks
+it up on a later check. **My books → Series for your reading app** shows each one: being put together
+(with how far along), waiting its turn, ready, or why it could not be made. The series card in the
+Library carries the same as a badge.
+
+Very large scans are shrunk to tablet size in this book. The files in the library are not changed. A
+series that would still be over about 1 GB comes in parts, such as "The Ancient Magus' Bride · Part 2
+(Volumes 5–9)", because a tablet's reading app cannot open a much bigger book. A volume is never split
+between parts, and a new volume only changes the last part. Series by chapter come in parts of 50
+chapters. A volume whose file is damaged is left out, and a whole copy of it is used if the library has
+one.
+
+**Progress in a joined book reaches its volumes.** Family Hub records every joined book it makes, so
+when Readest reports your place, the volume you are in gets that progress, the ones before it count as
+finished, and finishing the book finishes them all, with your reading stats counting each volume. For
+a series by chapter, the chapters you have passed are marked read on the series server.
+
+**Automatic downloads (Readest).** If the catalogue's automatic download is
+switched on, Readest downloads only **My books** by itself: press **Add to
+my books** in Family Hub and the book appears in Readest shortly after.
+Everything else downloads only when you tap it in the catalogue. (An older
+Family Hub pointed Readest at the whole library; if Readest already took
+every book, delete the unwanted ones in Readest, then remove and add the
+catalogue again so it starts fresh.)
 4. Set up progress sync as in [guide 4](04-syncing.md).
 
 On an iPad, the first time Readest contacts a server on your home network

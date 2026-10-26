@@ -35,7 +35,7 @@ own small database and backed up to a plain file every day.
 | Inbox | Drop in files, folders or archives; books are passed to the library and anything unusable is set aside with a reason |
 | Tags | Tags from the book file with the clutter removed, community tags from Open Library, Wikidata, Comic Vine (for comics) and shared tag packs, family tags, private personal tags; one search across all four; admins can hide or rename tags |
 | Ratings | 1 to 5 stars per profile, with the rest of the family's ratings shown, and the average from readers at large (Goodreads or Open Library) on every card |
-| Dashboard | Books read, this month, pages, authors, a monthly trend you can filter by tag or author; an admin view of the library and family |
+| Dashboard | Books and graphic novels read (counted apart), this month, pages, authors, a monthly trend you can filter by tag or author; an admin view of the library and family |
 | Recommendations | "Similar books" from shared tags and authors; unread library books ordered by what you have enjoyed; a weekly list of books the library lacks, with a button to find each one |
 | Discover | Search your Prowlarr indexers, send a result to your torrent client, follow authors and tags |
 | Connections | Enter and test every address, key and password (Prowlarr, qBittorrent, Radarr, Sonarr, Bazarr, Jellyfin, the VPN, mail, catalogues) under Admin → Hub → Connections; no file editing or restart. Guide 15 lists them all |
@@ -85,6 +85,7 @@ both, and how two people can work on the code together.
 14. [Films, TV shows, subtitles and the VPN](docs/14-films-tv-and-the-vpn.md)
 15. [What you need to get, and where it goes](docs/15-what-you-need.md)
 16. [Visuals on Home](docs/16-visuals-on-home.md)
+17. [The watchlist](docs/17-watchlist.md)
 
 ## How the pieces fit
 

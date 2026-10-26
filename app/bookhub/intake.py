@@ -9,6 +9,7 @@ Two sources are handled:
   * the inbox, which is Family Hub's to empty (files are moved), and
   * finished downloads, which belong to the torrent client (files are copied).
 """
+import filecmp
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +32,9 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 SIDECAR_EXTENSIONS = IMAGE_EXTENSIONS | {".opf", ".nfo", ".sfv", ".url", ".ini", ".db", ".diz", ".md5"}
 UNFINISHED_FOLDERS = {"incomplete", ".incomplete", "temp", "tmp", "downloading"}
 UNFINISHED_SUFFIXES = (".!qb", ".part", ".crdownload", ".download")
+# Formats that are zip files inside: a whole one starts with a zip header and ends with its table of contents.
+ZIP_FORMATS = {".epub", ".kepub", ".cbz", ".docx", ".odt", ".fbz", ".txtz", ".htmlz", ".zip"}
+EDGE = 65536  # bytes read at each end of a file to tell a whole one from one still being filled in
 PROCESSED = "_processed"  # inside the attention folder: originals whose contents went into the library
 MIN_COMIC_PAGES = 3
 
@@ -40,6 +44,7 @@ TWIN_EXTENSIONS = {".mobi", ".azw", ".azw3", ".azw4", ".prc", ".lit", ".lrf", ".
 
 NOT_A_BOOK = "Not a format the library can read"
 TWIN = "The same book as the EPUB beside it"
+ALREADY = "Already in the library: the very same file"
 EMPTY_ARCHIVE = "No books or comic pages inside this archive"
 CANNOT_OPEN = "Could not open this archive"
 
@@ -58,6 +63,45 @@ def _archive_tool():
         except (OSError, subprocess.SubprocessError):
             pass
     return None
+
+
+def looks_whole(path):
+    """False for a download that is visibly not finished. A torrent client can create a file at its full size
+    and fill it in piece by piece, so a stalled download looks finished by size and date: its missing pieces
+    are still blank, and a zip-based book (EPUB, CBZ) has no header or no table of contents yet."""
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            head = f.read(EDGE)
+            f.seek(max(0, size - EDGE))
+            tail = f.read(EDGE)
+    except OSError:
+        return False
+    if not head.strip(b"\0") or not tail.strip(b"\0"):
+        return False
+    if path.suffix.lower() in ZIP_FORMATS:
+        return head[:4] == b"PK\x03\x04" and zipfile.is_zipfile(path)
+    return True
+
+
+def unfinished_names(config):
+    """Names of the files the torrent client is still downloading. Empty when it cannot be asked."""
+    if not getattr(config, "qbit_url", ""):
+        return set()
+    import requests
+    from .integrations import IntegrationError, qbit_session
+    names = set()
+    try:
+        s = qbit_session(config)
+        for t in s.get(config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []:
+            if (t.get("progress") or 0) >= 1:
+                continue
+            for f in s.get(config.qbit_url + "/api/v2/torrents/files", params={"hash": t.get("hash")}, timeout=8).json() or []:
+                if (f.get("progress") or 0) < 1:
+                    names.add(Path(f.get("name") or "").name)
+    except (IntegrationError, requests.RequestException, ValueError):
+        return set()  # the other checks still stand
+    return names
 
 
 def _has_epub_twin(path):
@@ -82,6 +126,25 @@ class Intake:
         self._first_seen = {}  # import-folder files and when Family Hub first noticed them
 
     # ------------------------------------------------------------- helpers
+
+    def already_in_library(self, path):
+        """The library's copy when this file is byte for byte one the library already has, else None. The
+        library's files are fingerprinted already (kosync), so only a file of the same size and fingerprint is
+        compared in full."""
+        from .kosync import index_library, partial_md5
+        try:
+            size, digest = path.stat().st_size, partial_md5(path)
+        except OSError:
+            return None
+        index_library(self.hub)
+        for row in self.hub.con().execute("SELECT path FROM doc_hashes WHERE hash=?", (digest,)):
+            other = Path(row["path"])
+            try:
+                if other.stat().st_size == size and filecmp.cmp(path, other, shallow=False):
+                    return other
+            except OSError:
+                continue
+        return None
 
     def _log(self, name, origin, size, action, reason=""):
         self.hub.con().execute(
@@ -238,6 +301,9 @@ class Intake:
             ext = path.suffix.lower()
             if path in twins:
                 self._set_aside(path, rel, TWIN, folder=PROCESSED)
+            elif ext in BOOK_EXTENSIONS and self.already_in_library(path):
+                self._set_aside(path, rel, ALREADY)
+                result["attention"] += 1
             elif ext in BOOK_EXTENSIONS:
                 name = self._deliver(path, str(rel), move=True)
                 if name:
@@ -276,6 +342,7 @@ class Intake:
         con = self.hub.con()
         copied = []
         now = time.time()
+        busy = None  # asked of the torrent client once, and only if there is something new to look at
         for path in sorted(src.rglob("*")):
             ext = path.suffix.lower()
             if not path.is_file() or (ext not in DOWNLOAD_EXTENSIONS and ext not in ARCHIVE_EXTENSIONS):
@@ -287,6 +354,11 @@ class Intake:
                 continue
             if con.execute("SELECT 1 FROM imported_files WHERE path=?", (str(path),)).fetchone():
                 continue
+            # Not yet: a file still downloading (a stalled torrent stops changing it, so its age proves nothing).
+            if busy is None:
+                busy = unfinished_names(self.config)
+            if path.name in busy or not looks_whole(path):
+                continue
             if ext in ARCHIVE_EXTENSIONS:
                 delivered, problem = self._archive(path, str(rel), DOWNLOAD_EXTENSIONS, move=False)
                 if problem == CANNOT_OPEN:
@@ -294,14 +366,19 @@ class Intake:
             elif _has_epub_twin(path):
                 self._log(path.name, str(rel), path.stat().st_size, "skipped", TWIN)
                 delivered = []
+            elif self.already_in_library(path):
+                # Left where it is (it belongs to the torrent client) and noted, rather than copied in twice.
+                self._log(path.name, str(rel), path.stat().st_size, "skipped", ALREADY)
+                delivered = []
             else:
                 name = self._deliver(path, str(rel), move=False)
                 if not name:
                     continue
                 delivered = [name]
             con.execute("INSERT OR REPLACE INTO imported_files(path, at) VALUES(?,?)", (str(path), db.now()))
+            # Kept straight away: a run cut short (Family Hub stopped mid-batch) must never hand a file over twice.
+            con.commit()
             copied += delivered
-        con.commit()
         return copied
 
     # ------------------------------------------------------------ stalls

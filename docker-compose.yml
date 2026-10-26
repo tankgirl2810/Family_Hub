@@ -319,6 +319,10 @@ services:
     environment:
       - TZ=${TZ:-Etc/UTC}
       - DOWNLOAD_AS_CBZ=true
+      # Some sites' add-ons (Webtoon among them) are built in a way the server's converter loses type
+      # details from, and Java then refuses them with "VerifyError: Bad type on operand stack". The code
+      # itself is fine, so add-ons skip that check. The server's own code is still checked.
+      - JAVA_TOOL_OPTIONS=-XX:+UnlockDiagnosticVMOptions -XX:-BytecodeVerificationRemote
       # "none" leaves its own page open to anyone on the network. Set
       # SUWAYOMI_AUTH_MODE=basic_auth with a user name and password to close it.
       - AUTH_MODE=${SUWAYOMI_AUTH_MODE:-none}

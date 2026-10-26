@@ -128,6 +128,13 @@ def put_progress():
     con = hub.con()
     row = con.execute("SELECT book_key FROM doc_hashes WHERE hash=?", (document,)).fetchone()
     if not row:
+        # A series Family Hub joined into one book: the progress goes to the volumes or chapters in it.
+        from . import joined
+        found = joined.find(hub, document)
+        if found:
+            joined.apply(hub, profile["id"], found, round(percentage * 100, 2), str(data.get("device") or "")[:80],
+                         str(data.get("progress") or "")[:500])
+            return jsonify({"document": document, "timestamp": int(time.time())})
         index_library(hub)
         row = con.execute("SELECT book_key FROM doc_hashes WHERE hash=?", (document,)).fetchone()
     # Unknown files are still stored (under their hash) so the device keeps working.
@@ -146,6 +153,14 @@ def get_progress(document):
         return _unauthorized()
     con = current_app.hub.con()
     row = con.execute("SELECT book_key FROM doc_hashes WHERE hash=?", (document,)).fetchone()
+    if not row:
+        from . import joined
+        kept = joined.kept_progress(current_app.hub, profile["id"], document)
+        if kept:
+            from datetime import datetime, timezone
+            ts = int(datetime.strptime(kept["updated"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
+            return jsonify({"document": document, "percentage": kept["percent"] / 100.0, "progress": kept["progress"],
+                            "device": kept["device"], "device_id": "", "timestamp": ts})
     book_key = row["book_key"] if row else "doc:" + document
     r = con.execute(
         "SELECT * FROM reading WHERE book_key=? AND profile_id=?", (book_key, profile["id"])

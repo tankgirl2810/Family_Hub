@@ -64,7 +64,10 @@ download every new chapter of every followed series as a CBZ file. Its own
 defaults would skip a series while you still have unread chapters.
 
 Family Hub never adds a source list or a source itself. Which sites you use is
-your choice, and is made in the series server.
+your choice, and is made in the series server. If you read in Tachimanga, its
+extension repository address (Tachimanga: **More → Settings → Browse →
+Extension repos**) is the one to paste here; the same sites then work in
+Family Hub without Tachimanga.
 
 Without step 1 the series server's page is open to anyone on your home
 network, and it shows everything that is followed.
@@ -102,6 +105,21 @@ does it on demand.
 Each series card shows how many chapters have been read, how many are new,
 and how many are kept on the server so far.
 
+## One comic file for the whole series
+
+As soon as chapters are kept, Family Hub joins them into **one comic file (CBZ)** for the series, by
+itself, checking every ten minutes. Inside, each chapter is a folder of its own ("0003 Chapter 3"), and
+the file's ComicInfo.xml names the page each chapter starts on, so comic readers that read it show a
+chapter list. A long series comes in parts of 50 chapters ("Part 2 (Chapter 51 – Chapter 100)").
+
+- The series' page shows each part under **As comic files**: **Download CBZ** when it is ready, or
+  that it is waiting or being put together.
+- When new chapters arrive, only the last part is made again. While chapters are still downloading,
+  only full parts are made, so the last one is not rebuilt for every chapter.
+- The files are Family Hub's own, in `stack/bookhub/chapter-files`. The book library is not changed.
+- On the same page, **My rating of the whole series** and the family and personal tags for the series
+  work as for a series of volumes (guide 10).
+
 ## Reading in Tachimanga on an iPad
 
 Tachimanga reads from Komga through its Komga source.
@@ -121,6 +139,16 @@ Tailscale when away from home.
 These steps follow Komga's guide for Mihon, the app Tachimanga is modelled
 on. The names of the buttons in Tachimanga may differ a little. **This has
 not yet been tried on a real iPad.**
+
+## Reading in Readest, as one book
+
+Press **Add to my books** on a series' page. Your reading app's catalogue (guide 9) then has the series
+as **one book**: every chapter kept so far, in order, with a contents entry per chapter. The catalogue
+offers the comic file above as a second download once it is made. Either is kept on the tablet, so it
+reads offline. While the series
+is ongoing, each new chapter makes the catalogue offer a longer copy, which Readest downloads by itself if
+automatic download is on. The longer copy is a new book in Readest: open it from the contents list at the
+chapter you were up to, and delete the shorter one.
 
 ## Reading in a browser
 
@@ -158,6 +186,11 @@ and read marks that differ per account.
 - **Sites break.** A source that stops working shows under "No answer from"
   in a search. Updating it is done in the series server: **Browse →
   Extensions**.
+- **"VerifyError: Bad type on operand stack".** Some add-ons (Webtoon was
+  one) are built in a way that makes Java turn them away. `docker-compose.yml`
+  sets `JAVA_TOOL_OPTIONS` on the series server to skip that check for
+  add-ons. If you see this error, check that the line is still there and
+  restart the series server.
 - **Disk space.** A chapter is usually 5 to 30 MB. A long series can pass
   several GB.
 - **Komga notices new chapters on its own**, a little while after they are
@@ -168,6 +201,7 @@ and read marks that differ per account.
 | Folder | What | Copy it when moving? |
 |---|---|---|
 | `stack/series` | The chapters, as CBZ files in a folder per site and series | Yes |
+| `stack/bookhub/chapter-files` | Each followed series joined into comic files | No: made again from the chapters |
 | `stack/suwayomi` | The series server's settings, sources and followed series | Yes |
 | `stack/komga-config` | Komga's accounts and read marks | Yes |
 

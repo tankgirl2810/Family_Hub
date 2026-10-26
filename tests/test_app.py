@@ -30,7 +30,11 @@ def app(tmp_path, monkeypatch):
     app = create_app(Config())
     with app.app_context():
         demo.seed(app.hub)
-    return app
+    yield app
+    # Books a test started putting together in the background are finished before its folder goes.
+    from bookhub import opds
+    for job in list(opds._jobs.values()):
+        job.join(30)
 
 
 @pytest.fixture()
@@ -146,6 +150,18 @@ def test_personal_and_admin_stats(client):
     assert {f["name"] for f in a["family"]} == {"You", "Partner", "Nan"}
 
 
+def test_graphic_novels_read_are_counted_apart_from_books(app, client):
+    login(client, "You")
+    before = client.get("/api/stats/me").get_json()
+    assert before["read_books"] == 9 and before["read_graphic"] == 0
+    key = next(r["book_key"] for r in before["recent"] if r["in_library"])
+    with app.app_context():
+        app.hub.set_kind(key, "Graphic novel"); app.hub.con().commit()
+    s = client.get("/api/stats/me").get_json()
+    assert s["read_year"] == 9 and s["read_books"] == 8 and s["read_graphic"] == 1
+    assert s["month_books"] + s["month_graphic"] == s["read_month"]
+
+
 def test_recommendations(client):
     login(client, "You")
     bid = book_id(client, "Persuasion")
@@ -216,20 +232,65 @@ def test_backup_file_written(app, client):
     assert (app.hub.config.backups_dir / r["file"]).exists()
 
 
+def _zip_bytes(text):
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("mimetype", text)
+    return buf.getvalue()
+
+
 def test_downloads_are_copied_to_ingest(app, tmp_path):
     downloads = tmp_path / "downloads" / "Some.Book"
     downloads.mkdir(parents=True)
-    (downloads / "book.epub").write_bytes(b"PK demo")
+    (downloads / "book.epub").write_bytes(_zip_bytes("demo"))
     (downloads / "notes.txt").write_text("ignore me")
     (downloads / "partial.epub.!qB").write_bytes(b"x")
     unfinished = tmp_path / "downloads" / "incomplete" / "Other.Book"
     unfinished.mkdir(parents=True)
-    (unfinished / "half.epub").write_bytes(b"PK half")
+    (unfinished / "half.epub").write_bytes(_zip_bytes("half"))
     with app.app_context():
         assert app.hub.import_downloads(min_age=0) == ["book.epub"]
         assert app.hub.import_downloads(min_age=0) == []
-    assert (tmp_path / "ingest" / "book.epub").read_bytes() == b"PK demo"
+    assert (tmp_path / "ingest" / "book.epub").read_bytes() == _zip_bytes("demo")
     assert (downloads / "book.epub").exists()  # original left in place for seeding
+
+
+def test_a_download_still_being_filled_in_waits(app, tmp_path, monkeypatch):
+    from bookhub import intake
+    downloads = tmp_path / "downloads" / "Magus"
+    downloads.mkdir(parents=True)
+    whole = _zip_bytes("v18 " * 5000)
+    # The torrent client made the file at full size; its first pieces have not arrived (a stalled torrent).
+    (downloads / "v18.cbz").write_bytes(bytes(len(whole) - 1000) + whole[-1000:])
+    (downloads / "v19.cbz").write_bytes(whole[:1000] + bytes(len(whole) - 1000))  # the end is missing
+    (downloads / "v20.cbz").write_bytes(whole)  # whole, but the torrent client still lists it as downloading
+    (downloads / "v21.cbz").write_bytes(whole)
+    monkeypatch.setattr(intake, "unfinished_names", lambda config: {"v20.cbz"})
+    with app.app_context():
+        assert app.hub.import_downloads(min_age=0) == ["v21.cbz"]
+        # Once they are finished they come in, the next time it looks.
+        (downloads / "v18.cbz").write_bytes(whole)
+        monkeypatch.setattr(intake, "unfinished_names", lambda config: set())
+        assert sorted(app.hub.import_downloads(min_age=0)) == ["v18.cbz", "v20.cbz"]
+
+
+def test_a_download_the_library_already_has_is_not_added_twice(app, tmp_path):
+    import shutil
+    book = next(b for b in app.hub.library.books() if b["formats"])
+    fmt = sorted(book["formats"])[0]
+    original = app.hub.library.file_path(book, fmt)
+    downloads = tmp_path / "downloads" / "Again"
+    downloads.mkdir(parents=True)
+    shutil.copyfile(original, downloads / ("copy." + fmt.lower()))
+    other = bytearray(Path(original).read_bytes())
+    other[-1] ^= 1  # the same size and start, but not the same file
+    (downloads / ("changed." + fmt.lower())).write_bytes(bytes(other))
+    with app.app_context():
+        got = app.hub.import_downloads(min_age=0)
+    assert ("copy." + fmt.lower()) not in got
+    log = app.hub.con().execute("SELECT action, reason FROM intake_log WHERE name=?", ("copy." + fmt.lower(),)).fetchone()
+    assert tuple(log) == ("skipped", "Already in the library: the very same file")
 
 
 def test_outside_book_and_setup_guard(client):
@@ -565,6 +626,12 @@ def test_private_catalogue_for_reading_apps(app, client):
     you = auth("You", "demo")
     root = client.get("/opds", headers=you)
     assert root.status_code == 200 and b"/opds/mine" in root.data and "kind=navigation" in root.headers["Content-Type"]
+    # Apps that download new books by themselves follow the feed marked sort/new: My books, never the whole library.
+    # No other title may read as "newest" either, since Readest takes that as the mark too.
+    import re as _re
+    assert b'rel="http://opds-spec.org/sort/new" href="/opds/mine"' in root.data
+    titles = _re.findall(rb"<title>([^<]+)</title>", root.data)
+    assert not [t for t in titles if _re.search(rb"(?i)\b(newest|new books|recently added|recent|latest|by date)\b", t)], titles
     mine = client.get("/opds/mine", headers=you)
     assert b"Persuasion" in mine.data and b"Dracula" not in mine.data
     assert b"application/epub+zip" in mine.data and b"Jane Austen" in mine.data
@@ -2867,7 +2934,7 @@ def test_the_setup_file_carries_the_whole_setup_locked(app, client, tmp_path):
     setup.write_bytes(r.data)
     import zipfile
     names = zipfile.ZipFile(setup).namelist()
-    assert {".env", "README.txt", "stack/bookhub/bookhub.db", "stack/prowlarr-config/config.xml", "stack/prowlarr-config/prowlarr.db"} <= set(names)
+    assert {".env", "README.txt", "SETUP-NOTES.txt", "stack/bookhub/bookhub.db", "stack/prowlarr-config/config.xml", "stack/prowlarr-config/prowlarr.db"} <= set(names)
     assert not any("/logs/" in n for n in names)
     with zipfile.ZipFile(setup) as z:  # locked: nothing can be read without the passphrase
         with pytest.raises(RuntimeError):
@@ -2878,7 +2945,13 @@ def test_the_setup_file_carries_the_whole_setup_locked(app, client, tmp_path):
     with pytest.raises(setupfile.SetupError):
         setupfile.restore(setup, target, "wrong passphrase!!")
     assert (target / ".env").read_text() == "OLD=1\n"  # nothing touched by a wrong passphrase
+    import pyzipper
+    with pyzipper.AESZipFile(setup) as z:  # the readable notes list the sign-ins, from the settings as they are
+        z.setpassword(b"correct horse battery")
+        sheet = z.read("SETUP-NOTES.txt").decode()
+    assert "library-pw" in sheet and "/opds" in sheet and "You (admin)" in sheet
     setupfile.restore(setup, target, "correct horse battery")
+    assert not (target / "SETUP-NOTES.txt").exists()  # not unpacked into the folder, so never committed by mistake
     assert "CWA_PASS=library-pw" in (target / ".env").read_text() and (target / ".env.before-restore").read_text() == "OLD=1\n"
     con = sqlite3.connect(target / "stack" / "prowlarr-config" / "prowlarr.db")
     assert con.execute("SELECT name FROM indexers").fetchone()[0] == "My tracker"
@@ -2989,3 +3062,425 @@ def test_new_visuals_are_picked_up_from_github(app, client, monkeypatch):
     assert client.post("/api/admin/visuals/check").get_json()["source"] == "builtin"
     login(client, "Nan")
     assert client.post("/api/admin/visuals/check").status_code == 403
+
+
+def test_a_comic_series_is_one_book_in_the_catalogue(app, client):
+    import base64
+    import io
+    import sqlite3
+    import zipfile
+    library = app.hub.library
+    con = sqlite3.connect(library.metadata_db)
+    for n in (2, 1, 10):  # added out of order
+        new = demo.add_copy(library.dir, "Dracula", size=40 + n)
+        folder, name = con.execute("SELECT b.path, d.name FROM books b JOIN data d ON d.book=b.id WHERE b.id=?", (new,)).fetchone()
+        cbz = Path(library.dir) / folder / (name + ".cbz")
+        with zipfile.ZipFile(cbz, "w") as z:
+            for page in (1, 2):
+                z.writestr("page%d.jpg" % page, b"v%02d-p%d" % (n, page))
+        con.execute("UPDATE data SET format='CBZ', uncompressed_size=? WHERE book=?", (cbz.stat().st_size, new))
+        con.execute("UPDATE books SET title=? WHERE id=?", ("Cherry Magic! v%02d (2020) (Digital) (1r0n)" % n, new))
+        con.commit()
+    con.close()
+    os.utime(library.metadata_db, (2, 2))
+    login(client, "You")  # the sample profiles' sync password is "demo"
+    you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
+    feed = client.get("/opds/all?page=1", headers=you).get_data(as_text=True)
+    assert feed.count("<title>Cherry Magic!</title>") == 1 and "Volume 1" not in feed.split("<title>Cherry Magic!</title>")[0][-200:]
+    assert "3 volumes in one book, read straight through: Volume 1 to Volume 10." in feed
+    assert "/opds/series-file?name=Cherry%20Magic%21" in feed
+    got = client.get("/opds/series-file?name=Cherry%20Magic%21", headers=you)
+    assert got.status_code == 200 and got.headers["Content-Type"] == "application/vnd.comicbook+zip"
+    pages = [zipfile.ZipFile(io.BytesIO(got.data)).read(n) for n in sorted(zipfile.ZipFile(io.BytesIO(got.data)).namelist())]
+    assert pages == [b"v01-p1", b"v01-p2", b"v02-p1", b"v02-p2", b"v10-p1", b"v10-p2"]  # volume 1, then 2, then 10
+    assert client.get("/opds/series-file?name=Cherry%20Magic%21").status_code == 401
+    # The EPUB is offered first: one book with a contents entry per volume, its pages in reading order.
+    assert feed.index("/opds/series-book?name=Cherry%20Magic%21") < feed.index("/opds/series-file?name=Cherry%20Magic%21")
+    book = client.get("/opds/series-book?name=Cherry%20Magic%21", headers=you)
+    assert book.status_code == 200 and book.headers["Content-Type"] == "application/epub+zip"
+    epub = zipfile.ZipFile(io.BytesIO(book.data))
+    assert epub.namelist()[0] == "mimetype" and epub.getinfo("mimetype").compress_type == zipfile.ZIP_STORED
+    nav = epub.read("OEBPS/nav.xhtml").decode()
+    assert [t for t in __import__("re").findall(r">(Volume [^<]+)</a>", nav)] == ["Volume 1", "Volume 2", "Volume 10"]
+    opf = epub.read("OEBPS/content.opf").decode()
+    assert "pre-paginated" in opf and opf.count("<itemref") == 6
+    assert [epub.read(n) for n in sorted(n for n in epub.namelist() if n.startswith("OEBPS/images/"))] ==         [b"v01-p1", b"v01-p2", b"v02-p1", b"v02-p2", b"v10-p1", b"v10-p2"]
+    assert client.get("/opds/series-file?name=Dracula", headers=you).status_code == 404  # not a comic series
+    # Choosing one volume for My books brings the whole series, once.
+    vol2 = next(b for b in library.books() if b.get("series") == "Cherry Magic!" and b.get("series_index") == 2)
+    client.post("/api/books/%d/shelf" % vol2["id"], json={"on": True})
+    mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
+    assert mine.count("<title>Cherry Magic!</title>") == 1
+
+
+def test_a_big_or_damaged_comic_series_still_reaches_the_reading_app(app, client, monkeypatch):
+    import base64
+    import io
+    import sqlite3
+    import threading
+    import time
+    from PIL import Image
+    from bookhub import comicbook, opds
+
+    def page(size):
+        out = io.BytesIO()
+        Image.new("L", size, 200).save(out, "PNG")
+        return out.getvalue()
+    library = app.hub.library
+    con = sqlite3.connect(library.metadata_db)
+    for n in (1, 2, 3):
+        new = demo.add_copy(library.dir, "Dracula", size=60 + n)
+        folder, name = con.execute("SELECT b.path, d.name FROM books b JOIN data d ON d.book=b.id WHERE b.id=?", (new,)).fetchone()
+        cbz = Path(library.dir) / folder / (name + ".cbz")
+        if n == 2:
+            cbz.write_bytes(bytes(5000))  # taken in before its download had finished: blank, not a zip
+        else:
+            with zipfile.ZipFile(cbz, "w") as z:
+                z.writestr("p1.png", page((2145, 3056)))  # a scan bigger than any tablet screen
+                z.writestr("p2.png", page((800, 1200)))  # already a sensible size
+        con.execute("UPDATE data SET format='CBZ', uncompressed_size=? WHERE book=?", (cbz.stat().st_size, new))
+        con.execute("UPDATE books SET title=? WHERE id=?", ("Magus v%02d (2015) (Digital)" % n, new))
+        con.commit()
+    con.close()
+    os.utime(library.metadata_db, (2, 2))
+    login(client, "You")
+    you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
+    vol1 = next(b for b in library.books() if b.get("series") == "Magus" and b.get("series_index") == 1)
+    client.post("/api/books/%d/shelf" % vol1["id"], json={"on": True})
+    # While it is being put together, My books lists it without a download, under an id of its own.
+    hold = threading.Event()
+    real = opds._series_book_make
+    monkeypatch.setattr(opds, "_series_book_make", lambda *a: (hold.wait(10), real(*a)))
+    monkeypatch.setattr(opds, "FEED_WAIT", 0)
+    monkeypatch.setattr(opds, "FILE_WAIT", 0)
+    mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
+    assert "urn:bookhub:series:magus:3:making" in mine and "Being put together on the server" in mine
+    assert "/opds/series-book?name=Magus" not in mine
+    waiting = client.get("/opds/series-book?name=Magus", headers=you)
+    assert waiting.status_code == 503 and waiting.headers["Retry-After"] == "300"
+    hold.set()
+    for _ in range(100):
+        if not opds._jobs:
+            break
+        time.sleep(0.1)
+    mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
+    assert "urn:bookhub:series:magus:3</id>" in mine and "/opds/series-book?name=Magus" in mine
+    book = client.get("/opds/series-book?name=Magus", headers=you)
+    assert book.status_code == 200
+    epub = zipfile.ZipFile(io.BytesIO(book.data))
+    nav = epub.read("OEBPS/nav.xhtml").decode()
+    assert "Volume 1" in nav and "Volume 3" in nav and "Volume 2" not in nav  # the damaged volume is left out
+    pictures = sorted(n for n in epub.namelist() if n.startswith("OEBPS/images/"))
+    assert [n.rsplit(".", 1)[1] for n in pictures] == ["jpg", "png", "jpg", "png"]  # big scans shrunk, the rest kept
+    assert Image.open(io.BytesIO(epub.read(pictures[0]))).size[1] <= comicbook.BOX[1]
+    # A whole copy of the damaged volume arrives later: the book is made again, with it.
+    con = sqlite3.connect(library.metadata_db)
+    new = demo.add_copy(library.dir, "Dracula", size=99)
+    folder, name = con.execute("SELECT b.path, d.name FROM books b JOIN data d ON d.book=b.id WHERE b.id=?", (new,)).fetchone()
+    cbz = Path(library.dir) / folder / (name + ".cbz")
+    with zipfile.ZipFile(cbz, "w") as z:
+        z.writestr("p1.png", page((800, 1200)))
+    con.execute("UPDATE data SET format='CBZ', uncompressed_size=? WHERE book=?", (cbz.stat().st_size, new))
+    con.execute("UPDATE books SET title=? WHERE id=?", ("Magus v02 (2015) (Digital) (2)", new))
+    con.commit()
+    con.close()
+    os.utime(library.metadata_db, (3, 3))
+    monkeypatch.setattr(opds, "FILE_WAIT", 20)
+    book = client.get("/opds/series-book?name=Magus", headers=you)
+    assert book.status_code == 200 and "Volume 2" in zipfile.ZipFile(io.BytesIO(book.data)).read("OEBPS/nav.xhtml").decode()
+    # Refresh on Personal and My books says the series on the list is ready for the reading app.
+    r = client.post("/api/me/refresh").get_json()
+    assert r == {"hardcover": None, "hardcover_error": "", "series_ready": 1, "series_making": 0}
+    client.post("/api/login", json={"guest": True})
+    assert client.post("/api/me/refresh").status_code in (401, 403)
+
+
+def test_a_long_series_comes_in_parts_and_reading_progress_reaches_its_volumes(app, client, monkeypatch):
+    import base64
+    import hashlib
+    import io
+    import sqlite3
+    from bookhub import kosync, opds
+    library = app.hub.library
+    con = sqlite3.connect(library.metadata_db)
+    for n in (1, 2, 3):
+        new = demo.add_copy(library.dir, "Dracula", size=70 + n)
+        folder, name = con.execute("SELECT b.path, d.name FROM books b JOIN data d ON d.book=b.id WHERE b.id=?", (new,)).fetchone()
+        cbz = Path(library.dir) / folder / (name + ".cbz")
+        with zipfile.ZipFile(cbz, "w") as z:
+            for page in (1, 2):
+                z.writestr("p%d.jpg" % page, b"v%d-p%d" % (n, page))
+        con.execute("UPDATE data SET format='CBZ', uncompressed_size=? WHERE book=?", (cbz.stat().st_size, new))
+        con.execute("UPDATE books SET title=? WHERE id=?", ("Tower v%02d (2020) (Digital)" % n, new))
+        con.commit()
+    con.close()
+    os.utime(library.metadata_db, (2, 2))
+    login(client, "You")
+    you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
+    vols = sorted((b for b in library.books() if b.get("series") == "Tower"), key=lambda b: b["series_index"])
+    client.post("/api/books/%d/shelf" % vols[0]["id"], json={"on": True})
+    # Small parts, so three volumes make two books: volumes 1-2, then volume 3. A volume is never split.
+    monkeypatch.setattr(opds, "PART_BYTES", vols[0]["sizes"]["CBZ"] * 2 + 1)
+    mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
+    assert "<title>Tower · Part 1 (Volumes 1–2)</title>" in mine and "<title>Tower · Part 2 (Volume 3)</title>" in mine
+    assert "urn:bookhub:series:tower:part1:2</id>" in mine and "/opds/series-book?name=Tower&amp;part=2" in mine
+    status = client.get("/api/me/series").get_json()["series"]
+    assert [(p["title"], p["state"]) for p in status[0]["parts"]] == [("Tower · Part 1 (Volumes 1–2)", "ready"), ("Tower · Part 2 (Volume 3)", "ready")]
+    book = client.get("/opds/series-book?name=Tower&part=1", headers=you)
+    assert book.status_code == 200
+    assert "Volume 3" not in zipfile.ZipFile(io.BytesIO(book.data)).read("OEBPS/nav.xhtml").decode()
+    # The reading app reports progress against its copy's fingerprint: halfway through part 1 is volume 2's start.
+    tmp = Path(app.hub.config.data_dir) / "got.epub"
+    tmp.write_bytes(book.data)
+    digest = kosync.partial_md5(tmp)
+    sync = {"x-auth-user": "You", "x-auth-key": hashlib.md5(b"demo").hexdigest()}
+    assert client.put("/kosync/syncs/progress", json={"document": digest, "percentage": 0.75, "progress": "3", "device": "iPad"},
+                      headers=sync).status_code == 200
+    you_id = ids_of(client)["You"]
+    states = {r["book_key"]: (r["status"], r["percent"]) for r in app.hub.con().execute("SELECT * FROM reading WHERE profile_id=?", (you_id,))}
+    assert states[vols[0]["key"]] == ("finished", 100.0) and states[vols[1]["key"]] == ("reading", 50.0)
+    assert not [k for k in states if k.startswith("doc:")]
+    back = client.get("/kosync/syncs/progress/" + digest, headers=sync).get_json()
+    assert back["percentage"] == 0.75 and back["progress"] == "3"
+    # Progress stored under a bare fingerprint before the book was recorded is passed on later.
+    from bookhub import joined
+    part2 = client.get("/opds/series-book?name=Tower&part=2", headers=you)
+    tmp.write_bytes(part2.data)
+    digest2 = kosync.partial_md5(tmp)
+    app.hub.con().execute("INSERT INTO reading(book_key, profile_id, status, percent, started, finished, source, updated) "
+                          "VALUES(?,?,?,?,?,?,?,?)", ("doc:" + digest2, you_id, "finished", 100.0, "2026-10-25", "2026-10-25", "device", "2026-10-25T00:00:00Z"))
+    app.hub.con().commit()
+    assert joined.adopt(app.hub) == 1
+    row = app.hub.con().execute("SELECT status, finished FROM reading WHERE book_key=? AND profile_id=?", (vols[2]["key"], you_id)).fetchone()
+    assert tuple(row) == ("finished", "2026-10-25")
+
+
+def test_one_search_box_takes_terms_and_a_series_has_its_own_tags_and_rating(app, client):
+    import json as _json
+    import sqlite3
+    from urllib.parse import urlencode
+    library = app.hub.library
+    con = sqlite3.connect(library.metadata_db)
+    for n in (1, 2):
+        new = demo.add_copy(library.dir, "Dracula", size=80 + n)
+        con.execute("UPDATE books SET title=? WHERE id=?", ("The Savior's Book Café Story v%02d" % n, new))
+        con.commit()
+    con.close()
+    os.utime(library.metadata_db, (2, 2))
+    login(client, "You")
+
+    def find(*terms, kinds=""):
+        got = client.get("/api/books?" + urlencode({"terms": _json.dumps(list(terms)), "kinds": kinds})).get_json()
+        return sorted({b["title"] for b in got["books"] if b["in_library"]}), got
+
+    def term(value, fields=("title", "author", "series", "tag"), sign="+", source=None, phrase=False):
+        return {"fields": list(fields), "value": value, "sign": sign, "source": source, "phrase": phrase}
+    # Words in any order, without the apostrophe or accent; quotes keep them together; * for any ending.
+    assert len(find(term("saviors cafe"))[0]) == 2
+    assert not find(term("cafe book", phrase=True))[0] and len(find(term("book cafe", phrase=True))[0]) == 2
+    assert find(term("persua*", fields=("title",)))[0] == find(term("persuasion", fields=("title",)))[0] != []
+    # by an author, minus, and "or".
+    austen = find(term("austen", fields=("author",)))[0]
+    assert austen and all(t not in austen for t in find(term("austen", fields=("author",), sign="-"))[0])
+    either = find(term("persuasion", sign="or"), term("dracula", sign="or"))[0]
+    assert any("Persuasion" in t for t in either) and any("Dracula" in t for t in either)
+    # A series' own tags and rating: kept apart from the volumes', found when searching any volume.
+    series_name = next(b["series"] for b in library.books() if "Savior" in (b.get("series") or ""))
+    assert client.post("/api/series-info/tags", json={"name": series_name, "kind": "family", "tag": "cozy fantasy"}).status_code == 200
+    assert client.post("/api/series-info/rating", json={"name": series_name, "rating": 4}).status_code == 200
+    vol1 = next(b for b in library.books() if b.get("series") == series_name and b.get("series_index") == 1)
+    client.post("/api/books/%d/rating" % vol1["id"], json={"rating": 2})
+    info = client.get("/api/series-info?" + urlencode({"name": series_name})).get_json()
+    assert info["tags"]["family"] == ["cozy fantasy"] and info["rating"] == 4
+    assert info["volume_average"] == 2.0 and info["volumes_rated"] == 1 and info["volumes"] == 2
+    titles, got = find(term("cozy fantasy", fields=("tag",), source="family"))
+    assert len(titles) == 2  # both volumes, through their series
+    assert got["series_info"][series_name.lower()]["rating"] == 4
+    assert client.get("/api/books/%d" % vol1["id"]).get_json()["tags"]["family"] == []  # not copied onto the volume
+    assert any(t["tag"] == "cozy fantasy" for t in client.get("/api/tags?q=cozy").get_json()["tags"])
+    assert client.post("/api/series-info/rating", json={"name": "No such series", "rating": 4}).status_code == 404
+
+
+def test_the_watchlist_finds_coming_films_and_new_books(app, client, media_servers, monkeypatch):
+    from bookhub import watchlist
+    assert watchlist.matches("dune part three", "Dune: Part Three") and not watchlist.matches("dune part three", "Dune")
+    assert watchlist.matches("Metropolis 1927", "Metropolis", 1927) and not watchlist.matches("Metropolis 1927", "Metropolis", 2001)
+    media_servers.arr["radarr"]["rootfolder"] = [{"id": 1, "path": "/data/media/movies"}]
+    login(client, "You")
+    # A film not out yet, to be got as soon as it is announced: Radarr is asked for it straight away.
+    x = client.post("/api/watchlist", json={"kind": "film", "value": "Metropolis 2", "auto": True}).get_json()
+    assert [f["title"] for f in x["found"]] == ["Metropolis 2"]
+    f = x["found"][0]
+    assert f["coming"] and f["words"] == "Announced" and f["requested"] and f["in_library"]
+    assert [i["tmdbId"] for i in media_servers.arr["radarr"]["items"]] == [20]
+    assert x["new"] == 0  # what is there on the first look is the starting point, not news
+    # Something new since the last visit is marked, on the page and for Home, until the page is opened.
+    from bookhub import db
+    with app.app_context():
+        app.hub.con().execute("UPDATE watch SET seen='[]' WHERE id=?", (x["id"],))
+        app.hub.con().commit()
+    page = client.get("/api/watchlist").get_json()
+    assert page["news"] == 1 and next(i for i in page["items"] if i["id"] == x["id"])["found"][0]["new"]
+    client.post("/api/watchlist/seen")
+    assert client.get("/api/watchlist").get_json()["news"] == 0
+    # Authors: books from this year or last that the library does not have.
+    this_year = __import__("datetime").date.today().year
+    import bookhub.catalogues as cat
+
+    def fake_get(url, params, headers=None):
+        assert params["author"] == "Jane Austen"
+        return {"docs": [{"key": "/works/1", "title": "Pride and Prejudice", "author_name": ["Jane Austen"], "first_publish_year": this_year},
+                         {"key": "/works/2", "title": "A Lost Austen Novel", "author_name": ["Jane Austen"], "first_publish_year": this_year},
+                         {"key": "/works/3", "title": "Someone Else's", "author_name": ["Other Person"], "first_publish_year": this_year},
+                         {"key": "/works/4", "title": "Old One", "author_name": ["Jane Austen"], "first_publish_year": 1990}]}
+    monkeypatch.setattr(cat, "_get", fake_get)
+    a = client.post("/api/watchlist", json={"kind": "author", "value": "Jane Austen"}).get_json()
+    assert [f["title"] for f in a["found"]] == ["A Lost Austen Novel"]
+    assert client.post("/api/watchlist", json={"kind": "author", "value": "Jane Austen", "auto": True}).status_code == 200  # no auto for books
+    # Only its owner can check or change an entry; Nan cannot get films automatically; guests have no list.
+    login(client, "Nan")
+    assert client.post("/api/watchlist/%d/check" % x["id"]).status_code == 404
+    assert client.post("/api/watchlist", json={"kind": "film", "value": "Metropolis", "auto": True}).status_code == 403
+    client.post("/api/login", json={"guest": True})
+    assert client.get("/api/watchlist").status_code == 403
+    # The background job looks again at entries checked more than six hours ago.
+    with app.app_context():
+        app.hub.con().execute("UPDATE watch SET checked='2000-01-01T00:00:00Z'")
+        app.hub.con().commit()
+        watchlist.run(app.hub, limit=10)
+        assert all(r["checked"] > "2001" for r in app.hub.con().execute("SELECT checked FROM watch WHERE kind IN ('film','author')"))
+
+
+def test_a_followed_series_goes_to_the_reading_app_as_one_book_with_chapters(app, client, series_server, monkeypatch):
+    import base64
+    import io
+    import re
+    import zipfile
+
+    def chapter_file(cid):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for page in (2, 1, 10):  # stored out of order: pages are put in reading order
+                z.writestr("%d.jpg" % page, b"c%d-p%d" % (cid, page))
+        return buf.getvalue()
+
+    class Answer:
+        def __init__(self, data):
+            self.data, self.content, self.headers = data, data, {"Content-Type": "image/jpeg"}
+
+        def iter_content(self, n):
+            yield self.data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_raw(self, path, stream=False):
+        m = re.match(r"/api/v1/chapter/(\d+)/download", path)
+        return Answer(chapter_file(int(m.group(1))) if m else b"cover")
+    monkeypatch.setattr(series.Series, "raw", fake_raw)
+    you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
+    assert client.get("/opds/chapters-book/7", headers=you).status_code == 404  # not in My books yet
+    assert client.get("/api/series/7").get_json()["mine"] is False
+    assert client.post("/api/series/7/mine", json={"on": True}).get_json() == {"mine": True}
+    assert client.get("/api/series/7").get_json()["mine"] is True
+    mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
+    assert "<title>Tower Climber</title>" in mine and "urn:bookhub:chapters:7:2" in mine  # two chapters kept so far
+    assert "2 chapters in one book, from Chapter 1 to Chapter 2. New chapters come as a longer copy." in mine
+    book = client.get("/opds/chapters-book/7", headers=you)
+    assert book.status_code == 200 and book.headers["Content-Type"] == "application/epub+zip"
+    epub = zipfile.ZipFile(io.BytesIO(book.data))
+    assert re.findall(r">(Chapter \d)</a>", epub.read("OEBPS/nav.xhtml").decode()) == ["Chapter 1", "Chapter 2"]
+    assert [epub.read(n) for n in sorted(n for n in epub.namelist() if n.startswith("OEBPS/images/"))] == \
+        [b"c71-p1", b"c71-p2", b"c71-p10", b"c72-p1", b"c72-p2", b"c72-p10"]
+    # A new chapter kept: the entry changes, so the reading app fetches the longer book.
+    series_server.chapters[7][2]["isDownloaded"] = True
+    assert "urn:bookhub:chapters:7:3" in client.get("/opds/mine", headers=you).get_data(as_text=True)
+    # Someone else's catalogue does not have it, and cannot fetch it.
+    nan = {"Authorization": "Basic " + base64.b64encode(b"Nan:demo").decode()}
+    assert "Tower Climber" not in client.get("/opds/mine", headers=nan).get_data(as_text=True)
+    assert client.get("/opds/chapters-book/7", headers=nan).status_code == 404
+    client.post("/api/series/7/mine", json={"on": False})
+    assert "Tower Climber" not in client.get("/opds/mine", headers=you).get_data(as_text=True)
+
+
+
+def test_a_followed_series_is_kept_as_one_comic_file_with_its_chapters(app, client, series_server, monkeypatch):
+    import base64
+    import re
+    import zipfile
+    from bookhub import chapterfile
+
+    def chapter_file(cid):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for page in (2, 1, 10):
+                z.writestr("%d.jpg" % page, b"c%d-p%d" % (cid, page))
+        return buf.getvalue()
+
+    class Answer:
+        def __init__(self, data):
+            self.data, self.content, self.headers = data, data, {"Content-Type": "image/jpeg"}
+
+        def iter_content(self, n):
+            yield self.data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(series.Series, "raw", lambda self, path, stream=False: Answer(
+        chapter_file(int(re.match(r"/api/v1/chapter/(\d+)/download", path).group(1)))))
+    files = client.get("/api/series/7").get_json()["files"]
+    assert [(f["part"], f["chapters"], f["state"]) for f in files] == [(1, 2, "waiting")]
+    assert client.get("/api/series/7/file/1").status_code == 404
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
+    assert client.get("/api/series/7").get_json()["files"][0]["state"] == "ready"
+    got = client.get("/api/series/7/file/1")
+    assert got.status_code == 200 and "Tower Climber.cbz" in got.headers["Content-Disposition"]
+    cbz = zipfile.ZipFile(io.BytesIO(got.data))
+    pages = [n for n in cbz.namelist() if n.endswith(".jpg")]
+    assert pages == ["0001 Chapter 1/0001.jpg", "0001 Chapter 1/0002.jpg", "0001 Chapter 1/0003.jpg",
+                     "0002 Chapter 2/0001.jpg", "0002 Chapter 2/0002.jpg", "0002 Chapter 2/0003.jpg"]
+    assert [cbz.read(n) for n in pages[:3]] == [b"c71-p1", b"c71-p2", b"c71-p10"]
+    info = cbz.read("ComicInfo.xml").decode()
+    assert '<Page Image="0" Bookmark="Chapter 1"/><Page Image="3" Bookmark="Chapter 2"/>' in info and "<PageCount>6</PageCount>" in info
+    # A new chapter arrives: the file is made again with it, and the shorter one goes.
+    series_server.chapters[7][2]["isDownloaded"] = True
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
+        kept = list(chapterfile.folder(app.hub, 7).glob("*.cbz"))
+    assert len(kept) == 1
+    assert sum(n.endswith(".jpg") for n in zipfile.ZipFile(io.BytesIO(client.get("/api/series/7/file/1").data)).namelist()) == 9
+    # While chapters are still downloading, an unfinished part is not made again for every chapter.
+    series_server.queued = [74]
+    series_server.chapters[7][3]["isDownloaded"] = True
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
+    assert client.get("/api/series/7").get_json()["files"][0]["state"] == "waiting"
+    # The reading app's catalogue offers the comic file beside the book, once it is made.
+    series_server.queued = []
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
+    client.post("/api/series/7/mine", json={"on": True})
+    you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
+    assert "/opds/chapters-file/7/1" in client.get("/opds/mine", headers=you).get_data(as_text=True)
+    assert client.get("/opds/chapters-file/7/1", headers=you).status_code == 200
+    # The whole series takes tags and a rating like a series of volumes.
+    assert client.post("/api/series-info/rating", json={"name": "Tower Climber", "rating": 5}).status_code == 200
+    assert client.post("/api/series-info/tags", json={"name": "Tower Climber", "kind": "mine", "tag": "Weekly"}).status_code == 200
+    own = client.get("/api/series-info?name=Tower%20Climber").get_json()
+    assert own["rating"] == 5 and own["tags"]["mine"] == ["Weekly"]
+
+
+def test_searches_try_the_spellings_sites_need():
+    from bookhub.api import query_variants
+    assert query_variants("The Savior's Book Café Story in Another World") == [
+        "The Savior's Book Café Story in Another World", "The Saviors Book Cafe Story in Another World",
+        "Saviors Book Cafe Story in Another World", "Book Cafe Story in Another World"]
+    assert query_variants("Bongchon Bride") == ["Bongchon Bride"]

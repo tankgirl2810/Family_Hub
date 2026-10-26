@@ -17,7 +17,7 @@ import requests
 from flask import Blueprint, Response, current_app, jsonify, request, send_file, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from . import bookfix, calibre, catalogues, visuals, covers, db, devices, duplicates, goodreads, integrations, kinds, kosync, looks, media, mediasort, readers, recommend, secondcopy, series, settings
+from . import bookfix, calibre, catalogues, visuals, watchlist, covers, db, devices, duplicates, goodreads, integrations, kinds, kosync, looks, media, mediasort, readers, recommend, search, secondcopy, series, settings
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -582,6 +582,43 @@ def tracker_sync(who):
     return jsonify({"updated": count})
 
 
+@bp.post("/me/refresh")
+@profile_only
+def refresh_mine(who):
+    """The Refresh button on Personal and My books: catch up now instead of at the next background round.
+    Reads the library again (a book that has just arrived), fetches Hardcover if this person linked it, and
+    starts putting together the comic series on their list, so their reading app's next check finds them."""
+    h = hub()
+    h.library.refresh()
+    out = {"hardcover": None, "hardcover_error": "", "series_ready": 0, "series_making": 0}
+    if who["hardcover_token"]:
+        try:
+            out["hardcover"] = integrations.hardcover_sync(h, who)
+        except integrations.IntegrationError as exc:
+            out["hardcover_error"] = str(exc)
+    for item in _my_series(h, who):
+        for part in item["parts"]:
+            out["series_ready" if part["state"] == "ready" else "series_making"] += 1
+    return jsonify(out)
+
+
+def _my_series(h, who):
+    """The comic series on this person's list and where each part stands for their reading app (starting any
+    not started). [{name, parts: [{title, state, percent, error}]}]"""
+    from . import opds
+    shelf = h.devices.shelf(who["id"])
+    books = [b for b in (h.library.by_key(k) for k in shelf) if b]
+    return [{"name": item["series"], "parts": opds.series_status(h, item["volumes"])}
+            for item in opds._gather(books, h.library.books()) if "volumes" in item]
+
+
+@bp.get("/me/series")
+@profile_only
+def my_series(who):
+    """For My books to show, and look at again while a series is being put together."""
+    return jsonify({"series": _my_series(hub(), who)})
+
+
 @bp.post("/me/outside")
 @profile_only
 def add_outside(who):
@@ -718,6 +755,21 @@ def books(who):
     only_kinds = {k for k in (request.args.get("kinds") or "").split(",") if k}
     series = (request.args.get("series") or "").strip().lower()
     collection = (request.args.get("collection") or "").strip().lower()
+    try:
+        terms = search.clean(json.loads(request.args.get("terms") or "[]"))
+    except ValueError:
+        terms = []
+    matches = search.matcher(terms)
+
+    def series_tags(item):
+        """Tags put on the item's series (or set of runs) as a whole."""
+        out = {"family": [], "mine": []}
+        for name in {item.get("series") or "", item.get("collection") or ""} - {""}:
+            got = tags.get(series_key(name))
+            if got:
+                out["family"] += got["family"]
+                out["mine"] += got["mine"]
+        return out
 
     def keep(item):
         if only_kinds and item["kind"] not in only_kinds:
@@ -731,7 +783,9 @@ def books(who):
                            [t for g in item["tags"].values() for t in g]).lower()
             if q not in hay:
                 return False
-        if tag and not any(t.lower() == tag for s in scopes for t in item["tags"].get(s, [])):
+        if tag and not any(t.lower() == tag for s in scopes for t in item["tags"].get(s, []) + series_tags(item).get(s, [])):
+            return False
+        if terms and not matches(item, series_tags(item)):
             return False
         return {
             "all": True,
@@ -756,7 +810,97 @@ def books(who):
                         "taste": {"ready": mine["ready"], "have": mine["have"], "need": mine["need"]}})
     if series or collection:  # one series or set, run by run, in reading order
         items.sort(key=lambda i: ((i.get("series") or "").lower(), i.get("series_index") or 0, i["title"].lower()))
-    return jsonify({"books": items, "total": len(items)})
+    # The series' own ratings and tags, by series name in lower case, for the series cards.
+    info = {}
+    for name in {n for i in items for n in (i.get("series"), i.get("collection")) if n}:
+        k = series_key(name)
+        info[name.lower()] = {"rating": ratings.get(k, 0),
+                              "tags": {"family": tags[k]["family"], "mine": tags[k]["mine"]} if k in tags else {"family": [], "mine": []}}
+    return jsonify({"books": items, "total": len(items), "series_info": info})
+
+
+def series_key(name):
+    """A series (or set of runs) is tagged and rated as a whole under this key, beside its volumes' own."""
+    return "series:" + db.slug(name)
+
+
+def _series_name():
+    data = request.get_json(silent=True) or {}
+    asked = " ".join(str(data.get("name") or request.args.get("name") or "").split()).lower()
+    # The library's own spelling of the series; a long name is used whole, not cut like a tag.
+    for book in hub().library.books():
+        for name in (book["series"] or "", book.get("collection") or ""):
+            if asked and name.lower() == asked:
+                return name, data
+    if asked and hub().series.configured:  # a series followed chapter by chapter is tagged and rated the same way
+        try:
+            for s in hub().series.shelf()["series"]:
+                if s["title"].lower() == asked:
+                    return s["title"], data
+        except series.SeriesError:
+            pass
+    return "", data
+
+
+@bp.get("/series-info")
+@signed_in
+def series_info(who):
+    """A series' own tags and rating, and the average of the ratings given to its volumes."""
+    name, _ = _series_name()
+    if not name:
+        return fail("Nothing in the library belongs to that series.", 404)
+    h = hub()
+    pid = None if who == "guest" else who["id"]
+    key = series_key(name)
+    tagged = h.tag_index(pid).get(key, {"family": [], "mine": []})
+    reading, ratings = _user_maps(h, who)
+    low = name.lower()
+    vols = [ratings.get(b["key"]) for b in h.library.books() if low in ((b["series"] or "").lower(), (b.get("collection") or "").lower())]
+    rated = [r for r in vols if r]
+    return jsonify({"name": name, "key": key, "tags": {"family": tagged["family"], "mine": tagged["mine"]},
+                    "rating": ratings.get(key, 0), "volume_average": round(sum(rated) / len(rated), 1) if rated else None,
+                    "volumes_rated": len(rated), "volumes": len(vols)})
+
+
+@bp.post("/series-info/tags")
+@profile_only
+def series_add_tag(who):
+    name, data = _series_name()
+    if not name:
+        return fail("Nothing in the library belongs to that series.", 404)
+    kind = "family" if data.get("kind") == "family" else "mine"
+    if kind == "family" and not (who["can_tag"] or is_admin(who)):
+        return fail("This profile cannot change family tags.", 403)
+    h = hub()
+    h.ensure_meta(series_key(name), title=name, source="series")
+    if not h.add_tag(kind, series_key(name), data.get("tag"), who["id"]):
+        return fail("Type a tag first.")
+    return jsonify({"ok": True})
+
+
+@bp.delete("/series-info/tags")
+@profile_only
+def series_remove_tag(who):
+    name, data = _series_name()
+    if not name:
+        return fail("Nothing in the library belongs to that series.", 404)
+    kind = "family" if data.get("kind") == "family" else "mine"
+    if kind == "family" and not (who["can_tag"] or is_admin(who)):
+        return fail("This profile cannot change family tags.", 403)
+    hub().remove_tag(kind, series_key(name), data.get("tag") or "", who["id"])
+    return jsonify({"ok": True})
+
+
+@bp.post("/series-info/rating")
+@profile_only
+def series_rate(who):
+    name, data = _series_name()
+    if not name:
+        return fail("Nothing in the library belongs to that series.", 404)
+    h = hub()
+    h.ensure_meta(series_key(name), title=name, source="series")
+    h.set_rating(series_key(name), who["id"], int(data.get("rating") or 0))
+    return jsonify({"ok": True})
 
 
 def _book_or_404(book_id):
@@ -831,6 +975,11 @@ def book_detail(who, book_id):
         data["family_shelves"] = [
             dict(h.devices.book_view(p["id"], book), profile_id=p["id"], name=p["name"], status=theirs.get(p["id"], "none"))
             for p in h.profiles() if p["id"] != pid]
+    if book["series"]:  # the whole series' own tags and rating apply to each of its volumes
+        key = series_key(book["series"])
+        own = tags.get(key, {})
+        data["from_series"] = {"name": book["series"], "rating": ratings.get(key) or 0,
+                               "tags": {"family": own.get("family", []), "mine": own.get("mine", [])}}
     data["converted"] = (h.config.converted_dir / ("%d.epub" % book_id)).exists()
     data["convert_status"] = db.kv_get(con, "convert:%d" % book_id)
     if is_admin(who):
@@ -1147,9 +1296,13 @@ def tags(who):
     keys = set(h.library.keys())
     if pid:  # books this profile read elsewhere are listed in the library too
         keys |= {r["book_key"] for r in h.reading_rows(pid)}
+    wanted = {k for k in (request.args.get("kinds") or "").split(",") if k}
+    if wanted:  # only the tags of the part of the library being looked at
+        kind_of = h.kind_index()
+        keys = {k for k in keys if kind_of.get(k, kinds.UNSORTED) in wanted}
     counts = {}
     for key, groups in h.tag_index(pid).items():
-        if key not in keys:
+        if key not in keys and not key.startswith("series:"):  # a series' own tags count too
             continue
         for scope in scopes:
             for tag in groups.get(scope, []):
@@ -1263,6 +1416,50 @@ def can_request(who):
     return who not in (None, "guest") and (who["role"] == "admin" or who["can_request"])
 
 
+def query_variants(q):
+    """The spellings to ask the sites for. They match whole words exactly, so "Saviors" misses "Savior's" and "Cafe"
+    may miss "Café". Asked for as typed; with accents and apostrophes taken out; and, for a long title, without its
+    first word or two (which is where possessives and "The" usually are)."""
+    import unicodedata
+    folded = unicodedata.normalize("NFKD", q).encode("ascii", "ignore").decode()
+    folded = re.sub(r"['’`]", "", folded)
+    folded = re.sub(r"[^A-Za-z0-9]+", " ", folded).strip()
+    words = folded.split()
+    out = [q]
+    for v in (folded, " ".join(words[1:]) if len(words) >= 4 else "", " ".join(words[2:]) if len(words) >= 5 else ""):
+        if v and v.lower() not in [x.lower() for x in out]:
+            out.append(v)
+    return out
+
+
+def search_variants(config, q):
+    """Ask for every spelling at once and put the answers together, the closest matches to what was typed first."""
+    from concurrent.futures import ThreadPoolExecutor
+    variants = query_variants(q)
+    with ThreadPoolExecutor(max_workers=len(variants)) as pool:
+        answers = list(pool.map(lambda v: _try_search(config, v), variants))
+    if all(isinstance(a, integrations.IntegrationError) for a in answers):
+        raise answers[0]
+    typed = set(db.slug(query_variants(q)[1] if len(variants) > 1 else q).split("-"))
+    merged, seen = [], set()
+    for answer in answers:
+        for r in answer if isinstance(answer, list) else []:
+            key = r.get("guid") or r["title"]
+            if key not in seen:
+                seen.add(key)
+                merged.append(r)
+    score = lambda r: len(typed & set(db.slug(r["title"]).split("-")))  # noqa: E731
+    merged.sort(key=lambda r: (-score(r), r["format"] != "EPUB", -(r["seeders"] or 0)))
+    return merged
+
+
+def _try_search(config, q):
+    try:
+        return integrations.prowlarr_search(config, q)
+    except integrations.IntegrationError as exc:
+        return exc
+
+
 @bp.get("/discover/search")
 @profile_only
 def discover_search(who):
@@ -1273,7 +1470,7 @@ def discover_search(who):
         return fail("Type a title or author.")
     h = hub()
     try:
-        results = integrations.prowlarr_search(h.config, q)
+        results = search_variants(h.config, q)
     except integrations.IntegrationError as exc:
         return fail(str(exc), 502)
     titles = [(db.slug(b["title"]), b["id"]) for b in h.library.books()]
@@ -1352,6 +1549,83 @@ def watch_remove(who, watch_id):
     con = hub().con()
     con.execute("DELETE FROM watch WHERE id=? AND profile_id=?", (watch_id, who["id"]))
     con.execute("DELETE FROM kv WHERE key=?", ("new:%d" % who["id"],))
+    con.commit()
+    return jsonify({"ok": True})
+
+
+# ------------------------------------------------------------- watchlist
+# Authors, films and TV shows a person is waiting for, checked every few hours. See watchlist.py.
+
+def _watch_row(who, watch_id):
+    return hub().con().execute("SELECT * FROM watch WHERE id=? AND profile_id=?", (watch_id, who["id"])).fetchone()
+
+
+@bp.get("/watchlist")
+@signed_in
+def watchlist_page(who):
+    if who == "guest":
+        return fail("Choose your profile to keep a watchlist.", 403)
+    rows = hub().con().execute("SELECT * FROM watch WHERE profile_id=? ORDER BY kind, value COLLATE NOCASE", (who["id"],)).fetchall()
+    items = [watchlist.describe(r) if r["kind"] in watchlist.KINDS else {"id": r["id"], "kind": r["kind"], "value": r["value"], "found": [], "new": 0}
+             for r in rows]
+    return jsonify({"items": items, "news": sum(i["new"] for i in items), "can_request_media": can_request_media(who),
+                    "films": hub().media.configured("film"), "shows": hub().media.configured("show")})
+
+
+@bp.post("/watchlist")
+@profile_only
+def watchlist_add(who):
+    data = request.get_json(silent=True) or {}
+    kind, value = data.get("kind"), db.clean_tag(data.get("value"))
+    if kind not in watchlist.KINDS:
+        return fail("Choose an author, a film or a TV show.")
+    if not value:
+        return fail("Type a name to watch for.")
+    if kind in ("film", "show") and not hub().media.configured(kind):
+        return fail("Films and TV are not set up yet.")
+    auto = bool(data.get("auto")) and kind in ("film", "show")
+    if auto and not can_request_media(who):
+        return fail("This profile cannot request films and TV, so it cannot get them automatically.", 403)
+    con = hub().con()
+    con.execute("INSERT OR IGNORE INTO watch(profile_id, kind, value, created, auto) VALUES(?,?,?,?,?)",
+                (who["id"], kind, value, db.now(), int(auto)))
+    con.execute("DELETE FROM kv WHERE key=?", ("new:%d" % who["id"],))
+    con.commit()
+    row = con.execute("SELECT * FROM watch WHERE profile_id=? AND kind=? AND value=?", (who["id"], kind, value)).fetchone()
+    return jsonify(watchlist.check(hub(), row))
+
+
+@bp.post("/watchlist/<int:watch_id>/check")
+@profile_only
+def watchlist_check(who, watch_id):
+    row = _watch_row(who, watch_id)
+    if not row or row["kind"] not in watchlist.KINDS:
+        return fail("That is not on your watchlist.", 404)
+    return jsonify(watchlist.check(hub(), row))
+
+
+@bp.post("/watchlist/<int:watch_id>/auto")
+@profile_only
+def watchlist_auto(who, watch_id):
+    row = _watch_row(who, watch_id)
+    if not row or row["kind"] not in ("film", "show"):
+        return fail("Only films and shows can be got automatically.", 404)
+    on = bool((request.get_json(silent=True) or {}).get("on"))
+    if on and not can_request_media(who):
+        return fail("This profile cannot request films and TV.", 403)
+    con = hub().con()
+    con.execute("UPDATE watch SET auto=? WHERE id=?", (int(on), watch_id))
+    con.commit()
+    return jsonify(watchlist.check(hub(), _watch_row(who, watch_id)) if on else watchlist.describe(_watch_row(who, watch_id)))
+
+
+@bp.post("/watchlist/seen")
+@profile_only
+def watchlist_seen(who):
+    """The person has looked: nothing on the list is new any more."""
+    con = hub().con()
+    for r in con.execute("SELECT id, found FROM watch WHERE profile_id=?", (who["id"],)).fetchall():
+        con.execute("UPDATE watch SET seen=? WHERE id=?", (json.dumps([f["key"] for f in json.loads(r["found"] or "[]")]), r["id"]))
     con.commit()
     return jsonify({"ok": True})
 
@@ -1561,7 +1835,7 @@ def admin_setup_file(who):
     if not isinstance(phrase, str):
         return fail("Choose a passphrase.")
     try:
-        path = setupfile.build(hub(), phrase)
+        path = setupfile.build(hub(), phrase, host=request.host.rsplit(":", 1)[0] or "<server address>")
     except setupfile.SetupError as exc:
         return fail(str(exc))
     data = path.read_bytes()
@@ -1661,7 +1935,21 @@ def series_mark(who):
 @bp.get("/series/<int:series_id>")
 @series_only
 def series_detail(who, series_id):
-    return jsonify(hub().series.detail(series_id, refresh=request.args.get("refresh") == "1"))
+    from . import chapterfile
+    info = hub().series.detail(series_id, refresh=request.args.get("refresh") == "1")
+    return jsonify(dict(info, mine=series_id in series.my_books(hub(), who["id"]), files=chapterfile.files(hub(), info)))
+
+
+@bp.get("/series/<int:series_id>/file/<int:part>")
+@series_only
+def series_part_file(who, series_id, part):
+    """One part of a series by chapter as a comic file, every chapter in it, once the server has made it."""
+    from . import chapterfile
+    from .devices import safe_filename
+    path, title = chapterfile.ready_file(hub(), hub().series.detail(series_id), part)
+    if not path:
+        return fail("That part is still being put together on the server. Try again in a few minutes.", 404)
+    return send_file(path, as_attachment=True, download_name=safe_filename(title, "", "cbz"), mimetype="application/vnd.comicbook+zip")
 
 
 @bp.post("/series/<int:series_id>/follow")
@@ -1710,6 +1998,17 @@ def _safe_type(given, allow_files=False):
 @series_only
 def series_cover(who, series_id):
     return _passed_on(hub().series.raw("/api/v1/manga/%d/thumbnail" % series_id, stream=True))
+
+
+@bp.post("/series/<int:series_id>/mine")
+@series_only
+def series_mine(who, series_id):
+    """Put a followed series in My books (or take it out): the reading app gets every kept chapter as one book."""
+    on = bool((request.get_json(silent=True) or {}).get("on"))
+    if on:
+        hub().series.detail(series_id)  # it must be on the series server
+    series.set_my_book(hub(), who["id"], series_id, on)
+    return jsonify({"mine": on})
 
 
 @bp.get("/series/chapters/<int:chapter_id>/pages")
@@ -1904,7 +2203,8 @@ def media_tracking(who):
         for kind, arr_id in wanted:
             try:
                 a = hub().media.activity(kind, arr_id)
-                out.append({"kind": kind, "id": arr_id, "title": a["title"], "now": a["now"], "finished": a["finished"]})
+                out.append({"kind": kind, "id": arr_id, "title": a["title"], "now": a["now"], "finished": a["finished"],
+                            "downloaded": a.get("downloaded", False), "filing": a.get("filing")})
             except media.MediaError as exc:
                 if str(exc).startswith("404"):
                     out.append({"kind": kind, "id": arr_id, "gone": True})

@@ -328,6 +328,15 @@ class Library:
         return path
 
 
+def count_pictures(path):
+    """Pages in a comic kept as a zip (CBZ): one picture each."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            return sum(1 for n in z.namelist() if n.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))) or None
+    except (zipfile.BadZipFile, OSError):
+        return None
+
+
 def estimate_pages(path):
     """Rough page count for an EPUB: about 1,800 characters of text per page."""
     try:

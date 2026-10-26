@@ -153,6 +153,10 @@ CREATE TABLE IF NOT EXISTS media_requests (
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY, value TEXT
 );
+CREATE TABLE IF NOT EXISTS joined_books (
+    hash TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+    parts TEXT NOT NULL DEFAULT '[]', pages INTEGER NOT NULL DEFAULT 0, path TEXT NOT NULL DEFAULT '', made TEXT NOT NULL
+);
 """
 
 _local = threading.local()
@@ -191,10 +195,23 @@ def finish(path, failed=False):
             con.rollback()
 
 
+# Columns added after a table was first made: (table, column, definition). Added to older databases on start.
+ADDED_COLUMNS = [
+    ("watch", "auto", "INTEGER NOT NULL DEFAULT 0"),   # request a coming film or show by itself
+    ("watch", "found", "TEXT NOT NULL DEFAULT ''"),    # what the last check found (JSON)
+    ("watch", "seen", "TEXT"),                         # keys of found items the person has seen (JSON)
+    ("watch", "checked", "TEXT NOT NULL DEFAULT ''"),
+    ("watch", "error", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
 def init(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     con = connect(path)
     con.executescript(SCHEMA)
+    for table, column, definition in ADDED_COLUMNS:
+        if column not in [r[1] for r in con.execute("PRAGMA table_info(%s)" % table)]:
+            con.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, definition))
     con.commit()
     return con
 
