@@ -31,13 +31,14 @@ own small database and backed up to a plain file every day.
 | Copies | A book that is in the library twice is shown once. Spare copies can be removed for good from the Admin page, with every non-identical spare set aside first. Until then, nothing is removed |
 | Covers | Give a book a different cover: upload a picture, pick one from Open Library, or have a plain one made from the title. Kept in Family Hub; the library is not changed |
 | Kinds | Each book is fiction, non-fiction, a graphic novel or tabletop; guessed on arrival, filterable, and fixable in bulk. The Library is split into Books and Graphic novels |
-| Manga and manhwa by chapter | Follow a series on reading sites; every chapter is downloaded and kept, and read in the browser. Optional, needs the series server |
+| Manga and manhwa by chapter | Follow a series on reading sites; every chapter is downloaded and kept (one copy of a chapter the site lists twice, the 18+ or uncensored one when there is one), read in the browser, or in a reading app as one book with a contents entry per chapter. Optional, needs the series server |
 | Inbox | Drop in files, folders or archives; books are passed to the library and anything unusable is set aside with a reason |
 | Tags | Tags from the book file with the clutter removed, community tags from Open Library, Wikidata, Comic Vine (for comics) and shared tag packs, family tags, private personal tags; one search across all four; admins can hide or rename tags |
 | Ratings | 1 to 5 stars per profile, with the rest of the family's ratings shown, and the average from readers at large (Goodreads or Open Library) on every card |
 | Dashboard | Books and graphic novels read (counted apart), this month, pages, authors, a monthly trend you can filter by tag or author; an admin view of the library and family |
-| Recommendations | "Similar books" from shared tags and authors; unread library books ordered by what you have enjoyed; a weekly list of books the library lacks, with a button to find each one |
+| Recommendations | "Similar books" from shared tags and authors; unread library books ordered by what you have enjoyed; a weekly list of books the library lacks, with a button to find each one; manga and manhwa from AniList readers' recommendations |
 | Discover | Search your Prowlarr indexers, send a result to your torrent client, follow authors and tags |
+| Watchlist | Each person's list of authors, films and shows they are waiting for, checked every six hours; a film or show can be got by itself once it is announced. Guide 17 |
 | Connections | Enter and test every address, key and password (Prowlarr, qBittorrent, Radarr, Sonarr, Bazarr, Jellyfin, the VPN, mail, catalogues) under Admin → Hub → Connections; no file editing or restart. Guide 15 lists them all |
 | Devices | Each person lists their Kindles and reading apps and keeps a "My books" list; reading apps fetch it from a private catalogue, a Kindle is sent books by email, and admins can do it for someone else |
 | Sync | Reading position from Readest or KOReader arrives automatically; Kindle reading can be pulled from Hardcover |
@@ -129,7 +130,7 @@ Being upfront, because this decides how much checking you should do:
 | Hardcover import (Kindle reading) | **Experimental and untested** with a live account |
 | PDF to EPUB | Needs Calibre's converter in the image (`INSTALL_CALIBRE=true`); **untested** |
 
-Not built yet: an in-browser reader, automatic downloading for followed
+Not built yet: an in-browser reader for books (series by chapter can be read in the browser), automatic downloading for followed
 authors (it suggests, you click), and new-release tracking by genre.
 
 ## A note on downloads

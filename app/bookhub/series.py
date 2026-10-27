@@ -10,7 +10,9 @@ browser never needs the series server's address or password.
 Written against Suwayomi-Server v2.4.
 """
 import json
+import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -25,11 +27,16 @@ KEEP_EVERYTHING = {
     "downloadAsCbz": True, "autoDownloadNewChapters": True, "autoDownloadNewChaptersLimit": 0,
     "excludeEntryWithUnreadChapters": False, "excludeUnreadChapters": False, "excludeNotStarted": False,
 }
-STATUS = {"ONGOING": "Ongoing", "COMPLETED": "Complete", "PUBLISHING_FINISHED": "Complete", "LICENSED": "Licensed",
-          "CANCELLED": "Cancelled", "ON_HIATUS": "On a break"}
+STATUS = {"ONGOING": "Ongoing", "COMPLETED": "Finished", "PUBLISHING_FINISHED": "Finished", "LICENSED": "Licensed",
+          "CANCELLED": "Cancelled", "ON_HIATUS": "Hiatus"}
+DONE = ("Finished", "Cancelled")  # publication is over: no new chapters to look for
+DONE_CATEGORY = "Finished or cancelled (not checked for new chapters)"
+CHAPTER_TAG = "Chapter by chapter"  # the tag every series followed chapter by chapter carries in the library
 SERIES_FIELDS = """id title author status genre unreadCount downloadCount sourceId
   source{displayName} chapters{totalCount} firstUnreadChapter{id name sourceOrder}"""
 CHAPTER_FIELDS = "id name chapterNumber sourceOrder isRead isDownloaded uploadDate scanlator lastPageRead"
+# A copy of a chapter with one of these in its name is the one kept when a site lists a chapter twice.
+EXTRAS = re.compile(r"18\s*\+|\br-?18\b|\buncensored\b|\buncut\b|\bunedited\b|\bmature\b|\bexplicit\b|\bnsfw\b|\bextended\b", re.I)
 
 
 class SeriesError(Exception):
@@ -39,14 +46,17 @@ class SeriesError(Exception):
 def blocked_ids(hub):
     """Profiles an admin has shut out of the series shelf. Everyone else who is signed in sees it; guests never do."""
     try:
-        return {int(i) for i in json.loads(db.kv_get(hub.con(), PROFILES_KEY) or "[]")}
+        return {int(profile_id) for profile_id in json.loads(db.kv_get(hub.con(), PROFILES_KEY) or "[]")}
     except (ValueError, TypeError):
         return set()
 
 
 def allow(hub, profile_id, on):
     ids = blocked_ids(hub)
-    ids.discard(profile_id) if on else ids.add(profile_id)
+    if on:
+        ids.discard(profile_id)
+    else:
+        ids.add(profile_id)
     con = hub.con()
     db.kv_set(con, PROFILES_KEY, json.dumps(sorted(ids)))
     con.commit()
@@ -62,41 +72,94 @@ def forget_profile(hub, profile_id):
 def my_books(hub, profile_id):
     """Series followed chapter by chapter that a person put in My books, for their reading app (opds.py)."""
     try:
-        return [int(i) for i in json.loads(db.kv_get(hub.con(), "series:mine:%d" % profile_id) or "[]")]
+        return [int(series_id) for series_id in json.loads(db.kv_get(hub.con(), "series:mine:%d" % profile_id) or "[]")]
     except (ValueError, TypeError):
         return []
 
 
 def set_my_book(hub, profile_id, series_id, on):
-    ids = [i for i in my_books(hub, profile_id) if i != series_id]
+    ids = [kept for kept in my_books(hub, profile_id) if kept != series_id]
     if on:
-        ids.insert(0, series_id)
+        ids.insert(0, series_id)  # newest first
     db.kv_set(hub.con(), "series:mine:%d" % profile_id, json.dumps(ids))
 
 
-def _series(m):
-    total = (m.get("chapters") or {}).get("totalCount") or 0
-    unread = m.get("unreadCount") or 0
-    nxt = m.get("firstUnreadChapter")
+def _genres(given):
+    """Every tag the reading site gives the series, each once, tidied; they become its tags in the library."""
+    genres, seen = [], set()
+    for genre in given or []:
+        genre = " ".join(str(genre).split())
+        if genre and genre.lower() not in seen and len(genre) <= 60:
+            seen.add(genre.lower())
+            genres.append(genre)
+    return genres[:40]
+
+
+def _series(manga):
+    total = (manga.get("chapters") or {}).get("totalCount") or 0
+    unread = manga.get("unreadCount") or 0
+    next_up = manga.get("firstUnreadChapter")
     return {
-        "id": m["id"], "title": m.get("title") or "", "author": m.get("author") or "",
-        "status": STATUS.get(m.get("status") or "", ""), "genres": (m.get("genre") or [])[:6],
-        "source": (m.get("source") or {}).get("displayName") or "", "local": str(m.get("sourceId")) == LOCAL,
-        "chapters": total, "read": total - unread, "unread": unread, "downloaded": m.get("downloadCount") or 0,
-        "next": {"id": nxt["id"], "name": nxt["name"], "order": nxt["sourceOrder"]} if nxt else None,
+        "id": manga["id"], "title": manga.get("title") or "", "author": manga.get("author") or "",
+        "status": STATUS.get(manga.get("status") or "", ""), "genres": _genres(manga.get("genre")),
+        "source": (manga.get("source") or {}).get("displayName") or "", "local": str(manga.get("sourceId")) == LOCAL,
+        "chapters": total, "read": total - unread, "unread": unread, "downloaded": manga.get("downloadCount") or 0,
+        "next": {"id": next_up["id"], "name": next_up["name"], "order": next_up["sourceOrder"]} if next_up else None,
     }
 
 
-def _chapter(c):
-    return {"id": c["id"], "name": c.get("name") or "", "number": c.get("chapterNumber"), "order": c["sourceOrder"],
-            "read": bool(c.get("isRead")), "downloaded": bool(c.get("isDownloaded")), "group": c.get("scanlator") or "",
-            "page": c.get("lastPageRead") or 0, "uploaded": int(c.get("uploadDate") or 0)}
+def _chapter(chapter):
+    return {"id": chapter["id"], "name": chapter.get("name") or "", "number": chapter.get("chapterNumber"),
+            "order": chapter["sourceOrder"], "read": bool(chapter.get("isRead")), "downloaded": bool(chapter.get("isDownloaded")),
+            "group": chapter.get("scanlator") or "", "page": chapter.get("lastPageRead") or 0,
+            "uploaded": int(chapter.get("uploadDate") or 0)}
+
+
+def _has_title(chapter):
+    """Does the chapter's name say more than its number ("Ch. 3 - Light (3)" rather than "Ch. 3")?"""
+    return bool(re.sub(r"^\s*(?:ch(?:apter)?|ep(?:isode)?)?\.?\s*[\d.]+\s*", "", chapter["name"] or "", flags=re.I).strip(" -:–·"))
+
+
+def unique(chapters, among_downloaded=False):
+    """(kept, dropped): one copy of each chapter number, in reading order. Sites sometimes list a chapter twice
+    (two translations, or "Ch. 21" and "Ch. 21 (18+)"). The copy kept is the one marked 18+, uncensored and so
+    on, then the one whose name says more, then the newest. among_downloaded: choose among the copies already
+    downloaded when there are any (for the comic files, which can only hold what is downloaded). Chapters with
+    no number are all kept."""
+    best = {}
+    for chapter in chapters:
+        number = chapter.get("number")
+        if number is None or number < 0:
+            continue
+        # tuples compare left to right, so this is a whole ranking in one line: downloaded (if asked) beats
+        # 18+/uncensored beats has-a-title beats newer upload beats later in the list
+        rank = (among_downloaded and chapter["downloaded"], bool(EXTRAS.search("%s %s" % (chapter["name"], chapter.get("group") or ""))),
+                _has_title(chapter), chapter.get("uploaded") or 0, chapter["order"])
+        if number not in best or rank > best[number][0]:
+            best[number] = (rank, chapter["id"])
+    keep_ids = {chapter_id for _, chapter_id in best.values()}
+    kept = [chapter for chapter in chapters if chapter.get("number") is None or chapter["number"] < 0 or chapter["id"] in keep_ids]
+    # compare by object identity: checking dict == dict for 500 chapters, 500 times, crawls
+    kept_ids = {id(chapter) for chapter in kept}
+    return kept, [chapter for chapter in chapters if id(chapter) not in kept_ids]
 
 
 class Series:
     def __init__(self, hub):
         self.hub = hub
         self._prepared = None  # the address whose settings have been checked since Family Hub started
+        self._shelf_kept = (0, None)  # (when, shelf): the library asks for the shelf on every search
+
+    def shelf_cached(self, seconds=30):
+        """The followed series, asked again at most every half minute; none when the series server is away."""
+        when, kept = self._shelf_kept
+        if kept is None or time.time() - when > seconds:
+            try:
+                kept = self.shelf()
+            except SeriesError:
+                kept = kept or {"series": [], "queued": 0}
+            self._shelf_kept = (time.time(), kept)
+        return kept
 
     @property
     def configured(self):
@@ -112,12 +175,12 @@ class Series:
         if not config.series_url:
             raise SeriesError("The series server is not set up yet. An admin can add it under Admin, Hub, Connections.")
         try:
-            r = requests.post(config.series_url + "/api/graphql", json={"query": query, "variables": variables or {}},
-                              auth=self._auth(config), timeout=timeout)
-            if r.status_code == 401:
+            reply = requests.post(config.series_url + "/api/graphql", json={"query": query, "variables": variables or {}},
+                                  auth=self._auth(config), timeout=timeout)
+            if reply.status_code == 401:
                 raise SeriesError("The series server refused the user name or password.")
-            r.raise_for_status()
-            payload = r.json()
+            reply.raise_for_status()
+            payload = reply.json()
         except (requests.RequestException, ValueError) as exc:
             raise SeriesError("Could not reach the series server: %s" % exc)
         if payload.get("errors"):
@@ -130,12 +193,12 @@ class Series:
         if not config.series_url:
             raise SeriesError("The series server is not set up yet.")
         try:
-            r = requests.get(config.series_url + path, auth=self._auth(config), timeout=TIMEOUT, stream=stream)
+            reply = requests.get(config.series_url + path, auth=self._auth(config), timeout=TIMEOUT, stream=stream)
         except requests.RequestException as exc:
             raise SeriesError("Could not reach the series server: %s" % exc)
-        if r.status_code != 200:
-            raise SeriesError("The series server does not have that (%s)." % r.status_code)
-        return r
+        if reply.status_code != 200:
+            raise SeriesError("The series server does not have that (%s)." % reply.status_code)
+        return reply
 
     # ------------------------------------------------------------ settings
 
@@ -148,8 +211,8 @@ class Series:
                             config=config, timeout=8)
         except SeriesError as exc:
             return {"configured": True, "ok": False, "error": str(exc)}
-        sources = [s for s in data["sources"]["nodes"] if s["id"] != LOCAL]
-        keeps = all(data["settings"].get(k) == v for k, v in KEEP_EVERYTHING.items())
+        sources = [source for source in data["sources"]["nodes"] if source["id"] != LOCAL]
+        keeps = all(data["settings"].get(setting) == wanted for setting, wanted in KEEP_EVERYTHING.items())
         return {"configured": True, "ok": True, "version": data["aboutServer"]["version"], "sources": len(sources), "keeps": keeps}
 
     def prepare(self, config=None):
@@ -164,39 +227,41 @@ class Series:
             self.prepare()
 
     def languages(self):
-        langs = {x.strip().lower() for x in (self.hub.config.series_langs or "en").split(",") if x.strip()}
-        return langs | {"all", "localsourcelang"}
+        langs = {lang.strip().lower() for lang in (self.hub.config.series_langs or "en").split(",") if lang.strip()}
+        return langs | {"all", "localsourcelang"}  # multi-language sources and the local folder always count
 
     def sources(self):
         nodes = self.gql("{sources{nodes{id displayName lang isNsfw}}}")["sources"]["nodes"]
         langs = self.languages()
-        return [{"id": s["id"], "name": s["displayName"], "local": s["id"] == LOCAL} for s in nodes if s["lang"].lower() in langs]
+        return [{"id": source["id"], "name": source["displayName"], "local": source["id"] == LOCAL}
+                for source in nodes if source["lang"].lower() in langs]
 
     # --------------------------------------------------------------- shelf
 
     def shelf(self):
         self._ready()
         data = self.gql("{mangas(condition:{inLibrary:true}){nodes{%s}} downloadStatus{queue{state}}}" % SERIES_FIELDS)
-        items = sorted((_series(m) for m in data["mangas"]["nodes"]), key=lambda s: s["title"].lower())
+        items = sorted((_series(manga) for manga in data["mangas"]["nodes"]), key=lambda followed: followed["title"].lower())
         return {"series": items, "queued": len(data["downloadStatus"]["queue"])}
 
     def search(self, query):
         """Ask every source in the chosen languages at once. One slow or broken site must not spoil the rest."""
         sources = self.sources()
-        q = "mutation($s: LongString!, $q: String!){fetchSourceManga(input:{source:$s,type:SEARCH,query:$q,page:1}){mangas{id title inLibrary}}}"
+        mutation = "mutation($s: LongString!, $q: String!){fetchSourceManga(input:{source:$s,type:SEARCH,query:$q,page:1}){mangas{id title inLibrary}}}"
 
         def ask(source):
             try:
-                found = self.gql(q, {"s": source["id"], "q": query})["fetchSourceManga"]["mangas"]
+                found = self.gql(mutation, {"s": source["id"], "q": query})["fetchSourceManga"]["mangas"]
             except SeriesError as exc:
                 return {"source": source["name"], "error": str(exc)[:200], "results": []}
             return {"source": source["name"], "error": "",
-                    "results": [{"id": m["id"], "title": m["title"], "following": m["inLibrary"]} for m in found[:12]]}
+                    "results": [{"id": manga["id"], "title": manga["title"], "following": manga["inLibrary"]} for manga in found[:12]]}
 
+        # all sources at once, 6 at a time. one slowpoke site shouldn't make everyone wait in line
         with ThreadPoolExecutor(max_workers=6) as pool:
             groups = list(pool.map(ask, sources))
-        groups.sort(key=lambda g: (not g["results"], g["source"].lower()))
-        return {"groups": groups, "sources": len([s for s in sources if not s["local"]])}
+        groups.sort(key=lambda group: (not group["results"], group["source"].lower()))
+        return {"groups": groups, "sources": len([source for source in sources if not source["local"]])}
 
     def detail(self, series_id, refresh=False):
         if refresh:
@@ -206,44 +271,99 @@ class Series:
                         % (SERIES_FIELDS, CHAPTER_FIELDS), {"id": series_id})
         if not data.get("manga"):
             raise SeriesError("That series is not on the series server.")
-        chapters = sorted((_chapter(c) for c in data["chapters"]["nodes"]), key=lambda c: c["order"])
+        chapters = sorted((_chapter(chapter) for chapter in data["chapters"]["nodes"]), key=lambda chapter: chapter["order"])
         if not chapters and not refresh:
             return self.detail(series_id, refresh=True)  # found by a search but never opened
         info = _series(data["manga"])
+        kept, dropped = unique(chapters)
+        if dropped:  # the server counts doubles twice; recount with one copy each
+            read = sum(chapter["read"] for chapter in kept)
+            info.update(chapters=len(kept), read=read, unread=len(kept) - read,
+                        downloaded=sum(chapter["downloaded"] for chapter in unique(chapters, among_downloaded=True)[0]))
+        # chapters_list has one copy of each chapter; every_chapter is everything the site lists, twice-listed ones too.
         info.update(description=(data["manga"].get("description") or "")[:3000], following=bool(data["manga"]["inLibrary"]),
-                    link=data["manga"].get("realUrl") or "", chapters_list=chapters)
+                    link=data["manga"].get("realUrl") or "", chapters_list=kept, every_chapter=chapters, doubles=len(dropped))
         return info
 
     def follow(self, series_id):
         """Follow a series and start downloading every chapter of it."""
         self._ready()
         self.gql("mutation($id: Int!){updateManga(input:{id:$id,patch:{inLibrary:true}}){manga{id}}}", {"id": series_id})
+        self._shelf_kept = (0, None)
         return self.download(series_id, refresh=True)
 
     def unfollow(self, series_id):
         """Stop following. Chapters already downloaded stay on disk."""
         self.gql("mutation($id: Int!){updateManga(input:{id:$id,patch:{inLibrary:false}}){manga{id}}}", {"id": series_id})
+        self._shelf_kept = (0, None)
 
     def download(self, series_id, refresh=False):
         chapters = self.detail(series_id, refresh=refresh)["chapters_list"]
-        ids = [c["id"] for c in chapters if not c["downloaded"]]
+        ids = [chapter["id"] for chapter in chapters if not chapter["downloaded"]]
         if ids:
             self.gql("mutation($ids: [Int!]!){enqueueChapterDownloads(input:{ids:$ids}){downloadStatus{state}}}", {"ids": ids})
             self.gql("mutation{startDownloader(input:{}){downloadStatus{state}}}")
         return len(ids)
 
+    def drop_doubles(self, info):
+        """Delete the downloaded copies of twice-listed chapters once the copy kept is downloaded. Returns how many.
+        Copies not downloaded yet are taken off the download queue (the series server queues every new chapter,
+        second copies too), so they are not downloaded only to be deleted."""
+        kept, dropped = unique(info.get("every_chapter") or info["chapters_list"])
+        waiting = [chapter["id"] for chapter in dropped if not chapter["downloaded"]]
+        if waiting:
+            try:  # ids not in the queue are passed over by the series server
+                self.gql("mutation($ids: [Int!]!){dequeueChapterDownloads(input:{ids:$ids}){downloadStatus{state}}}", {"ids": waiting})
+            except SeriesError:
+                pass  # tried again next time; the deleting below does not depend on it
+        # only bin a spare once its replacement is safely downloaded. never leave a chapter with zero copies
+        done = {chapter["number"] for chapter in kept if chapter["downloaded"]}
+        ids = [chapter["id"] for chapter in dropped if chapter["downloaded"] and chapter["number"] in done]
+        if ids:
+            self.gql("mutation($ids: [Int!]!){deleteDownloadedChapters(input:{ids:$ids}){chapters{id}}}", {"ids": ids})
+        return len(ids)
+
     def mark(self, chapter_ids, read):
         self.gql("mutation($ids: [Int!]!, $r: Boolean!){updateChapters(input:{ids:$ids,patch:{isRead:$r}}){chapters{id}}}",
-                 {"ids": [int(i) for i in chapter_ids], "r": bool(read)})
+                 {"ids": [int(chapter_id) for chapter_id in chapter_ids], "r": bool(read)})
 
     def pages(self, chapter_id):
         data = self.gql("mutation($id: Int!){fetchChapterPages(input:{chapterId:$id}){pages}}", {"id": chapter_id}, timeout=120)
         return len(data["fetchChapterPages"]["pages"])
 
+    def rest_finished(self):
+        """Series whose publication is over (Finished or Cancelled) go in a category the series server leaves out
+        when it looks for new chapters, and every chapter already found is downloaded. A series that starts
+        again comes out of it. Returns how many are resting."""
+        followed = self.shelf()["series"]
+        categories = self.gql("{categories{nodes{id name}}}")["categories"]["nodes"]
+        category_id = next((category["id"] for category in categories if category["name"] == DONE_CATEGORY), None)
+        if category_id is None:
+            # includeInUpdate:EXCLUDE is the magic bit: the server's "check for new chapters" skips this category
+            category_id = self.gql("mutation($n: String!){createCategory(input:{name:$n, includeInUpdate:EXCLUDE}){category{id}}}",
+                                   {"n": DONE_CATEGORY})["createCategory"]["category"]["id"]
+        done = [followed_series for followed_series in followed if followed_series["status"] in DONE]
+        going = [followed_series["id"] for followed_series in followed if followed_series["status"] not in DONE]
+        mutation = "mutation($ids: [Int!]!, $p: UpdateMangaCategoriesPatchInput!){updateMangasCategories(input:{ids:$ids, patch:$p}){mangas{id}}}"
+        if done:
+            self.gql(mutation, {"ids": [finished["id"] for finished in done], "p": {"addToCategories": [category_id]}})
+        if going:
+            self.gql(mutation, {"ids": going, "p": {"removeFromCategories": [category_id]}})
+        for finished in done:
+            if finished["downloaded"] < finished["chapters"]:  # grab what is there
+                self.download(finished["id"])
+        return len(done)
+
     def check_now(self):
-        """Ask the series server to look for new chapters now, without waiting for the answer."""
-        threading.Thread(target=lambda: self._quiet("mutation{updateLibrary(input:{}){updateStatus{jobsInfo{isRunning}}}}"),
-                         daemon=True).start()
+        """Ask the series server to look for new chapters now, without waiting for the answer. Finished and
+        cancelled series are put aside first, so they are not asked about."""
+        def run():
+            try:
+                self.rest_finished()
+            except SeriesError:
+                pass
+            self._quiet("mutation{updateLibrary(input:{}){updateStatus{jobsInfo{isRunning}}}}")
+        threading.Thread(target=run, daemon=True).start()
 
     def _quiet(self, query):
         try:

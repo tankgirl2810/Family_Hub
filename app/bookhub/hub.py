@@ -3,7 +3,7 @@ import json
 import threading
 import time
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from . import (bookfix, calibre, catalogues, covers, db, devices, duplicates, goodreads, intake, kinds, librarymanager, media, mediasort,
@@ -13,22 +13,23 @@ TAG_WEIGHTS = {"family": 3, "mine": 3, "community": 2, "epub": 1}
 SAME_AUTHOR_WEIGHT = 2
 
 
-
 def _grouped(finished):
     """Recently finished, with the volumes of one series read one after another as a single line."""
-    out = []
+    lines = []
     for item in finished:
-        last = out[-1] if out else None
+        last = lines[-1] if lines else None
+        # binge-read volumes 1-7 of something? that's one line, not seven
         if item["series"] and last and last["series"].lower() == item["series"].lower() and last.get("parts") is not None:
             last["parts"].append(item["part"])
             continue
-        out.append(dict(item, parts=[item["part"]]) if item["series"] and item["part"] else dict(item, parts=None))
-    for g in out:
-        if g["parts"] and len(g["parts"]) > 1:
-            g["title"] = g["series"]
-            g["id"] = None
-            g["volumes"] = len(g["parts"])
-    return out
+        lines.append(dict(item, parts=[item["part"]]) if item["series"] and item["part"] else dict(item, parts=None))
+    for line in lines:
+        if line["parts"] and len(line["parts"]) > 1:
+            line["title"] = line["series"]
+            line["id"] = None
+            line["volumes"] = len(line["parts"])
+    return lines
+
 
 class Hub:
     def __init__(self, config):
@@ -65,7 +66,7 @@ class Hub:
         return self.con().execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
 
     def profile_names(self):
-        return {r["id"]: r["name"] for r in self.profiles()}
+        return {row["id"]: row["name"] for row in self.profiles()}
 
     # ---------------------------------------------------------------- tags
 
@@ -93,21 +94,22 @@ class Hub:
         rules = self.tag_rules()
         for book in self.library.books():
             index[book["key"]]["epub"] = tags.apply_rules(book["tags"], rules)
-        for r in con.execute("SELECT book_key, tag FROM community_tags ORDER BY tag"):
-            index[r["book_key"]]["community"].append(r["tag"])
+        for row in con.execute("SELECT book_key, tag FROM community_tags ORDER BY tag"):
+            index[row["book_key"]]["community"].append(row["tag"])
         if rules:
             for groups in index.values():
                 groups["community"] = tags.apply_rules(groups["community"], rules)
-        for r in con.execute("SELECT book_key, tag FROM family_tags ORDER BY tag"):
-            index[r["book_key"]]["family"].append(r["tag"])
+        # family and personal tags are typed by people, so the admin's tidying rules never touch them
+        for row in con.execute("SELECT book_key, tag FROM family_tags ORDER BY tag"):
+            index[row["book_key"]]["family"].append(row["tag"])
         if profile_id:
-            for r in con.execute("SELECT book_key, tag FROM personal_tags WHERE profile_id=? ORDER BY tag", (profile_id,)):
-                index[r["book_key"]]["mine"].append(r["tag"])
+            for row in con.execute("SELECT book_key, tag FROM personal_tags WHERE profile_id=? ORDER BY tag", (profile_id,)):
+                index[row["book_key"]]["mine"].append(row["tag"])
         return index
 
     def tag_rules(self):
         """An admin's tidying of machine tags: {tag in lower case: new name, or "" to hide it}."""
-        return {r["tag"].lower(): r["becomes"] for r in self.con().execute("SELECT tag, becomes FROM tag_rules")}
+        return {row["tag"].lower(): row["becomes"] for row in self.con().execute("SELECT tag, becomes FROM tag_rules")}
 
     def set_tag_rule(self, tag, becomes):
         """Hide a book-file or community tag everywhere (""), rename it, or put it back (None)."""
@@ -139,19 +141,19 @@ class Hub:
             for tag in book["tags"]:
                 count(tag, "Book file")
             removed.update(tags.dropped(book["raw_tags"], book["tags"]))
-        for r in self.con().execute("SELECT book_key, tag, source FROM community_tags"):
-            if r["book_key"] in keys:
-                count(r["tag"], catalogues.label(r["source"]))
+        for row in self.con().execute("SELECT book_key, tag, source FROM community_tags"):
+            if row["book_key"] in keys:
+                count(row["tag"], catalogues.label(row["source"]))
         rules = self.tag_rules()
-        rows = [{"tag": e["tag"], "count": e["count"], "sources": sorted(e["sources"]),
-                 "becomes": rules.get(e["tag"].lower())} for e in counts.values()]
-        rows.sort(key=lambda e: (-e["count"], e["tag"].lower()))
-        return {"tags": rows, "removed": [{"tag": t, "count": n} for t, n in removed.most_common()]}
+        rows = [{"tag": entry["tag"], "count": entry["count"], "sources": sorted(entry["sources"]),
+                 "becomes": rules.get(entry["tag"].lower())} for entry in counts.values()]
+        rows.sort(key=lambda entry: (-entry["count"], entry["tag"].lower()))
+        return {"tags": rows, "removed": [{"tag": tag, "count": times} for tag, times in removed.most_common()]}
 
     # -------------------------------------------------------------- copies
 
     def copy_choices(self):
-        return {r["book_key"]: r["choice"] for r in self.con().execute("SELECT book_key, choice FROM copy_choices")}
+        return {row["book_key"]: row["choice"] for row in self.con().execute("SELECT book_key, choice FROM copy_choices")}
 
     def set_copy_choice(self, book_key, choice):
         """Show entries that share a name as one book ("together"), separately
@@ -168,22 +170,22 @@ class Hub:
 
     def copy_sets(self):
         """What an admin needs to judge each set of same-named entries."""
-        def entry(b):
-            return {"id": b["id"], "title": b["title"], "author": b["author"], "added": b["added"][:10],
-                    "shown": b["copy_of"] is None, "has_cover": b["has_cover"],
-                    "files": [{"format": f, "size": b["sizes"].get(f, 0)} for f in sorted(b["own_formats"])]}
+        def entry(book):
+            return {"id": book["id"], "title": book["title"], "author": book["author"], "added": book["added"][:10],
+                    "shown": book["copy_of"] is None, "has_cover": book["has_cover"],
+                    "files": [{"format": fmt, "size": book["sizes"].get(fmt, 0)} for fmt in sorted(book["own_formats"])]}
 
         sets = []
-        for s in self.library.sets():
-            first = s["shown"][0]
-            together = len(s["shown"]) == 1
-            # Space taken by files that say nothing new: the same format again.
-            spare = sum(c["sizes"].get(f, 0) for b in s["shown"] for c in b["copies"] for f in c["own_formats"]
-                        if f in b["own_formats"])
-            sets.append({"key": s["key"], "title": first["title"], "author": first["author"], "choice": s["choice"],
-                         "together": together, "partly": not together and len(s["shown"]) < len(s["books"]),
-                         "spare": spare, "books": [entry(b) for b in s["books"]]})
-        sets.sort(key=lambda s: s["title"].lower())
+        for group in self.library.sets():
+            first = group["shown"][0]
+            together = len(group["shown"]) == 1
+            # wasted space = a copy carrying a format the shown book already has (same thing, twice)
+            spare = sum(copy["sizes"].get(fmt, 0) for shown in group["shown"] for copy in shown["copies"]
+                        for fmt in copy["own_formats"] if fmt in shown["own_formats"])
+            sets.append({"key": group["key"], "title": first["title"], "author": first["author"], "choice": group["choice"],
+                         "together": together, "partly": not together and len(group["shown"]) < len(group["books"]),
+                         "spare": spare, "books": [entry(book) for book in group["books"]]})
+        sets.sort(key=lambda entry: entry["title"].lower())
         return sets
 
     def add_tag(self, kind, book_key, tag, profile_id):
@@ -248,7 +250,7 @@ class Hub:
             if percent >= 99:
                 status = "finished"
             elif old and old["status"] == "finished" and source != "manual":
-                # A device reopening a finished book does not un-finish it.
+                # opening a finished book on the e-reader to look something up doesn't un-finish it
                 status, percent = "finished", 100.0
             else:
                 status = "reading"
@@ -285,14 +287,16 @@ class Hub:
         """Estimate page counts for library EPUBs, and count them for comics, where there is none yet."""
         con = self.con()
         done = 0
+        known = {row["book_key"]: row["pages"] for row in con.execute("SELECT book_key, pages FROM book_meta")}
         for book in self.library.books():
-            self.ensure_meta(book["key"])
-            row = con.execute("SELECT pages FROM book_meta WHERE book_key=?", (book["key"],)).fetchone()
-            if row["pages"]:
+            if book["key"] not in known:
+                self.ensure_meta(book["key"])
+            elif known[book["key"]]:
                 continue
             if "EPUB" in book["formats"]:
                 path = self.library.file_path(book, "EPUB")
-                pages = (calibre.estimate_pages(path) or calibre.count_pictures(path)) if path else None  # a comic EPUB is pictures
+                # no text in it? probably a comic EPUB, so count pictures instead
+                pages = (calibre.estimate_pages(path) or calibre.count_pictures(path)) if path else None
             elif "CBZ" in book["formats"]:
                 path = self.library.file_path(book, "CBZ")
                 pages = calibre.count_pictures(path) if path else None
@@ -318,6 +322,7 @@ class Hub:
             return 0
         con = self.con()
         count = 0
+        by_plain_key = None  # library books by title and author key, made the first time a pack entry needs it
         for file in sorted(Path(folder).glob("*.json")):
             try:
                 pack = json.loads(file.read_text(encoding="utf-8"))
@@ -331,14 +336,17 @@ class Hub:
                 key = db.make_key(title, author, entry.get("isbn"))
                 # Prefer the key of a matching library book (it may be ISBN based).
                 plain = db.make_key(title, author)
+                # for/else: the else only runs if the loop never hit "break". python's weirdest feature, used on purpose
                 for candidate in (key, plain):
                     if self.library.by_key(candidate):
                         key = candidate
                         break
                 else:
-                    match = next((b for b in self.library.books() if db.make_key(b["title"], b["author"]) == plain), None)
-                    if match:
-                        key = match["key"]
+                    if by_plain_key is None:
+                        by_plain_key = {}
+                        for book in self.library.books():
+                            by_plain_key.setdefault(db.make_key(book["title"], book["author"]), book["key"])
+                    key = by_plain_key.get(plain, key)
                 self.ensure_meta(key, title, author, entry.get("isbn"), entry.get("pages"), source="pack")
                 for tag in entry.get("tags", []):
                     tag = db.clean_tag(tag)
@@ -351,14 +359,14 @@ class Hub:
 
     # --------------------------------------------------------------- stats
 
-    def _matches(self, tags, author, kind, value):
+    def _matches(self, book_tags, author, kind, value):
         if not kind or not value:
             return True
         value = value.lower()
         if kind == "author":
             return value in (author or "").lower()
         group = {"genre": "epub"}.get(kind, kind)
-        return any(t.lower() == value for t in tags.get(group, []))
+        return any(tag.lower() == value for tag in book_tags.get(group, []))
 
     def personal_stats(self, profile_id, kind=None, value=None, year=None):
         year = year or date.today().year
@@ -366,62 +374,63 @@ class Hub:
         keys = self.library.keys()
         kind_of = self.kind_index()
         this_month = date.today().month if year == date.today().year else 12
-        months = [{"month": m, "library": 0, "outside": 0, "pages": 0} for m in range(1, this_month + 1)]
+        months = [{"month": month, "library": 0, "outside": 0, "pages": 0} for month in range(1, this_month + 1)]
         finished, reading_now = [], []
         tag_counts = {"epub": Counter(), "community": Counter(), "family": Counter(), "mine": Counter()}
         author_counts = Counter()
         pages_total = 0
-        for r in self.reading_rows(profile_id):
-            in_library = r["book_key"] in keys
-            book = keys.get(r["book_key"]) or {}
-            tags = index.get(r["book_key"], {})
+        for row in self.reading_rows(profile_id):
+            in_library = row["book_key"] in keys
+            book = keys.get(row["book_key"]) or {}
+            book_tags = index.get(row["book_key"], {})
             item = {
-                "book_key": r["book_key"], "title": book.get("title") or r["title"] or r["book_key"], "author": r["author"] or "",
-                "graphic": kind_of.get(r["book_key"]) == kinds.GRAPHIC,
+                "book_key": row["book_key"], "title": book.get("title") or row["title"] or row["book_key"], "author": row["author"] or "",
+                "graphic": kind_of.get(row["book_key"]) == kinds.GRAPHIC,
                 "series": book.get("series") or "", "part": book.get("part") or "",
-                "status": r["status"], "percent": r["percent"], "started": r["started"], "finished": r["finished"],
-                "source": r["source"], "device": r["device"], "updated": r["updated"], "pages": r["pages"],
-                "in_library": in_library, "id": keys[r["book_key"]]["id"] if in_library else None,
+                "status": row["status"], "percent": row["percent"], "started": row["started"], "finished": row["finished"],
+                "source": row["source"], "device": row["device"], "updated": row["updated"], "pages": row["pages"],
+                "in_library": in_library, "id": keys[row["book_key"]]["id"] if in_library else None,
             }
-            if r["status"] == "reading":
+            if row["status"] == "reading":
                 reading_now.append(item)
                 continue
-            if r["status"] != "finished" or not (r["finished"] or "").startswith(str(year)):
+            if row["status"] != "finished" or not (row["finished"] or "").startswith(str(year)):
                 continue
             finished.append(item)
             for group in tag_counts:
-                tag_counts[group].update(tags.get(group, []))
-            for name in [a.strip() for a in (r["author"] or "").split("&") if a.strip()]:
+                tag_counts[group].update(book_tags.get(group, []))
+            # "Unknown" and other placeholders are not authors to count or filter by.
+            for name in [author.strip() for author in (row["author"] or "").split("&") if catalogues.author_known(author.strip())]:
                 author_counts[name] += 1
-            pages_total += r["pages"] or 0
-            if not self._matches(tags, r["author"], kind, value):
+            pages_total += row["pages"] or 0
+            if not self._matches(book_tags, row["author"], kind, value):
                 continue
-            month = int(r["finished"][5:7])
+            month = int(row["finished"][5:7])  # "2026-10-27" -> 10
             if month <= len(months):
                 months[month - 1]["library" if in_library else "outside"] += 1
-                months[month - 1]["pages"] += r["pages"] or 0
-        finished.sort(key=lambda i: i["finished"] or "", reverse=True)
-        reading_now.sort(key=lambda i: i["updated"] or "", reverse=True)
+                months[month - 1]["pages"] += row["pages"] or 0
+        finished.sort(key=lambda item: item["finished"] or "", reverse=True)
+        reading_now.sort(key=lambda item: item["updated"] or "", reverse=True)
         current = "%04d-%02d" % (year, this_month)
-        month = [i for i in finished if (i["finished"] or "").startswith(current)]
-        graphic = [i for i in finished if i["graphic"]]
+        month = [item for item in finished if (item["finished"] or "").startswith(current)]
+        graphic = [item for item in finished if item["graphic"]]
         return {
             "year": year,
             "read_year": len(finished),
             "read_books": len(finished) - len(graphic),
-            "books_library": sum(1 for i in finished if i["in_library"] and not i["graphic"]),
+            "books_library": sum(1 for item in finished if item["in_library"] and not item["graphic"]),
             "read_graphic": len(graphic),  # volumes, each counted
-            "graphic_series": len({i["series"].lower() for i in graphic if i["series"]}),
+            "graphic_series": len({item["series"].lower() for item in graphic if item["series"]}),
             "read_month": len(month),
-            "month_books": sum(1 for i in month if not i["graphic"]),
-            "month_graphic": sum(1 for i in month if i["graphic"]),
-            "read_library": sum(1 for i in finished if i["in_library"]),
+            "month_books": sum(1 for item in month if not item["graphic"]),
+            "month_graphic": sum(1 for item in month if item["graphic"]),
+            "read_library": sum(1 for item in finished if item["in_library"]),
             "pages_year": pages_total,
-            "pages_unknown": sum(1 for i in finished if not i["pages"]),
+            "pages_unknown": sum(1 for item in finished if not item["pages"]),
             "authors_year": len(author_counts),
             "months": months,
-            "filtered_total": sum(m["library"] + m["outside"] for m in months),
-            "top": {g: tag_counts[g].most_common(8) for g in tag_counts},
+            "filtered_total": sum(entry["library"] + entry["outside"] for entry in months),
+            "top": {group: tag_counts[group].most_common(8) for group in tag_counts},
             "authors": author_counts.most_common(8),
             "reading_now": reading_now,
             "recent": _grouped(finished)[:8],
@@ -432,44 +441,44 @@ class Hub:
         books = self.library.books()
         added = Counter()
         formats = Counter()
-        for b in books:
-            if b["added"].startswith(str(today.year)):
-                added[int(b["added"][5:7])] += 1
-            for fmt in b["formats"]:
+        for book in books:
+            if book["added"].startswith(str(today.year)):
+                added[int(book["added"][5:7])] += 1
+            for fmt in book["formats"]:
                 formats[fmt] += 1
         keys = self.library.keys()
         started_keys = set()
         per_profile = defaultdict(lambda: {"read_year": 0, "read_month": 0, "reading": 0, "last": None})
         current = today.strftime("%Y-%m")
-        for r in self.reading_rows():
-            p = per_profile[r["profile_id"]]
-            if r["book_key"] in keys:
-                started_keys.add(r["book_key"])
-            if r["status"] == "reading":
-                p["reading"] += 1
-            elif r["status"] == "finished" and (r["finished"] or "").startswith(str(today.year)):
-                p["read_year"] += 1
-                if r["finished"].startswith(current):
-                    p["read_month"] += 1
-            if not p["last"] or r["updated"] > p["last"]:
-                p["last"] = r["updated"]
+        for row in self.reading_rows():
+            person = per_profile[row["profile_id"]]
+            if row["book_key"] in keys:
+                started_keys.add(row["book_key"])
+            if row["status"] == "reading":
+                person["reading"] += 1
+            elif row["status"] == "finished" and (row["finished"] or "").startswith(str(today.year)):
+                person["read_year"] += 1
+                if row["finished"].startswith(current):
+                    person["read_month"] += 1
+            if not person["last"] or row["updated"] > person["last"]:
+                person["last"] = row["updated"]
         family = []
         for prof in self.profiles():
             row = per_profile[prof["id"]]
             family.append({"id": prof["id"], "name": prof["name"], "role": prof["role"], **row})
-        recent = sorted(books, key=lambda b: b["added"], reverse=True)[:8]
+        recent = sorted(books, key=lambda book: book["added"], reverse=True)[:8]
         return {
             "year": today.year,
             "total": len(books),
             "formats": formats.most_common(),
             "added_month": added.get(today.month, 0),
             "added_year": sum(added.values()),
-            "added_by_month": [{"month": m, "count": added.get(m, 0)} for m in range(1, today.month + 1)],
-            "read_year": sum(f["read_year"] for f in family),
-            "read_month": sum(f["read_month"] for f in family),
+            "added_by_month": [{"month": month, "count": added.get(month, 0)} for month in range(1, today.month + 1)],
+            "read_year": sum(person["read_year"] for person in family),
+            "read_month": sum(person["read_month"] for person in family),
             "never_opened": len(books) - len(started_keys),
             "family": family,
-            "recent": [{"id": b["id"], "title": b["title"], "author": b["author"], "added": b["added"][:10]} for b in recent],
+            "recent": [{"id": book["id"], "title": book["title"], "author": book["author"], "added": book["added"][:10]} for book in recent],
             "last_backup": db.kv_get(self.con(), "last_backup"),
         }
 
@@ -479,33 +488,33 @@ class Hub:
         """Books sharing tags or an author with the given one, best match first."""
         index = self.tag_index(profile_id)
         con = self.con()
-        meta = {r["book_key"]: r for r in con.execute("SELECT * FROM book_meta")}
+        meta = {row["book_key"]: row for row in con.execute("SELECT * FROM book_meta")}
         base_tags = index.get(book_key, {})
         base_meta = meta.get(book_key)
         base_author = (base_meta["author"] if base_meta else "").lower()
-        base = {g: {t.lower() for t in base_tags.get(g, [])} for g in TAG_WEIGHTS}
+        base = {group: {tag.lower() for tag in base_tags.get(group, [])} for group in TAG_WEIGHTS}
         every = set().union(*base.values()) if base else set()
         finished = set()
         if profile_id:
-            finished = {r["book_key"] for r in self.reading_rows(profile_id) if r["status"] == "finished"}
+            finished = {row["book_key"] for row in self.reading_rows(profile_id) if row["status"] == "finished"}
         keys = self.library.keys()
         results = []
         for key in set(index) | set(meta):
             if key == book_key or key.startswith("doc:"):
                 continue
-            tags = index.get(key, {})
+            their_tags = index.get(key, {})
             shared, score = [], 0
             for group, weight in TAG_WEIGHTS.items():
-                for tag in tags.get(group, []):
+                for tag in their_tags.get(group, []):
                     low = tag.lower()
-                    # A tag counts wherever it appears on the base book.
+                    # a shared tag scores whichever is heavier: its weight here, or its best weight on the base book
                     if low in every and tag not in shared:
                         shared.append(tag)
-                        score += max(weight, max(w for g, w in TAG_WEIGHTS.items() if low in base[g]))
-            m = meta.get(key)
+                        score += max(weight, max(base_weight for base_group, base_weight in TAG_WEIGHTS.items() if low in base[base_group]))
+            their_meta = meta.get(key)
             in_library = key in keys
-            title = keys[key]["title"] if in_library else (m["title"] if m else key)
-            author = keys[key]["author"] if in_library else (m["author"] if m else "")
+            title = keys[key]["title"] if in_library else (their_meta["title"] if their_meta else key)
+            author = keys[key]["author"] if in_library else (their_meta["author"] if their_meta else "")
             if base_author and author and author.lower() == base_author:
                 score += SAME_AUTHOR_WEIGHT
                 shared.append("same author")
@@ -516,7 +525,7 @@ class Hub:
                 "in_library": in_library, "id": keys[key]["id"] if in_library else None,
                 "already_read": key in finished,
             })
-        results.sort(key=lambda r: (r["already_read"], -r["score"], r["title"]))
+        results.sort(key=lambda result: (result["already_read"], -result["score"], result["title"]))
         return results[:limit]
 
     # -------------------------------------------------------------- backup
@@ -527,18 +536,18 @@ class Hub:
         names = self.profile_names()
         index = self.tag_index()
         # Only kinds a person chose; guesses are made again from the book itself.
-        kind_of = {r["book_key"]: r["kind"] for r in con.execute("SELECT book_key, kind FROM book_kind WHERE source='manual'")}
+        kind_of = {row["book_key"]: row["kind"] for row in con.execute("SELECT book_key, kind FROM book_kind WHERE source='manual'")}
         books = {}
 
         def entry(key):
             if key not in books:
-                m = con.execute("SELECT * FROM book_meta WHERE book_key=?", (key,)).fetchone()
-                lib = self.library.by_key(key)
+                meta = con.execute("SELECT * FROM book_meta WHERE book_key=?", (key,)).fetchone()
+                owned = self.library.by_key(key)
                 books[key] = {
-                    "title": lib["title"] if lib else (m["title"] if m else key),
-                    "author": lib["author"] if lib else (m["author"] if m else ""),
-                    "isbn": (lib["isbn"] if lib else (m["isbn"] if m else "")) or "",
-                    "pages": m["pages"] if m else None,
+                    "title": owned["title"] if owned else (meta["title"] if meta else key),
+                    "author": owned["author"] if owned else (meta["author"] if meta else ""),
+                    "isbn": (owned["isbn"] if owned else (meta["isbn"] if meta else "")) or "",
+                    "pages": meta["pages"] if meta else None,
                     "kind": kind_of.get(key),
                     "epub_tags": index.get(key, {}).get("epub", []),
                     "community_tags": [], "family_tags": [], "personal_tags": {}, "ratings": {}, "reading": {},
@@ -548,26 +557,27 @@ class Hub:
 
         for key in kind_of:
             entry(key)
-        for r in con.execute("SELECT * FROM community_tags ORDER BY tag"):
-            entry(r["book_key"])["community_tags"].append({"tag": r["tag"], "source": r["source"]})
-        for r in con.execute("SELECT * FROM family_tags ORDER BY tag"):
-            entry(r["book_key"])["family_tags"].append(r["tag"])
-        for r in con.execute("SELECT * FROM personal_tags ORDER BY tag"):
-            entry(r["book_key"])["personal_tags"].setdefault(names.get(r["profile_id"], "?"), []).append(r["tag"])
-        for r in con.execute("SELECT * FROM ratings"):
-            entry(r["book_key"])["ratings"][names.get(r["profile_id"], "?")] = r["rating"]
-        for r in con.execute("SELECT * FROM shelf ORDER BY profile_id"):
-            entry(r["book_key"])["shelves"].append(names.get(r["profile_id"], "?"))
-        for r in con.execute("SELECT * FROM reading"):
-            entry(r["book_key"])["reading"][names.get(r["profile_id"], "?")] = {
-                "status": r["status"], "percent": r["percent"], "started": r["started"],
-                "finished": r["finished"], "source": r["source"],
+        # people are written by NAME, not id, so the file still makes sense on a fresh install
+        for row in con.execute("SELECT * FROM community_tags ORDER BY tag"):
+            entry(row["book_key"])["community_tags"].append({"tag": row["tag"], "source": row["source"]})
+        for row in con.execute("SELECT * FROM family_tags ORDER BY tag"):
+            entry(row["book_key"])["family_tags"].append(row["tag"])
+        for row in con.execute("SELECT * FROM personal_tags ORDER BY tag"):
+            entry(row["book_key"])["personal_tags"].setdefault(names.get(row["profile_id"], "?"), []).append(row["tag"])
+        for row in con.execute("SELECT * FROM ratings"):
+            entry(row["book_key"])["ratings"][names.get(row["profile_id"], "?")] = row["rating"]
+        for row in con.execute("SELECT * FROM shelf ORDER BY profile_id"):
+            entry(row["book_key"])["shelves"].append(names.get(row["profile_id"], "?"))
+        for row in con.execute("SELECT * FROM reading"):
+            entry(row["book_key"])["reading"][names.get(row["profile_id"], "?")] = {
+                "status": row["status"], "percent": row["percent"], "started": row["started"],
+                "finished": row["finished"], "source": row["source"],
             }
         return {
             "format": "bookhub-bookdata", "version": 1, "exported_at": db.now(),
-            "profiles": [{"name": p["name"], "role": p["role"]} for p in self.profiles()],
-            "tag_rules": [{"tag": r["tag"], "becomes": r["becomes"]}
-                          for r in con.execute("SELECT tag, becomes FROM tag_rules ORDER BY tag")],
+            "profiles": [{"name": profile["name"], "role": profile["role"]} for profile in self.profiles()],
+            "tag_rules": [{"tag": row["tag"], "becomes": row["becomes"]}
+                          for row in con.execute("SELECT tag, becomes FROM tag_rules ORDER BY tag")],
             "copy_choices": self.copy_choices(),
             "books": books,
         }
@@ -577,9 +587,10 @@ class Hub:
         if not isinstance(data, dict) or data.get("format") != "bookhub-bookdata":
             raise ValueError("This is not a Family Hub book-data file.")
         con = self.con()
-        ids = {p["name"].lower(): p["id"] for p in self.profiles()}
+        ids = {profile["name"].lower(): profile["id"] for profile in self.profiles()}
 
         def pid(name):
+            """The profile id for a name in the file, making a member profile for a name we've never met."""
             low = name.lower()
             if low not in ids:
                 cur = con.execute("INSERT INTO profiles(name, role, created) VALUES(?, 'member', ?)", (name, db.now()))
@@ -595,33 +606,34 @@ class Hub:
                 con.execute("INSERT OR IGNORE INTO copy_choices(book_key, choice) VALUES(?,?)", (key, choice))
         self.library.set_choices(self.copy_choices())
         count = 0
-        for key, b in (data.get("books") or {}).items():
-            self.ensure_meta(key, b.get("title") or key, b.get("author"), b.get("isbn"), b.get("pages"), source="import")
-            if b.get("kind") in kinds.KINDS and b["kind"] != kinds.UNSORTED:
+        # INSERT OR IGNORE everywhere: merging never overwrites what's already here, it only fills gaps
+        for key, saved in (data.get("books") or {}).items():
+            self.ensure_meta(key, saved.get("title") or key, saved.get("author"), saved.get("isbn"), saved.get("pages"), source="import")
+            if saved.get("kind") in kinds.KINDS and saved["kind"] != kinds.UNSORTED:
                 con.execute("INSERT OR IGNORE INTO book_kind(book_key, kind, source, updated) VALUES(?,?,'manual',?)",
-                            (key, b["kind"], db.now()))
-            for t in b.get("community_tags", []):
+                            (key, saved["kind"], db.now()))
+            for tag in saved.get("community_tags", []):
                 con.execute("INSERT OR IGNORE INTO community_tags(book_key, tag, source) VALUES(?,?,?)",
-                            (key, db.clean_tag(t.get("tag")), t.get("source") or "import"))
-            for t in b.get("family_tags", []):
+                            (key, db.clean_tag(tag.get("tag")), tag.get("source") or "import"))
+            for tag in saved.get("family_tags", []):
                 con.execute("INSERT OR IGNORE INTO family_tags(book_key, tag, added_by, created) VALUES(?,?,NULL,?)",
-                            (key, db.clean_tag(t), db.now()))
-            for name, tags in (b.get("personal_tags") or {}).items():
-                for t in tags:
+                            (key, db.clean_tag(tag), db.now()))
+            for name, their_tags in (saved.get("personal_tags") or {}).items():
+                for tag in their_tags:
                     con.execute("INSERT OR IGNORE INTO personal_tags(book_key, profile_id, tag, created) VALUES(?,?,?,?)",
-                                (key, pid(name), db.clean_tag(t), db.now()))
-            for name in b.get("shelves") or []:
+                                (key, pid(name), db.clean_tag(tag), db.now()))
+            for name in saved.get("shelves") or []:
                 con.execute("INSERT OR IGNORE INTO shelf(profile_id, book_key, added_by, added) VALUES(?,?,NULL,?)",
                             (pid(name), key, db.now()))
-            for name, rating in (b.get("ratings") or {}).items():
+            for name, rating in (saved.get("ratings") or {}).items():
                 con.execute("INSERT OR IGNORE INTO ratings(book_key, profile_id, rating, updated) VALUES(?,?,?,?)",
                             (key, pid(name), max(1, min(5, int(rating))), db.now()))
-            for name, r in (b.get("reading") or {}).items():
+            for name, reading in (saved.get("reading") or {}).items():
                 con.execute(
                     "INSERT OR IGNORE INTO reading(book_key, profile_id, status, percent, started, finished, source, updated) "
                     "VALUES(?,?,?,?,?,?,?,?)",
-                    (key, pid(name), r.get("status") or "finished", r.get("percent") or 0, r.get("started"),
-                     r.get("finished"), r.get("source") or "import", db.now()),
+                    (key, pid(name), reading.get("status") or "finished", reading.get("percent") or 0, reading.get("started"),
+                     reading.get("finished"), reading.get("source") or "import", db.now()),
                 )
             count += 1
         con.commit()
@@ -637,9 +649,10 @@ class Hub:
             folder = self.config.backups_dir
             folder.mkdir(parents=True, exist_ok=True)
             target = folder / ("bookdata-%s.json" % date.today().isoformat())
-            tmp = target.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.export_data(), indent=1, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(target)
+            # write to .tmp then swap: a crash mid-write leaves yesterday's file whole, not half of today's
+            partial = target.with_suffix(".tmp")
+            partial.write_text(json.dumps(self.export_data(), indent=1, ensure_ascii=False), encoding="utf-8")
+            partial.replace(target)
             files = sorted(folder.glob("bookdata-*.json"))
             for old in files[:-self.config.backup_keep]:
                 old.unlink(missing_ok=True)
@@ -663,7 +676,7 @@ class Hub:
 
     def kind_index(self):
         """{book_key: kind} for every book that has been sorted."""
-        return {r["book_key"]: r["kind"] for r in self.con().execute("SELECT book_key, kind FROM book_kind")}
+        return {row["book_key"]: row["kind"] for row in self.con().execute("SELECT book_key, kind FROM book_kind")}
 
     def set_kind(self, book_key, kind, source="manual"):
         if kind not in kinds.KINDS:
@@ -682,21 +695,21 @@ class Hub:
         its delivery by file size, or failing that by its name.
         """
         by_size, by_name = {}, {}
-        for r in self.con().execute("SELECT name, origin, size FROM intake_log WHERE action='delivered' AND origin!=''"):
-            ext = Path(r["name"]).suffix.lower().lstrip(".")
-            by_size[(ext, r["size"])] = r["origin"]
-            by_name[db.slug(Path(r["name"]).stem)] = r["origin"]
+        for row in self.con().execute("SELECT name, origin, size FROM intake_log WHERE action='delivered' AND origin!=''"):
+            ext = Path(row["name"]).suffix.lower().lstrip(".")
+            by_size[(ext, row["size"])] = row["origin"]
+            by_name[db.slug(Path(row["name"]).stem)] = row["origin"]
         return by_size, by_name
 
     def sort_new_books(self, limit=None):
         """Guess a kind and franchise tags for library books not looked at yet."""
         con = self.con()
-        sorted_by = {r["book_key"]: (r["kind"], r["source"]) for r in con.execute("SELECT book_key, kind, source FROM book_kind")}
+        sorted_by = {row["book_key"]: (row["kind"], row["source"]) for row in con.execute("SELECT book_key, kind, source FROM book_kind")}
         # A book whose file the library manager has not filed yet waits: without its format a comic looks unsorted.
         # One guessed Unsorted that turns out to be all comic files is guessed again.
-        todo = [b for b in self.library.books() if b["formats"] and (
-            b["key"] not in sorted_by
-            or (sorted_by[b["key"]] == (kinds.UNSORTED, "auto") and set(b["formats"]) <= kinds.COMIC_FORMATS))]
+        todo = [book for book in self.library.books() if book["formats"] and (
+            book["key"] not in sorted_by
+            or (sorted_by[book["key"]] == (kinds.UNSORTED, "auto") and set(book["formats"]) <= kinds.COMIC_FORMATS))]
         if not todo:
             return 0
         by_size, by_name = self._origins()
@@ -709,10 +722,10 @@ class Hub:
                     if path and (fmt.lower(), path.stat().st_size) in by_size:
                         origin = by_size[(fmt.lower(), path.stat().st_size)]
                         break
-            kind, tags = kinds.guess(book["title"], book["author"], book["series"], book["tags"],
-                                     book["formats"], origin)
+            kind, found_tags = kinds.guess(book["title"], book["author"], book["series"], book["tags"],
+                                           book["formats"], origin)
             self.set_kind(book["key"], kind, source="auto")
-            for tag in tags:
+            for tag in found_tags:
                 con.execute("INSERT OR IGNORE INTO family_tags(book_key, tag, added_by, created) VALUES(?,?,NULL,?)",
                             (book["key"], tag, db.now()))
             done += 1
@@ -721,74 +734,80 @@ class Hub:
         return done
 
 
+def _guarded(app, what, job):
+    """Run one job; if it blows up, log it and let the rest of the minute carry on."""
+    try:
+        job()
+    except Exception as exc:
+        app.logger.warning("%s: %s", what, exc)
+
+
+def _housekeeping(hub, app, tick):
+    """One minute of chores. tick counts minutes since start-up, so "tick % 10 == 5" means every ten minutes,
+    five minutes in. the odd offsets are on purpose: they stop the slow jobs all piling onto the same minute."""
+    from . import bookswap, chapterfile, integrations, joined, kosync, recommend, visuals, watchlist
+    if tick % 10 == 0:
+        hub.load_tagpacks()
+        kosync.index_library(hub)
+        hub.fill_page_counts(limit=200)
+
+        def adopt_progress():  # joined series books a reading app reported progress in before they were recorded
+            if tick == 0:
+                joined.record_existing(hub)
+            joined.adopt(hub)
+        _guarded(app, "could not match reading-app progress in joined books", adopt_progress)
+    hub.intake.tidy_inbox()
+    hub.import_downloads()
+    hub.ingest_stuck = hub.intake.nudge_stuck()
+    hub.sort_new_books(limit=500)
+    if tick % 10 == 5:  # followed series by chapter, joined into comic files as chapters arrive
+        if hub.series.configured:
+            try:  # finished and cancelled series are no longer checked for new chapters
+                hub.series.rest_finished()
+            except series.SeriesError as exc:
+                app.logger.warning("could not put finished series aside: %s", exc)
+        chapterfile.start(hub, app)
+    # a book download whose sharers have all gone is swapped for a copy someone is sharing
+    _guarded(app, "could not look at stuck book downloads", lambda: bookswap.run(hub))
+    if tick % 10 == 3:
+        goodreads.reconcile(hub)  # books that were only on Goodreads and have now arrived
+    hub.devices.send_queued()
+    hub.catalogues.run(limit=4)  # a few books a minute, so catalogues are not hammered
+    readers.run(hub, limit=4)
+    hub.backup_if_needed()
+    if secondcopy.due(hub):  # once a day, after today's book-data file is written
+        secondcopy.start(hub, app)
+    if tick % 60 == 11:  # hourly: is anyone's weekly list of suggestions due?
+        recommend.refresh_due(hub, app.logger.warning)
+    if tick % 5 == 2:  # the VPN can hand out a new port when it reconnects
+        _guarded(app, "could not pass the VPN's port to qBittorrent", hub.media.sync_vpn_port)
+    # a few watchlist entries that are due another look (each every six hours)
+    _guarded(app, "could not check the watchlists", lambda: watchlist.run(hub))
+    # new visuals from the household's GitHub repository, checked hourly
+    _guarded(app, "could not check for new visuals", lambda: visuals.sync(hub))
+    # downloads nobody is sharing wait at the back of the line
+    _guarded(app, "could not check for downloads waiting for seed", hub.media.park_stalled)
+    if tick % 360 == 7:  # every six hours
+        goodreads.sync_all(hub, app.logger.warning)
+    if tick % 360 == 5:  # every six hours
+        for profile in hub.profiles():
+            if not profile["hardcover_token"]:
+                continue
+            try:
+                integrations.hardcover_sync(hub, profile)
+            except integrations.IntegrationError as exc:
+                app.logger.warning("tracker sync failed for %s: %s", profile["name"], exc)
+
+
 def start_background(hub, app):
     """Housekeeping that runs while the server is up."""
-    from . import kosync
-
     def loop():
         tick = 0
         while True:
             try:
                 with app.app_context():
-                    if tick % 10 == 0:
-                        hub.load_tagpacks()
-                        kosync.index_library(hub)
-                        hub.fill_page_counts(limit=200)
-                        try:  # joined series books a reading app reported progress in before they were recorded
-                            from . import joined
-                            if tick == 0:
-                                joined.record_existing(hub)
-                            joined.adopt(hub)
-                        except Exception as exc:
-                            app.logger.warning("could not match reading-app progress in joined books: %s", exc)
-                    hub.intake.tidy_inbox()
-                    hub.import_downloads()
-                    hub.ingest_stuck = hub.intake.nudge_stuck()
-                    hub.sort_new_books(limit=500)
-                    if tick % 10 == 5:  # followed series by chapter, joined into comic files as chapters arrive
-                        from . import chapterfile
-                        chapterfile.start(hub, app)
-                    if tick % 10 == 3:
-                        goodreads.reconcile(hub)  # books that were only on Goodreads and have now arrived
-                    hub.devices.send_queued()
-                    hub.catalogues.run(limit=4)  # a few books a minute, so catalogues are not hammered
-                    readers.run(hub, limit=4)
-                    hub.backup_if_needed()
-                    if secondcopy.due(hub):  # once a day, after today's book-data file is written
-                        secondcopy.start(hub, app)
-                    if tick % 60 == 11:  # hourly: is anyone's weekly list of suggestions due?
-                        from . import recommend
-                        recommend.refresh_due(hub, app.logger.warning)
-                    if tick % 5 == 2:  # the VPN can hand out a new port when it reconnects
-                        try:
-                            hub.media.sync_vpn_port()
-                        except Exception as exc:
-                            app.logger.warning("could not pass the VPN's port to qBittorrent: %s", exc)
-                    try:  # a few watchlist entries that are due another look (each every six hours)
-                        from . import watchlist
-                        watchlist.run(hub)
-                    except Exception as exc:
-                        app.logger.warning("could not check the watchlists: %s", exc)
-                    try:  # new visuals from the household's GitHub repository, checked hourly
-                        from . import visuals
-                        visuals.sync(hub)
-                    except Exception as exc:
-                        app.logger.warning("could not check for new visuals: %s", exc)
-                    try:  # downloads nobody is sharing wait at the back of the line
-                        hub.media.park_stalled()
-                    except Exception as exc:
-                        app.logger.warning("could not check for downloads waiting for seed: %s", exc)
-                    if tick % 360 == 7:  # every six hours
-                        goodreads.sync_all(hub, app.logger.warning)
-                    if tick % 360 == 5:  # every six hours
-                        from . import integrations
-                        for profile in hub.profiles():
-                            if profile["hardcover_token"]:
-                                try:
-                                    integrations.hardcover_sync(hub, profile)
-                                except integrations.IntegrationError as exc:
-                                    app.logger.warning("tracker sync failed for %s: %s", profile["name"], exc)
-            except Exception as exc:  # keep the loop alive whatever happens
+                    _housekeeping(hub, app, tick)
+            except Exception as exc:  # whatever happens, the loop lives to see another minute
                 app.logger.warning("background job failed: %s", exc)
             tick += 1
             time.sleep(60)

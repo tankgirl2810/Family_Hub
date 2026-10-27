@@ -111,7 +111,7 @@ class Config:
             ("radarr", "RADARR_PORT", 7878), ("sonarr", "SONARR_PORT", 8989), ("bazarr", "BAZARR_PORT", 6767),
             ("jellyfin", "JELLYFIN_PORT", 8096), ("suwayomi", "SUWAYOMI_PORT", 4567), ("komga", "KOMGA_PORT", 25600))}
 
-        self.background_jobs =_bool("BACKGROUND_JOBS", True)
+        self.background_jobs = _bool("BACKGROUND_JOBS", True)
         self.backup_keep = int(os.environ.get("BACKUP_KEEP", "30"))
 
     @property

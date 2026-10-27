@@ -21,37 +21,44 @@ class SeriesFileError(Exception):
 
 def _natural(name):
     """Page names in reading order: "page2" before "page10"."""
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+    return [int(chunk) if chunk.isdigit() else chunk.lower() for chunk in re.split(r"(\d+)", name)]
 
 
 def _pages(path, scratch):
     """Every picture in a comic archive, in reading order, as (name inside the archive, bytes getter)."""
     if path.suffix.lower() == ".cbz" or zipfile.is_zipfile(path):
-        z = zipfile.ZipFile(path)
-        names = sorted((n for n in z.namelist() if n.lower().endswith(PICTURES) and not n.startswith("__MACOSX")), key=_natural)
-        return [(n, (lambda n=n: z.read(n))) for n in names]
-    out = scratch / path.stem
-    out.mkdir(parents=True, exist_ok=True)
+        archive = zipfile.ZipFile(path)
+        names = sorted((name for name in archive.namelist() if name.lower().endswith(PICTURES) and not name.startswith("__MACOSX")),
+                       key=_natural)
+        # the name=name default pins each name to its own lambda, otherwise they'd all read the last page
+        return [(name, (lambda name=name: archive.read(name))) for name in names]
+    unpacked = scratch / path.stem
+    unpacked.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(["bsdtar", "-xf", str(path), "-C", str(out)], check=True, capture_output=True, timeout=300)
+        subprocess.run(["bsdtar", "-xf", str(path), "-C", str(unpacked)], check=True, capture_output=True, timeout=300)
     except (OSError, subprocess.SubprocessError) as exc:
         raise SeriesFileError("Could not open %s: %s" % (path.name, exc))
-    # An archive can hold a link named page.jpg that points at a file elsewhere on the server; never follow one.
-    inside = out.resolve()
-    files = sorted((f for f in out.rglob("*") if f.is_file() and not f.is_symlink() and f.suffix.lower() in PICTURES
-                    and inside in f.resolve().parents),
-                   key=lambda f: _natural(str(f.relative_to(out))))
-    return [(str(f.relative_to(out)), f.read_bytes) for f in files]
+    # sneaky archives can hide a "page.jpg" that's really a link to some other file on the server. nope, not following those
+    inside = unpacked.resolve()
+    pictures = sorted((file for file in unpacked.rglob("*")
+                       if file.is_file() and not file.is_symlink() and file.suffix.lower() in PICTURES and inside in file.resolve().parents),
+                      key=lambda file: _natural(str(file.relative_to(unpacked))))
+    return [(str(file.relative_to(unpacked)), file.read_bytes) for file in pictures]
+
+
+def _best_format(book):
+    """A comic format when there is one, otherwise whichever comes first alphabetically."""
+    return next((fmt for fmt in COMIC if fmt in book["formats"]), None) or next(iter(sorted(book["formats"])), None)
 
 
 def build(library, volumes, series):
     """Write the series to a temporary file. Returns (path, download name); the caller deletes the path."""
     files = []
-    for b in volumes:
-        fmt = next((f for f in COMIC if f in b["formats"]), None) or next(iter(sorted(b["formats"])), None)
-        path = library.file_path(b, fmt) if fmt else None
+    for book in volumes:
+        fmt = _best_format(book)
+        path = library.file_path(book, fmt) if fmt else None
         if path and Path(path).exists():
-            files.append((b, fmt, Path(path)))
+            files.append((book, fmt, Path(path)))
     if not files:
         raise SeriesFileError("None of the volumes has a file to download.")
     safe = re.sub(r'[\\/:*?"<>|]+', "", series).strip() or "Series"
@@ -61,14 +68,14 @@ def build(library, volumes, series):
     target = Path(handle.name)
     scratch = Path(tempfile.mkdtemp())
     try:
-        # Pictures are already compressed, so storing them is as small and much faster.
+        # jpgs are already squashed, zipping them again just burns CPU for zero gain
         with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED if joined else zipfile.ZIP_DEFLATED) as out:
-            for v, (b, fmt, path) in enumerate(files, 1):
+            for volume_no, (book, fmt, path) in enumerate(files, 1):
                 if not joined:
-                    out.write(path, "%03d - %s.%s" % (v, b.get("shown_title") or b["title"], fmt.lower()))
+                    out.write(path, "%03d - %s.%s" % (volume_no, book.get("shown_title") or book["title"], fmt.lower()))
                     continue
-                for p, (name, read) in enumerate(_pages(path, scratch), 1):
-                    out.writestr("%03d-%04d%s" % (v, p, Path(name).suffix.lower()), read())
+                for page_no, (name, read) in enumerate(_pages(path, scratch), 1):
+                    out.writestr("%03d-%04d%s" % (volume_no, page_no, Path(name).suffix.lower()), read())
     except Exception:
         target.unlink(missing_ok=True)
         raise

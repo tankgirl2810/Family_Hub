@@ -74,7 +74,8 @@ below copy the whole folder instead, books included.
    ```
 
    Leave out `--profile search` if the server's own Prowlarr is used (see
-   below). `watch` stays off: the server has its own Jellyfin.
+   below). Add `--profile series` if you follow manga by chapter
+   (guide 13). `watch` stays off: the server has its own Jellyfin.
 
 9. Open `http://<server address>:8090` and sign in. Your profiles and data
    should be exactly as you left them.
@@ -99,6 +100,28 @@ ever downloaded over your own connection; a client outside the VPN would
 break that promise. If the old client is still needed for other things, give
 the new one a different port (`QBITTORRENT_PORT`).
 
+## Bringing in what you already own
+
+When the files move, or the server already has books, films or shows of its own, Family Hub checks what
+is already there before adding anything. Put things in through these doors, not straight into the library
+or media folders, and the checks happen by themselves.
+
+| What | Put it in | What is checked |
+|---|---|---|
+| Book files from another disk or computer | `stack/inbox` (guide 8) | A file the library already has, byte for byte, is not added; it goes to `needs-attention` with "Already in the library". A Kindle file beside an EPUB of the same name is held back |
+| Book downloads | The finished-downloads folder (guide 5) | The same check, and a file still downloading is left alone |
+| Films and TV from another disk | `DATA_ROOT/unsorted/films` and `unsorted/tv` | **Downloads → Films and TV to sort**: Radarr and Sonarr say which film or episode each file is and whether the server already has as good a copy. Spare copies can be deleted from there (guide 14) |
+| Chapters of followed series | Copy `stack/series` and `stack/suwayomi` across (the table above) | The series server already knows them; nothing is downloaded twice |
+
+The byte-for-byte check only catches the very same file. The same book as a different file (another
+edition, an EPUB beside a PDF) is added, and then shown as **one book**. To find and remove such spares
+afterwards: **Admin → Books → Copies of the same book → See the copies**, then **Remove spare copies from
+the library** (guide 8). The library's database is copied first, and spares are set aside rather than
+deleted unless they are identical.
+
+When searching for something new, **Discover** marks a result **In library** when you already have it,
+and Radarr and Sonarr do the same for films and shows.
+
 ## Starting from a fresh install instead
 
 If you would rather install cleanly on the server and bring only the book
@@ -120,7 +143,7 @@ has the rest, including the VPN.
 
 ## Managing the programs behind it
 
-**Admin → Manage the programs** lists Radarr, Sonarr, Prowlarr,
+**Admin → Hub → Manage the programs** lists Radarr, Sonarr, Prowlarr,
 qBittorrent, Bazarr, Jellyfin, the library manager, Suwayomi and Komga,
 says which are running, and has an **Open** button for each one's own page.
 The links use the address you opened Family Hub with and each program's

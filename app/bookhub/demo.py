@@ -89,7 +89,7 @@ def _pdf(path, title):
         out += "%d 0 obj\n%s\nendobj\n" % (i, obj)
     xref = len(out)
     out += "xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
-    out += "".join("%010d 00000 n \n" % o for o in offsets)
+    out += "".join("%010d 00000 n \n" % offset for offset in offsets)
     out += "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
     Path(path).write_bytes(out.encode("latin-1"))
 
@@ -173,7 +173,7 @@ def seed(hub):
             (name, role, generate_password_hash("1234"), color, can_request, kosync.sync_key_for("demo"), db.now()),
         )
     con.commit()
-    ids = {p["name"]: p["id"] for p in hub.profiles()}
+    ids = {profile["name"]: profile["id"] for profile in hub.profiles()}
     hub.load_tagpacks()
     hub.fill_page_counts()
     kosync.index_library(hub)
@@ -184,7 +184,7 @@ def seed(hub):
         return "%04d-%02d-%02d" % (year, m, min(d, date.today().day if m == month else 28))
 
     def key(title):
-        return next(b["key"] for b in hub.library.books() if b["title"] == title)
+        return next(book["key"] for book in hub.library.books() if book["title"] == title)
 
     you = ids["You"]
     for title, m, rating in (("Wuthering Heights", 2, 3), ("Little Women", 4, 4), ("Persuasion", 6, 5),

@@ -50,8 +50,8 @@ def _folder(hub):
 
 def version(hub):
     """The visuals in use: "builtin", or the first 12 characters of the GitHub commit they came from."""
-    v = db.kv_get(hub.con(), "visuals:version") or ""
-    return v if v and (_folder(hub) / v).is_dir() else "builtin"
+    kept = db.kv_get(hub.con(), "visuals:version") or ""
+    return kept if kept and (_folder(hub) / kept).is_dir() else "builtin"
 
 
 def source(hub, ver=None):
@@ -63,7 +63,8 @@ def source(hub, ver=None):
 def wanted(rel):
     """Whether a path inside the repository is one Family Hub uses, and is safe to keep."""
     parts = rel.split("/")
-    if not all(PART_RE.fullmatch(p) for p in parts) or Path(rel).suffix.lower() not in TYPES:
+    # every bit of the path has to be boring letters: no "..", no hidden files, nothing clever
+    if not all(PART_RE.fullmatch(part) for part in parts) or Path(rel).suffix.lower() not in TYPES:
         return False
     if rel == "daily.js":
         return True
@@ -74,9 +75,10 @@ def wanted(rel):
 
 def scripts(folder):
     """The scripts a frame loads, in order: lib/ first (alphabetically), then every visual."""
-    libs = sorted(p.relative_to(folder).as_posix() for p in (folder / "lib").rglob("*.js")) if (folder / "lib").is_dir() else []
-    shown = sorted(p.relative_to(folder).as_posix() for p in (folder / "visuals").glob("*.js")) if (folder / "visuals").is_dir() else []
-    return libs, shown
+    def found(sub, pattern):
+        place = folder / sub
+        return sorted(file.relative_to(folder).as_posix() for file in place.glob(pattern)) if place.is_dir() else []
+    return found("lib", "**/*.js"), found("visuals", "*.js")
 
 
 def status(hub):
@@ -119,16 +121,16 @@ def sync(hub, force=False):
         if not REPO_RE.fullmatch(repo) or (branch and not BRANCH_RE.fullmatch(branch)):
             raise VisualsError("VISUALS_REPO should look like your-name/repository-name.")
         try:
-            r = requests.get("https://api.github.com/repos/%s/commits/%s" % (repo, branch or "HEAD"), headers=AGENT, timeout=TIMEOUT)
+            reply = requests.get("https://api.github.com/repos/%s/commits/%s" % (repo, branch or "HEAD"), headers=AGENT, timeout=TIMEOUT)
         except requests.RequestException as exc:
             raise VisualsError("Could not reach GitHub: %s" % str(exc)[:120])
-        if r.status_code in (404, 422):
+        if reply.status_code in (404, 422):
             raise VisualsError("GitHub has no public repository %s%s." % (repo, " with a branch " + branch if branch else ""))
-        if r.status_code in (403, 429):
+        if reply.status_code in (403, 429):
             raise VisualsError("GitHub asked for fewer checks for now; trying again later.")
-        if r.status_code != 200:
-            raise VisualsError("GitHub answered %s." % r.status_code)
-        sha = (r.json().get("sha") or "")[:40]
+        if reply.status_code != 200:
+            raise VisualsError("GitHub answered %s." % reply.status_code)
+        sha = (reply.json().get("sha") or "")[:40]
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise VisualsError("GitHub's answer had no commit in it.")
         ver = sha[:12]
@@ -142,43 +144,42 @@ def sync(hub, force=False):
 
 def _fetch(hub, repo, sha, ver):
     try:
-        r = requests.get("https://codeload.github.com/%s/zip/%s" % (repo, sha), headers=AGENT, timeout=60, stream=True)
-        if r.status_code != 200:
-            raise VisualsError("Could not download the repository (%s)." % r.status_code)
-        data = r.raw.read(MAX_ZIP + 1, decode_content=True)
+        reply = requests.get("https://codeload.github.com/%s/zip/%s" % (repo, sha), headers=AGENT, timeout=60, stream=True)
+        if reply.status_code != 200:
+            raise VisualsError("Could not download the repository (%s)." % reply.status_code)
+        data = reply.raw.read(MAX_ZIP + 1, decode_content=True)
     except requests.RequestException as exc:
         raise VisualsError("Could not download the repository: %s" % str(exc)[:120])
     if len(data) > MAX_ZIP:
         raise VisualsError("The repository is too big to download (the limit is 60 MB). Leave node_modules out of it.")
     try:
-        z = zipfile.ZipFile(io.BytesIO(data))
+        archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
         raise VisualsError("GitHub's download was not a zip.")
     base = _folder(hub)
-    tmp = base / (".new-" + ver)
-    shutil.rmtree(tmp, ignore_errors=True)
+    # unpack beside the live copy, then swap in one go, so Home never sees half a set of visuals
+    staging = base / (".new-" + ver)
+    shutil.rmtree(staging, ignore_errors=True)
     total = 0
-    for info in z.infolist():
+    for info in archive.infolist():
         if info.is_dir() or "/" not in info.filename:
             continue
-        rel = info.filename.split("/", 1)[1]  # GitHub puts everything in one "repo-sha/" folder
-        if not wanted(rel):
-            continue
-        if info.file_size > MAX_FILE:
+        rel = info.filename.split("/", 1)[1]  # GitHub wraps everything in one "repo-sha/" folder, peel it off
+        if not wanted(rel) or info.file_size > MAX_FILE:
             continue
         total += info.file_size
         if total > MAX_TOTAL:
-            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(staging, ignore_errors=True)
             raise VisualsError("The visuals and lib folders are too big (the limit is 30 MB).")
-        dest = tmp / rel
+        dest = staging / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(z.read(info))
-    if not scripts(tmp)[1]:
-        shutil.rmtree(tmp, ignore_errors=True)
+        dest.write_bytes(archive.read(info))
+    if not scripts(staging)[1]:
+        shutil.rmtree(staging, ignore_errors=True)
         raise VisualsError("The repository has no visuals/ folder with .js files in it.")
     final = base / ver
     shutil.rmtree(final, ignore_errors=True)
-    tmp.rename(final)
+    staging.rename(final)
     db.kv_set(hub.con(), "visuals:version", ver)
     for old in base.iterdir():
         if old.is_dir() and old.name != ver:
@@ -207,16 +208,17 @@ LIBRARY_ORDER = ["node_modules/astronomy-engine/astronomy.browser.min.js", "node
 
 def frame_html(hub, ver):
     libs, shown = scripts(source(hub, ver))
-    tag = lambda src: '<script src="%s"></script>' % src
+    tag = lambda src: '<script src="%s"></script>' % src  # noqa: E731
     has_daily = (source(hub, ver) / "daily.js").is_file()
-    return FRAME % {"libraries": "\n".join(tag(s) for s in LIBRARY_ORDER),
-                    "scripts": "\n".join([tag(s) for s in libs + shown] + ([tag("daily.js")] if has_daily else []))}
+    return FRAME % {"libraries": "\n".join(tag(src) for src in LIBRARY_ORDER),
+                    "scripts": "\n".join([tag(src) for src in libs + shown] + ([tag("daily.js")] if has_daily else []))}
 
 
 def file_for(hub, ver, rel):
     """The file a frame asks for (one of the libraries, or a visual's own file), or None."""
     if rel.startswith("node_modules/"):
         path = (LIBRARIES / rel[len("node_modules/"):]).resolve()
+        # resolve() then check it's still inside: the classic "../../etc/passwd" stopper
         return path if LIBRARIES.resolve() in path.parents and path.is_file() else None
     if rel == "frame.js":
         return STATIC / "frame.js"
@@ -233,14 +235,14 @@ def check(repo, branch=""):
     if not REPO_RE.fullmatch(repo) or (branch and not BRANCH_RE.fullmatch(branch)):
         return False, "Write it as your-name/repository-name."
     try:
-        r = requests.get("https://api.github.com/repos/%s/commits/%s" % (repo, branch or "HEAD"), headers=AGENT, timeout=TIMEOUT)
+        reply = requests.get("https://api.github.com/repos/%s/commits/%s" % (repo, branch or "HEAD"), headers=AGENT, timeout=TIMEOUT)
     except requests.RequestException as exc:
         return False, "Could not reach GitHub: %s" % str(exc)[:120]
-    if r.status_code == 200:
+    if reply.status_code == 200:
         return True, "Found %s on GitHub. Save, then press Check for new visuals under Appearance." % repo
-    if r.status_code in (404, 422):
+    if reply.status_code in (404, 422):
         return False, "GitHub has no public repository %s%s." % (repo, " with a branch " + branch if branch else "")
-    return False, "GitHub answered %s." % r.status_code
+    return False, "GitHub answered %s." % reply.status_code
 
 
 def known_version(hub, ver):

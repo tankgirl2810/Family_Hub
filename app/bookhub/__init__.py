@@ -67,11 +67,12 @@ def create_app(config=None):
         path = visuals.file_for(app.hub, ver, rel) if visuals.known_version(app.hub, ver) else None
         if path is None:
             return "Not found", 404
-        r = send_file(path, mimetype=visuals.TYPES.get(path.suffix.lower(), "text/plain"), max_age=3600)
-        # The frame's origin is "null" (sandboxed), so its fetches of the map outline count as cross-site.
-        r.headers["Access-Control-Allow-Origin"] = "*"
-        r.headers["X-Content-Type-Options"] = "nosniff"
-        return r
+        reply = send_file(path, mimetype=visuals.TYPES.get(path.suffix.lower(), "text/plain"), max_age=3600)
+        # sandboxed frames have the origin "null" (yes, the string), so even fetching our own map outline is
+        # "cross-site" to the browser. hence the wildcard
+        reply.headers["Access-Control-Allow-Origin"] = "*"
+        reply.headers["X-Content-Type-Options"] = "nosniff"
+        return reply
 
     @app.teardown_appcontext
     def finish_db(exc):

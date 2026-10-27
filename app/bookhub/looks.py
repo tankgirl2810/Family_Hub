@@ -9,14 +9,24 @@ one an admin has pinned.
 """
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 from . import db
 
 LOOKS_DIR = Path(__file__).parent / "static" / "looks"
 
-# id, name, Google Fonts address, [(scheme id, name)], set piece, strip separator
+
+class Design(NamedTuple):
+    id: str
+    name: str
+    fonts: str     # the Google Fonts address
+    schemes: list  # [(scheme id, name)], the first is the fallback
+    piece: dict    # the set piece's words
+    sep: str       # what goes between bits of the strip
+
+
 DESIGNS = [
-    ("minimalist", "Minimalist Family Hub",
+    Design("minimalist", "Minimalist Family Hub",
      "https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&display=swap",
      [("dark", "Dark"), ("light", "Light"), ("paper", "Paper"), ("blueprint", "Blueprint")],
      {"title": "Scope", "state": "Online", "transition": "Screen-change scan"},
@@ -47,23 +57,27 @@ def _theme_colours(design):
 
 def catalogue():
     """The design and its schemes, as the Admin page lists them."""
-    out = []
-    for did, name, fonts, schemes, piece, sep in DESIGNS:
-        colours = _theme_colours(did)
-        first = colours.get(schemes[0][0], {})
-        out.append({
-            "id": did, "name": name, "fonts": fonts, "piece": piece, "sep": sep,
-            "schemes": [{"id": sid, "name": sname,
-                         # A scheme that only changes some roles inherits the rest from the first one.
-                         "swatch": [colours.get(sid, {}).get(r) or first.get(r, "") for r in SWATCH]}
-                        for sid, sname in schemes],
-            "accents": [{"name": n, "hue": h} for n, h in ACCENTS], "default_hue": DEFAULT_HUE,
+    listed = []
+    for design in DESIGNS:
+        colours = _theme_colours(design.id)
+        first = colours.get(design.schemes[0][0], {})
+        listed.append({
+            "id": design.id, "name": design.name, "fonts": design.fonts, "piece": design.piece, "sep": design.sep,
+            "schemes": [{"id": scheme_id, "name": scheme_name,
+                         # lazy schemes only override a few colours and borrow the rest from the first one
+                         "swatch": [colours.get(scheme_id, {}).get(role) or first.get(role, "") for role in SWATCH]}
+                        for scheme_id, scheme_name in design.schemes],
+            "accents": [{"name": name, "hue": hue} for name, hue in ACCENTS], "default_hue": DEFAULT_HUE,
         })
-    return out
+    return listed
 
 
-def _design(did):
-    return next((d for d in DESIGNS if d[0] == did), DESIGNS[0])
+def _scheme_ids(design):
+    return [scheme_id for scheme_id, _ in design.schemes]
+
+
+def _design(design_id):
+    return next((design for design in DESIGNS if design.id == design_id), DESIGNS[0])
 
 
 def _hue(value):
@@ -77,30 +91,30 @@ def _hue(value):
 
 def current(con):
     """The look everyone sees now. Unknown or missing values (an old design's, say) fall back to the first of each."""
-    d = _design(db.kv_get(con, "look:design") or "")
+    design = _design(db.kv_get(con, "look:design") or "")
     theme = db.kv_get(con, "look:theme") or ""
-    if theme not in [s[0] for s in d[3]]:
-        theme = d[3][0][0]
+    if theme not in _scheme_ids(design):
+        theme = design.schemes[0][0]
     scene = db.kv_get(con, "look:scene") or ""
     if not VISUAL_ID.fullmatch(scene):
         scene = DAILY
-    return {"design": d[0], "theme": theme, "scene": scene, "fonts": d[2], "piece": d[4], "sep": d[5],
+    return {"design": design.id, "theme": theme, "scene": scene, "fonts": design.fonts, "piece": design.piece, "sep": design.sep,
             "transition": db.kv_get(con, "look:transition", "on") != "off",
             "accent": _hue(db.kv_get(con, "look:accent"))}
 
 
 def save(con, data):
     """Change the look for everyone. Returns an error message, or None."""
-    d = DESIGNS[0]
-    # Check everything before saving anything, so a bad value never leaves half a change.
-    if "theme" in data and data["theme"] not in [s[0] for s in d[3]]:
+    design = DESIGNS[0]
+    # check it ALL first, then save. otherwise one bad value leaves you with half a theme
+    if "theme" in data and data["theme"] not in _scheme_ids(design):
         return "There is no colour scheme called that."
     if "scene" in data and not (isinstance(data["scene"], str) and VISUAL_ID.fullmatch(data["scene"])):
         return "There is no visual called that."
     accent = data.get("accent")
     if accent is not None and (isinstance(accent, bool) or _hue(accent) is None):
         return "The accent is a hue from 0 to 359."
-    db.kv_set(con, "look:design", d[0])
+    db.kv_set(con, "look:design", design.id)
     if "theme" in data:
         db.kv_set(con, "look:theme", data["theme"])
     if "scene" in data:
@@ -108,7 +122,7 @@ def save(con, data):
     if "transition" in data:
         db.kv_set(con, "look:transition", "on" if data["transition"] else "off")
     if "accent" in data:
-        # The design's own purple is stored as no accent, so the stylesheet's default stays in charge.
+        # picking the default purple saves "nothing", so the stylesheet stays the boss of its own colour
         db.kv_set(con, "look:accent", "" if accent is None or _hue(accent) == DEFAULT_HUE else str(_hue(accent)))
     return None
 

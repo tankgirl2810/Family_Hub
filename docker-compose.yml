@@ -196,7 +196,8 @@ services:
   gluetun:
     image: qmcgaw/gluetun:v3.41.3
     container_name: gluetun
-    profiles: ["torrent"]
+    # Also started for "series": the series server reaches the reading sites through it.
+    profiles: ["torrent", "series"]
     cap_add:
       - NET_ADMIN
     devices:
@@ -216,9 +217,14 @@ services:
       - HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE={"auth":"apikey","apikey":"${GLUETUN_API_KEY:?Set GLUETUN_API_KEY in .env to any long random text (docs/14)}"}
     volumes:
       - ${STACK_DIR:-./stack}/gluetun:/gluetun
+    networks:
+      default:
+        # The series server shares this container's network, so this is the name it is reached by.
+        aliases: [suwayomi]
     ports:
-      # qBittorrent's page is reached through the VPN container.
+      # qBittorrent's and the series server's pages are reached through the VPN container.
       - "${QBITTORRENT_PORT:-8080}:8080"
+      - "${SUWAYOMI_PORT:-4567}:4567"
     restart: unless-stopped
 
   qbittorrent:
@@ -316,6 +322,12 @@ services:
     image: ghcr.io/suwayomi/suwayomi-server:v2.4.2366
     container_name: suwayomi
     profiles: ["series"]
+    # Chapters are fetched through the VPN, like torrents. If the VPN drops, the series server cannot
+    # reach the reading sites until it is back. It is still found as http://suwayomi:4567 (an alias on gluetun).
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
     environment:
       - TZ=${TZ:-Etc/UTC}
       - DOWNLOAD_AS_CBZ=true
@@ -332,8 +344,6 @@ services:
       # The chapters. Listed first on purpose: the image needs this order.
       - ${SERIES_PATH:-./stack/series}:/home/suwayomi/.local/share/Tachidesk/downloads
       - ${STACK_DIR:-./stack}/suwayomi:/home/suwayomi/.local/share/Tachidesk
-    ports:
-      - "${SUWAYOMI_PORT:-4567}:4567"
     restart: unless-stopped
 
   # Serves the chapters to reading apps (Tachimanga on an iPad), with an

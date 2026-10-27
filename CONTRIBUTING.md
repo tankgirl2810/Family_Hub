@@ -51,12 +51,20 @@ The demo library is rebuilt whenever the `demo` folder is missing.
 | `app/bookhub/duplicates.py` | Spare copies of a book, and the library backup before changes |
 | `app/bookhub/watchlist.py` | The watchlist: checking authors, films and shows people are waiting for, and getting coming ones by themselves |
 | `app/bookhub/search.py` | The library search: terms with +, − and "or", which fields they look in, and how they combine |
+| `app/bookhub/anilist.py` | Manga and manhwa suggestions from AniList readers' recommendations for the series a person enjoyed |
+| `app/bookhub/bookswap.py` | A book download whose sharers have gone is swapped for a shared copy of the same book after half an hour |
 | `app/bookhub/chapterfile.py` | Series followed chapter by chapter, joined into comic files (CBZ) with a chapter list, in parts, as chapters arrive |
 | `app/bookhub/joined.py` | Joined series books: recording each one, and passing a reading app's progress in it on to the volumes or chapters |
 | `app/bookhub/bookfix.py` | Books without real details: clues from the files, catalogue matches, the change through the library manager |
 | `app/bookhub/secondcopy.py` | The nightly copy to a second disk |
 | `app/bookhub/series.py` | Series by chapter (Suwayomi) |
-| `app/bookhub/settings.py` | Admin → Hub → Connections: values saved in the app |
+| `app/bookhub/settings.py` | Admin → Hub → Connections: values saved there are written into `.env` |
+| `app/bookhub/intake.py` | The inbox and finished book downloads: tidying files before the library manager sees them |
+| `app/bookhub/catalogues.py`, `readers.py` | Community tags and readers' ratings from Open Library, Wikidata, Google Books, Comic Vine and Hardcover |
+| `app/bookhub/goodreads.py` | Goodreads shelves and export files |
+| `app/bookhub/devices.py`, `opds.py` | Devices, Send to Kindle, and the reading-app catalogue |
+| `app/bookhub/recommend.py` | Weekly suggestions of books the library lacks |
+| `app/bookhub/setupfile.py` | The locked setup file |
 | `app/bookhub/static/` | The web pages: plain HTML, CSS and JavaScript, no build step. `looks/minimalist/` holds the design's stylesheets, `setpieces.js` the screen-change scan, `visuals/` the built-in visuals, their libraries and `frame.js` |
 | `tests/test_app.py` | Tests that run the whole app against the demo library |
 

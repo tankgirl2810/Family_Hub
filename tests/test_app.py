@@ -1359,11 +1359,15 @@ class FakeSeriesServer:
                              for n in (1, 2, 3, 4)],
                          8: []}
         self.titles = {7: "Tower Climber", 8: "Quiet Tea Shop"}
+        self.status = {}
+        self.genres = {}
+        self.categories = {0: "Default"}
+        self.in_category = {}
 
     def manga(self, mid):
         chapters = self.chapters[mid]
         unread = [c for c in chapters if not c["isRead"]]
-        return {"id": mid, "title": self.titles[mid], "author": "Someone", "status": "ONGOING", "genre": ["Action"],
+        return {"id": mid, "title": self.titles[mid], "author": "Someone", "status": self.status.get(mid, "ONGOING"), "genre": self.genres.get(mid, ["Action"]),
                 "unreadCount": len(unread), "downloadCount": sum(c["isDownloaded"] for c in chapters), "sourceId": "55",
                 "source": {"displayName": "Reading Site (EN)"}, "chapters": {"totalCount": len(chapters)},
                 "firstUnreadChapter": unread[0] if unread else None, "description": "About a tower.",
@@ -1395,12 +1399,33 @@ class FakeSeriesServer:
                 self.chapters[8] = [{"id": 81, "name": "Chapter 1", "chapterNumber": 1.0, "sourceOrder": 1, "isRead": False,
                                      "isDownloaded": False, "uploadDate": "0", "scanlator": "", "lastPageRead": 0}]
             return {"fetchMangaAndChapters": {"manga": {"id": v["id"]}}}
+        if "categories{nodes" in query:
+            return {"categories": {"nodes": [{"id": i, "name": n} for i, n in self.categories.items()]}}
+        if "createCategory" in query:
+            cid = max(self.categories) + 1
+            self.categories[cid] = v["n"]
+            return {"createCategory": {"category": {"id": cid}}}
+        if "updateMangasCategories" in query:
+            for mid in v["ids"]:
+                cats = self.in_category.setdefault(mid, set())
+                cats |= set(v["p"].get("addToCategories", []))
+                cats -= set(v["p"].get("removeFromCategories", []))
+            return {"updateMangasCategories": {"mangas": []}}
         if "updateManga" in query:
             self.following.add(v["id"]) if "inLibrary:true" in query else self.following.discard(v["id"])
             return {"updateManga": {"manga": {"id": v["id"]}}}
         if "enqueueChapterDownloads" in query:
             self.queued += v["ids"]
             return {"enqueueChapterDownloads": {"downloadStatus": {"state": "STARTED"}}}
+        if "dequeueChapterDownloads" in query:
+            self.queued = [i for i in self.queued if i not in v["ids"]]
+            return {"dequeueChapterDownloads": {"downloadStatus": {"state": "STARTED"}}}
+        if "deleteDownloadedChapters" in query:
+            for chapters in self.chapters.values():
+                for c in chapters:
+                    if c["id"] in v["ids"]:
+                        c["isDownloaded"] = False
+            return {"deleteDownloadedChapters": {"chapters": []}}
         if "startDownloader" in query:
             return {"startDownloader": {"downloadStatus": {"state": "STARTED"}}}
         if "updateChapters" in query:
@@ -2721,21 +2746,23 @@ def test_catalogue_errors_never_show_the_api_key(monkeypatch):
 
 
 def test_a_download_nobody_shares_waits_at_the_back_until_someone_does(app, client, media_servers):
-    stuck = {"hash": "a" * 40, "name": "Lost.Film.1950", "category": "movies", "progress": 0.1, "state": "stalledDL", "num_seeds": 0, "priority": 1}
-    going = {"hash": "b" * 40, "name": "Busy.Film.2001", "category": "movies", "progress": 0.5, "state": "downloading", "num_seeds": 9, "priority": 2, "dlspeed": 5}
-    media_servers.torrents = [stuck, going]
+    stuck = {"hash": "a" * 40, "name": "Lost.Book.1950", "category": "books", "progress": 0.1, "state": "stalledDL", "num_seeds": 0, "priority": 1}
+    going = {"hash": "b" * 40, "name": "Busy.Book.2001", "category": "books", "progress": 0.5, "state": "downloading", "num_seeds": 9, "priority": 2, "dlspeed": 5}
+    film = {"hash": "c" * 40, "name": "Lost.Film.1950", "category": "movies", "progress": 0.1, "state": "stalledDL", "num_seeds": 0, "priority": 3}
+    media_servers.torrents = [stuck, going, film]
     with app.app_context():
         m = app.hub.media
         m.park_stalled(now=1000)
         assert m.parked() == {}  # not yet: ten minutes first
         m.park_stalled(now=1000 + 11 * 60)
-        assert list(m.parked()) == [stuck["hash"]]
+        assert list(m.parked()) == [stuck["hash"]]  # books only: a stuck film is Radarr's to deal with
     sent = [name for name, _ in media_servers.qbit_posts]
     assert "bottomPrio" in sent and "stop" in sent
     stuck["state"] = "stoppedDL"
     login(client, "You")
+    media_servers.torrents = [stuck, going]
     rows = client.get("/api/media/torrents").get_json()["torrents"]
-    assert [r["name"] for r in rows] == ["Busy.Film.2001", "Lost.Film.1950"]  # it waits after the rest
+    assert [r["name"] for r in rows] == ["Busy.Book.2001", "Lost.Book.1950"]  # it waits after the rest
     assert rows[1]["state"] == "Waiting for seed" and rows[1]["waiting_seed"] and rows[1]["next_check"]
     counts = client.get("/api/media/speed").get_json()["counts"]
     assert counts["waiting_seed"] == 1 and counts["downloading"] == 1
@@ -2760,6 +2787,37 @@ def test_a_download_nobody_shares_waits_at_the_back_until_someone_does(app, clie
     assert client.post("/api/media/torrents/%s/resume" % stuck["hash"]).status_code == 200
     with app.app_context():
         assert app.hub.media.parked() == {}
+        # A film parked before films were left to Radarr is handed back: started, and no longer forced.
+        film.update(state="stoppedDL")
+        media_servers.torrents = [film]
+        db.kv_set(app.hub.con(), "media:parked", json.dumps({film["hash"]: {"since": 1, "checked": 1, "checking": None}}))
+        app.hub.media.park_stalled(now=1000 + 90 * 60)
+        assert app.hub.media.parked() == {}
+    assert ("setForceStart", {"hashes": film["hash"], "value": "false"}) in media_servers.qbit_posts
+    assert media_servers.qbit_posts[-1][0] == "start"
+
+
+def test_downloads_whose_files_were_moved_can_be_forgotten_and_a_stuck_book_swapped_by_hand(app, client, media_servers, monkeypatch):
+    from bookhub import integrations
+    moved = {"hash": "d" * 40, "name": "Old.Film.1999", "category": "movies", "progress": 0, "state": "missingFiles", "num_seeds": 0}
+    book = {"hash": "e" * 40, "name": "Emma - Jane Austen (2003) [EPUB]", "category": "books", "progress": 0.3, "state": "stalledDL", "num_seeds": 0}
+    media_servers.torrents = [moved, book]
+    login(client, "You")
+    rows = {r["name"]: r for r in client.get("/api/media/torrents").get_json()["torrents"]}
+    assert rows["Old.Film.1999"]["missing"] and not rows[book["name"]]["missing"]
+    r = client.post("/api/media/torrents/forget", json={"hashes": [moved["hash"], book["hash"]]})  # only missing ones go
+    assert r.get_json()["forgotten"] == 1
+    assert media_servers.qbit_posts[-1] == ("delete", {"hashes": moved["hash"], "deleteFiles": "false"})  # files left alone
+    app.hub.config.prowlarr_url, app.hub.config.prowlarr_api_key = "http://prowlarr:9696", "k"
+    monkeypatch.setattr(integrations, "prowlarr_search", lambda config, q: [
+        {"guid": "good", "indexer_id": 2, "indexer": "B", "title": "Jane Austen - Emma.epub", "seeders": 4, "protocol": "torrent", "format": "EPUB", "size": 1}])
+    grabbed = []
+    monkeypatch.setattr(integrations, "prowlarr_grab", lambda config, guid, indexer: grabbed.append(guid))
+    others = client.get("/api/media/torrents/%s/others" % book["hash"]).get_json()["others"]
+    assert [o["guid"] for o in others] == ["good"]
+    assert client.post("/api/media/torrents/%s/swap" % book["hash"], json=others[0]).status_code == 200
+    assert grabbed == ["good"] and media_servers.qbit_posts[-1] == ("delete", {"hashes": book["hash"], "deleteFiles": "true"})
+    assert client.get("/api/media/torrents/%s/others" % moved["hash"]).status_code == 404  # not a book
 
 
 def test_films_on_the_disk_are_recognised_filed_and_spares_deleted(app, client, media_servers, tmp_path):
@@ -2925,6 +2983,9 @@ def test_the_setup_file_carries_the_whole_setup_locked(app, client, tmp_path):
     con.commit()
     con.close()
     app.hub.config.config_file, app.hub.config.stack_dir = str(env), stack
+    joined_books = Path(app.hub.config.data_dir) / "series-files"
+    joined_books.mkdir(exist_ok=True)
+    (joined_books / "abc-series.epub").write_bytes(b"made again from the library")
     login(client, "You")
     assert client.post("/api/admin/setup-file", json={"passphrase": "short"}).status_code == 400
     r = client.post("/api/admin/setup-file", json={"passphrase": "correct horse battery"})
@@ -2936,6 +2997,7 @@ def test_the_setup_file_carries_the_whole_setup_locked(app, client, tmp_path):
     names = zipfile.ZipFile(setup).namelist()
     assert {".env", "README.txt", "SETUP-NOTES.txt", "stack/bookhub/bookhub.db", "stack/prowlarr-config/config.xml", "stack/prowlarr-config/prowlarr.db"} <= set(names)
     assert not any("/logs/" in n for n in names)
+    assert not any("series-files" in n for n in names)  # joined series books are made again, not carried
     with zipfile.ZipFile(setup) as z:  # locked: nothing can be read without the passphrase
         with pytest.raises(RuntimeError):
             z.read(".env")
@@ -3387,7 +3449,7 @@ def test_a_followed_series_goes_to_the_reading_app_as_one_book_with_chapters(app
     assert client.post("/api/series/7/mine", json={"on": True}).get_json() == {"mine": True}
     assert client.get("/api/series/7").get_json()["mine"] is True
     mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
-    assert "<title>Tower Climber</title>" in mine and "urn:bookhub:chapters:7:2" in mine  # two chapters kept so far
+    assert "<title>Tower Climber</title>" in mine and "urn:bookhub:chapters:7:2.2." in mine  # two chapters kept so far
     assert "2 chapters in one book, from Chapter 1 to Chapter 2. New chapters come as a longer copy." in mine
     book = client.get("/opds/chapters-book/7", headers=you)
     assert book.status_code == 200 and book.headers["Content-Type"] == "application/epub+zip"
@@ -3396,8 +3458,13 @@ def test_a_followed_series_goes_to_the_reading_app_as_one_book_with_chapters(app
     assert [epub.read(n) for n in sorted(n for n in epub.namelist() if n.startswith("OEBPS/images/"))] == \
         [b"c71-p1", b"c71-p2", b"c71-p10", b"c72-p1", b"c72-p2", b"c72-p10"]
     # A new chapter kept: the entry changes, so the reading app fetches the longer book.
+    link = re.search(r'href="(/opds/chapters-book/7[^"]*)"', mine).group(1)
     series_server.chapters[7][2]["isDownloaded"] = True
-    assert "urn:bookhub:chapters:7:3" in client.get("/opds/mine", headers=you).get_data(as_text=True)
+    mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
+    assert "urn:bookhub:chapters:7:2.3." in mine
+    # The link changes too: Readest skips a link it has downloaded before, whatever the entry's id.
+    longer = re.search(r'href="(/opds/chapters-book/7[^"]*)"', mine).group(1)
+    assert longer != link and client.get(longer.replace("&amp;", "&"), headers=you).status_code == 200
     # Someone else's catalogue does not have it, and cannot fetch it.
     nan = {"Authorization": "Basic " + base64.b64encode(b"Nan:demo").decode()}
     assert "Tower Climber" not in client.get("/opds/mine", headers=nan).get_data(as_text=True)
@@ -3478,9 +3545,374 @@ def test_a_followed_series_is_kept_as_one_comic_file_with_its_chapters(app, clie
     assert own["rating"] == 5 and own["tags"]["mine"] == ["Weekly"]
 
 
+
+def test_a_chapter_listed_twice_is_kept_once_preferring_the_18_plus_copy(app, client, series_server, monkeypatch):
+    import base64
+    import re
+    import zipfile
+    from bookhub import chapterfile
+
+    def chapter_file(cid):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("1.jpg", b"c%d" % cid)
+        return buf.getvalue()
+
+    class Answer:
+        def __init__(self, data):
+            self.data = data
+
+        def iter_content(self, n):
+            yield self.data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(series.Series, "raw", lambda self, path, stream=False: Answer(
+        chapter_file(int(re.match(r"/api/v1/chapter/(\d+)/download", path).group(1)))))
+    row = lambda cid, name, n, order, done: {"id": cid, "name": name, "chapterNumber": n, "sourceOrder": order, "isRead": False,  # noqa: E731
+                                             "isDownloaded": done, "uploadDate": "0", "scanlator": "", "lastPageRead": 0}
+    series_server.chapters[7] = [row(71, "Ch. 1", 1.0, 1, True), row(72, "Ch. 1 - Light (1)", 1.0, 2, True),
+                                 row(73, "Ch. 2", 2.0, 3, True), row(74, "Ch. 2 (18+)", 2.0, 4, False),
+                                 row(75, "Ch. 2", 2.0, 5, False)]
+    got = client.get("/api/series/7").get_json()
+    # One of each: the copy with a title, and the 18+ copy (not downloaded yet, so it is queued, not the other).
+    assert [c["id"] for c in got["chapters_list"]] == [72, 74] and got["chapters"] == 2 and got["doubles"] == 3
+    assert "every_chapter" not in got
+    assert client.post("/api/series/7/download").get_json()["queued"] == 1 and series_server.queued == [74]
+    series_server.queued.append(75)  # the series server queues every new chapter, second copies too
+    with app.app_context():
+        info = app.hub.series.detail(7)
+        # Until the 18+ copy is downloaded, the file has the copy there is; nothing is deleted yet.
+        assert [c["id"] for c in chapterfile.parts(info)[0]] == [72, 73]
+        assert app.hub.series.drop_doubles(info) == 1  # the plain chapter 1, since chapter 1 with a title is kept
+        assert series_server.queued == [74]  # the second copy not downloaded yet is taken off the queue
+        series_server.chapters[7][3]["isDownloaded"] = True
+        info = app.hub.series.detail(7)
+        assert [chapterfile.chapter_name(c) for c in chapterfile.parts(info)[0]] == ["Chapter 1 · Light (1)", "Chapter 2 · (18+)"]
+        assert app.hub.series.drop_doubles(info) == 1
+    assert [c["isDownloaded"] for c in series_server.chapters[7]] == [False, True, False, True, False]
+    # The reading app's book has the chapters as contents entries, and each chapter's name as text to search for.
+    client.post("/api/series/7/mine", json={"on": True})
+    you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
+    epub = zipfile.ZipFile(io.BytesIO(client.get("/opds/chapters-book/7", headers=you).data))
+    assert re.findall(r'<a href="[^"]+">([^<]+)</a>', epub.read("OEBPS/nav.xhtml").decode()) == ["Chapter 1 · Light (1)", "Chapter 2 · (18+)"]
+    assert "Chapter 2 · (18+)</p>" in epub.read("OEBPS/pages/p00002.xhtml").decode()
+    # My books shows it as fetched.
+    items = [i for i in client.get("/api/me/reading-app").get_json()["items"] if i["kind"] == "chapters"]
+    assert [(i["version"][:4], i["state"]) for i in items] == [("2.2.", "on_app")]
+
+
+def test_no_comic_file_is_made_on_a_nearly_full_disk_and_the_older_one_stays(app, client, series_server, monkeypatch):
+    from bookhub import chapterfile
+    with app.app_context():
+        info = app.hub.series.detail(7)
+        place = chapterfile.folder(app.hub, 7)
+        place.mkdir(parents=True, exist_ok=True)
+        (place / "part01-older.cbz").write_bytes(b"older")
+        monkeypatch.setattr(chapterfile, "MIN_FREE", 10 ** 18)
+        monkeypatch.setattr(chapterfile, "build", lambda *a: (_ for _ in ()).throw(AssertionError("should not start")))
+        chapterfile.keep_series(app.hub, info)
+        assert (place / "part01-older.cbz").is_file()
+        assert "GB is free" in chapterfile.files(app.hub, info)[0]["error"]
+
+
+def test_chapter_names_read_well_in_the_contents():
+    from bookhub import chapterfile
+    name = lambda n, text: chapterfile.chapter_name({"number": n, "name": text})  # noqa: E731
+    assert name(21.0, "Ch. 21") == "Chapter 21"
+    assert name(3.0, "Ch. 3 - 03: Light (3)") == "Chapter 3 · 03: Light (3)"
+    assert name(10.5, "Chapter 10.5 Extra") == "Chapter 10.5 · Extra"
+    assert name(0.0, "Prologue") == "Chapter 0 · Prologue"
+    assert name(-1.0, "Notice") == "Notice"
+    assert name(None, "") == "Chapter"
+    # The number said again with leading zeros, ".0" or a full stop is still only the number.
+    assert name(21.0, "Chapter 021") == "Chapter 21"
+    assert name(21.0, "Ch. 21.0") == "Chapter 21"
+    assert name(21.0, "Chapter 21. The End") == "Chapter 21 · The End"
+    assert name(1.0, "Chapter 10") == "Chapter 1 · Chapter 10"  # another number is not taken for this one
+    assert name(1.0, "Ch. 1.5") == "Chapter 1 · Ch. 1.5"
+    assert name(1.0, "Ch. 1 - (1r0n)") == "Chapter 1 · (1r0n)"
+
+
+def test_a_chapter_listed_twice_keeps_the_best_copy_whatever_its_number():
+    from bookhub import chapterfile
+    ch = lambda cid, name, n, done=False, up=0: {"id": cid, "name": name, "number": n, "order": cid, "downloaded": done,  # noqa: E731
+                                                "read": False, "group": "", "uploaded": up}
+    chapters = [ch(1, "Notice", -1.0), ch(2, "Notice", -1.0), ch(3, "Extra", None), ch(4, "Ch. 10", 10.0, up=5),
+                ch(5, "Ch. 10", 10.0, up=9), ch(6, "Ch. 10.5", 10.5), ch(7, "Ch. 11", 11.0, done=True),
+                ch(8, "Ch. 11 [Uncensored]", 11.0)]
+    kept, dropped = series.unique(chapters)
+    # No number: all kept. 10.5 is a chapter of its own. Neither 10 is downloaded: the newer. 11: the uncensored one.
+    assert [c["id"] for c in kept] == [1, 2, 3, 5, 6, 8] and [c["id"] for c in dropped] == [4, 7]
+    # For the comic files, the copy already downloaded wins until the better one is downloaded too.
+    assert [c["id"] for c in series.unique(chapters, among_downloaded=True)[0]] == [1, 2, 3, 5, 6, 7]
+    # Chapters with the same contents entry are told apart, so reading progress reaches the right one.
+    assert chapterfile.labels(kept[:3]) == ["Notice", "Notice (2)", "Extra"]
+    # The reading app fetches a part again when a better copy of a chapter replaces one, though the count is the same.
+    assert chapterfile.version([chapters[3], chapters[6]]) != chapterfile.version([chapters[3], chapters[7]])
+    assert chapterfile.version([chapters[3]]).startswith("%d.1." % chapterfile.FORMAT)
+
+
+def test_room_is_measured_for_a_folder_not_made_yet(tmp_path, monkeypatch):
+    from bookhub import chapterfile
+    chapterfile.room_for(tmp_path / "not" / "made" / "yet")  # measured on tmp_path's disk, no error
+    monkeypatch.setattr(chapterfile, "MIN_FREE", 10 ** 18)
+    with pytest.raises(chapterfile.NoRoom):
+        chapterfile.room_for(tmp_path / "not" / "made" / "yet")
+
+
+def test_a_chapter_name_is_searchable_text_on_its_first_page_safely_escaped(tmp_path, monkeypatch):
+    from bookhub import comicbook
+    monkeypatch.setattr(comicbook, "_prepared", lambda pictures: ((b"x", ".jpg", (10, 10)) for _ in pictures))
+    target = tmp_path / "book.epub"
+    comicbook.build(target, "T", "", [("Chapter 1 · <Tom & Jerry>", [("a", None), ("b", None)])])
+    with zipfile.ZipFile(target) as z:
+        first, second = z.read("OEBPS/pages/p00001.xhtml").decode(), z.read("OEBPS/pages/p00002.xhtml").decode()
+    assert "Chapter 1 · &lt;Tom &amp; Jerry&gt;</p>" in first and "<Tom" not in first
+    assert "</p>" not in second  # only the first page carries it
+
+
+def test_followed_series_sit_in_the_library_tagged_with_how_far_they_have_got(client, series_server):
+    from urllib.parse import urlencode
+    graphic = client.get("/api/books?" + urlencode({"kinds": "Graphic novel"})).get_json()["books"]
+    tower = next(b for b in graphic if b.get("chapter_series"))
+    assert tower["title"] == "Tower Climber" and tower["series_id"] == 7 and tower["publication"] == "Ongoing"
+    assert tower["tags"]["epub"] == ["Chapter by chapter", "Ongoing"] and tower["tags"]["community"] == ["Action"]  # the site's genres
+    assert tower["status"] == "reading" and tower["next"]["name"] == "Chapter 2"
+    # Every tag the site gives is kept (not just the first few), each once.
+    assert series._genres(["Action", "Fantasy", "Isekai", "Magic", "Romance", "Drama", "Comedy", "System", " action ", "Long  Strip"]) ==         ["Action", "Fantasy", "Isekai", "Magic", "Romance", "Drama", "Comedy", "System", "Long Strip"]
+    assert tower["on_shelf"] is False
+    client.post("/api/series/7/mine", json={"on": True})
+    assert next(b for b in client.get("/api/books?" + urlencode({"kinds": "Graphic novel"})).get_json()["books"] if b.get("chapter_series"))["on_shelf"] is True
+    # Found by its tags like any book, and its tags are offered in the picker, one entry per name.
+    def find(*terms):
+        return [b["title"] for b in client.get("/api/books?" + urlencode({"terms": json.dumps(list(terms))})).get_json()["books"]]
+    assert "Tower Climber" in find({"fields": ["tag"], "value": "chapter by chapter", "sign": "+"})
+    assert "Tower Climber" not in find({"fields": ["tag"], "value": "ongoing", "sign": "-"})
+    picked = {t["tag"]: t for t in client.get("/api/tags?merged=1").get_json()["tags"]}
+    assert picked["Chapter by chapter"]["count"] == 1 and picked["Action"]["sources"] == ["community"]
+    # Not among the books when only one series or a filter that cannot apply is asked for.
+    assert not any(b.get("chapter_series") for b in client.get("/api/books?filter=pdf").get_json()["books"])
+
+
+
+def test_my_books_shows_what_the_reading_app_has_downloaded(app, client):
+    import base64
+    login(client, "You")
+    emma = next(b for b in client.get("/api/books").get_json()["books"] if b["title"] == "Emma")
+    client.post("/api/books/%d/shelf" % emma["id"], json={"on": True})
+    d = client.get("/api/me/reading-app").get_json()
+    row = next(i for i in d["items"] if i["title"] == "Emma")
+    assert row["state"] == "ready" and d["on_app"] == 0 and d["total"] >= 1
+    you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
+    assert client.get("/opds/book/%d/epub" % emma["id"], headers=you).status_code == 200  # the reading app downloads it
+    d = client.get("/api/me/reading-app").get_json()
+    assert next(i for i in d["items"] if i["title"] == "Emma")["state"] == "on_app" and d["on_app"] == 1 and d["making"] == []
+    # A book the app had before downloads were noted can be ticked off by hand.
+    persuasion = next(b for b in client.get("/api/books").get_json()["books"] if b["title"] == "Persuasion")
+    client.post("/api/books/%d/shelf" % persuasion["id"], json={"on": True})
+    assert client.post("/api/me/reading-app/have", json={"item": "book:%d" % persuasion["id"]}).status_code == 200
+    assert client.get("/api/me/reading-app").get_json()["on_app"] == 2
+    assert client.post("/api/me/reading-app/have", json={"item": "book:999999"}).status_code == 404
+
+
+
+def test_a_finished_or_cancelled_series_is_not_checked_for_new_chapters(app, series_server):
+    series_server.status[7] = "COMPLETED"
+    with app.app_context():
+        assert app.hub.series.rest_finished() == 1
+    resting = next(i for i, n in series_server.categories.items() if n == series.DONE_CATEGORY)
+    assert "includeInUpdate:EXCLUDE" in next(q for q in series_server.asked if "createCategory" in q)
+    assert series_server.in_category[7] == {resting}
+    assert series_server.queued == [73, 74]  # what is there is all grabbed
+    series_server.status[7] = "ONGOING"  # it started again
+    with app.app_context():
+        assert app.hub.series.rest_finished() == 0
+    assert series_server.in_category[7] == set()
+
+
+def test_a_book_download_nobody_shares_any_more_is_swapped_for_a_shared_copy(app, monkeypatch):
+    from bookhub import bookswap, db, integrations
+    assert bookswap.same_book("Emma - Jane Austen (2003) [EPUB]", "Jane Austen - Emma.epub")
+    assert not bookswap.same_book("Saga v03 (2014) (Digital)", "Saga v04 (2015) (Digital)")  # another volume
+    assert not bookswap.same_book("Emma - Jane Austen", "Persuasion - Jane Austen")
+    torrent = {"hash": "abc", "name": "Emma - Jane Austen (2003) [EPUB]", "progress": 0.4, "num_seeds": 3, "dlspeed": 0}
+    deleted, grabbed = [], []
+
+    class Session:
+        def get(self, url, params=None, timeout=0):
+            return FakeResponse(200, [dict(torrent)])
+
+        def post(self, url, data=None, timeout=0):
+            deleted.append(data["hashes"])
+            return FakeResponse(200, {})
+
+    cfg = app.hub.config
+    cfg.qbit_url, cfg.prowlarr_url, cfg.prowlarr_api_key = "http://gluetun:8080", "http://prowlarr:9696", "k"
+    monkeypatch.setattr(integrations, "qbit_session", lambda config: Session())
+    monkeypatch.setattr(integrations, "prowlarr_search", lambda config, q: [
+        {"guid": "same", "indexer_id": 1, "indexer": "A", "title": torrent["name"], "seeders": 9, "protocol": "torrent", "format": "EPUB"},
+        {"guid": "other-book", "indexer_id": 1, "indexer": "A", "title": "Persuasion - Jane Austen", "seeders": 50, "protocol": "torrent", "format": "EPUB"},
+        {"guid": "pdf", "indexer_id": 2, "indexer": "B", "title": "Jane Austen - Emma (pdf)", "seeders": 40, "protocol": "torrent", "format": "PDF"},
+        {"guid": "good", "indexer_id": 2, "indexer": "B", "title": "Jane Austen - Emma.epub", "seeders": 4, "protocol": "torrent", "format": "EPUB"}])
+    monkeypatch.setattr(integrations, "prowlarr_grab", lambda config, guid, indexer: grabbed.append(guid))
+    with app.app_context():
+        bookswap.run(app.hub, now=1000)  # shared: nothing to do
+        torrent.update(num_seeds=0)
+        bookswap.run(app.hub, now=1060)
+        bookswap.run(app.hub, now=1060 + 29 * 60)
+        assert grabbed == [] and deleted == []  # not yet half an hour
+        bookswap.run(app.hub, now=1060 + 31 * 60)
+        swaps = json.loads(db.kv_get(app.hub.con(), bookswap.LOG_KEY))
+    assert grabbed == ["good"] and deleted == ["abc"]  # EPUB first, the same book, not the stuck release
+    assert swaps[0]["to"] == "Jane Austen - Emma.epub"
+    # One that never had anyone sharing it is left to waiting for seed.
+    torrent.update(hash="new", num_seeds=0)
+    grabbed.clear()
+    with app.app_context():
+        bookswap.run(app.hub, now=5000)
+        bookswap.run(app.hub, now=5000 + 120 * 60)
+    assert grabbed == []
+    # No other copy anywhere: looked for after half an hour, an hour later, three hours later; then paused for good.
+    looks = []
+    monkeypatch.setattr(integrations, "prowlarr_search", lambda config, q: looks.append(q) or [])
+    torrent.update(hash="lone", num_seeds=2)
+    deleted.clear()
+    minute = lambda m: 10000 + m * 60  # noqa: E731
+    with app.app_context():
+        bookswap.run(app.hub, now=minute(0))
+        torrent.update(num_seeds=0)
+        for m in (1, 32, 60, 93, 200, 274):
+            bookswap.run(app.hub, now=minute(m))
+        assert len(looks) == 3 and bookswap.given_up(app.hub) == {"lone"}
+        bookswap.run(app.hub, now=minute(2000))
+        assert len(looks) == 3  # not looked for again
+    assert deleted[-1] == "lone"  # the Session fake records the stop request's hashes
+    with app.app_context():
+        bookswap.start_over(app.hub, "lone")  # Continue pressed
+        assert bookswap.given_up(app.hub) == set()
+
+
+def test_a_book_download_waiting_its_turn_or_paused_by_someone_is_not_swapped(app, monkeypatch):
+    from bookhub import bookswap, db, integrations
+    torrent = {"hash": "q1", "name": "Emma - Jane Austen (2003) [EPUB]", "progress": 0.4, "num_seeds": 3, "dlspeed": 0, "state": "downloading"}
+    grabbed = []
+
+    class Session:
+        def get(self, url, params=None, timeout=0):
+            return FakeResponse(200, [dict(torrent)])
+
+        def post(self, url, data=None, timeout=0):
+            return FakeResponse(200, {})
+
+    cfg = app.hub.config
+    cfg.qbit_url, cfg.prowlarr_url, cfg.prowlarr_api_key = "http://gluetun:8080", "http://prowlarr:9696", "k"
+    monkeypatch.setattr(integrations, "qbit_session", lambda config: Session())
+    monkeypatch.setattr(integrations, "prowlarr_search", lambda config, q: [
+        {"guid": "good", "indexer_id": 2, "indexer": "B", "title": "Jane Austen - Emma.epub", "seeders": 4, "protocol": "torrent", "format": "EPUB"}])
+    monkeypatch.setattr(integrations, "prowlarr_grab", lambda config, guid, indexer: grabbed.append(guid))
+    with app.app_context():
+        bookswap.run(app.hub, now=1000)  # someone shares it
+        for state in ("queuedDL", "pausedDL", "stoppedDL", "checkingDL"):
+            torrent.update(num_seeds=0, state=state)
+            bookswap.run(app.hub, now=2000)
+            bookswap.run(app.hub, now=2000 + 120 * 60)
+        assert grabbed == []
+        # Paused by waiting for seed, though, it is a download nobody shares.
+        db.kv_set(app.hub.con(), "media:parked", json.dumps({"q1": {"since": 9000, "checked": 9000, "checking": None}}))
+        torrent.update(state="stoppedDL")
+        bookswap.run(app.hub, now=9000)
+        bookswap.run(app.hub, now=9000 + 31 * 60)
+    assert grabbed == ["good"]
+
+
+
+def test_authors_i_like_or_not_steer_my_suggestions(client):
+    login(client, "You")
+    before = client.get("/api/books?filter=foryou").get_json()
+    assert before["taste"]["ready"]
+    authors = {b["author"] for b in before["books"]}
+    gone = sorted(authors)[0]
+    assert client.post("/api/me/authors", json={"author": gone, "how": "dislike"}).get_json()["dislike"] == [gone]
+    after = client.get("/api/books?filter=foryou").get_json()["books"]
+    assert gone not in {b["author"] for b in after}  # never suggested
+    mine = client.get("/api/me/authors").get_json()
+    assert mine["dislike"] == [gone] and gone in mine["known"]
+    client.post("/api/me/authors", json={"author": gone, "how": "like"})  # changing my mind moves it across
+    mine = client.get("/api/me/authors").get_json()
+    assert mine["like"] == [gone] and mine["dislike"] == []
+    assert client.get("/api/recommendations").get_json()["have"] == before["taste"]["have"] + 1  # a liked author counts
+    client.post("/api/logout")
+    login(client, "Partner")
+    assert client.get("/api/me/authors").get_json()["like"] == []  # only mine
+
+
+
+def test_manga_suggestions_come_from_anilist_readers_for_series_i_enjoyed(app, client, series_server, monkeypatch):
+    from bookhub import anilist
+    app.hub.config.tag_lookups = "on"
+    asked = []
+
+    def rec(i, title, votes, tags, kind="Manhwa"):
+        return {"id": i, "title": title, "other_title": title, "kind": kind, "format": "MANGA", "status": "Releasing", "score": 80,
+                "link": "https://anilist.co/manga/%d" % i, "cover": "", "genres": ["Fantasy"], "tags": tags, "votes": votes}
+
+    def fake_ask(title):
+        asked.append(title)
+        return {"id": 1, "recs": [rec(10, "Solo Leveling", 40, ["Action"]), rec(11, "Quiet Tea Shop", 90, ["Iyashikei"]),  # followed already
+                                  rec(12, "Tower of God", 5, ["Action", "Isekai"])]}
+    monkeypatch.setattr(anilist, "ask", fake_ask)
+    assert client.get("/api/recommendations/manga?look=1").get_json()["liked"] == 0  # nothing enjoyed yet
+    series_server.following.add(8)  # also followed: Quiet Tea Shop
+    app.hub.series._shelf_kept = (0, None)  # the shelf is kept for half a minute
+    client.post("/api/series-info/rating", json={"name": "Tower Climber", "rating": 5})
+    d = client.get("/api/recommendations/manga?look=1").get_json()
+    assert d["liked"] == 1 and asked == ["Tower Climber"]
+    titles = [b["title"] for b in d["books"]]
+    assert titles == ["Solo Leveling", "Tower of God"]  # most recommended first; what is followed is left out
+    assert d["books"][0]["reason"] == "Readers who liked Tower Climber liked this"
+    client.get("/api/recommendations/manga?look=1")
+    assert asked == ["Tower Climber"]  # kept for a week, not asked again
+    client.post("/api/recommendations/manga/dismiss", json={"id": 10})
+    assert [b["title"] for b in client.get("/api/recommendations/manga").get_json()["books"]] == ["Tower of God"]
+    # A followed series I rated counts towards my taste, with the reading site's tags.
+    with app.app_context():
+        from bookhub import recommend
+        mine = recommend.taste(app.hub, app.hub.profiles()[0]["id"])
+    assert mine["tags"].get("action", 0) >= 3
+    # AniList's cover pictures may pass through Family Hub; nothing else from there.
+    assert anilist.cover_allowed("https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/bx105398-b673Vt5ZSuz3.jpg")
+    assert not anilist.cover_allowed("https://s4.anilist.co/file/anilistcdn/../secret")
+    assert not anilist.cover_allowed("https://example.org/x.jpg")
+    assert anilist.plain("I Failed to Oust the Villain! [Official][Uncensored]") == anilist.plain("I Failed to Oust the Villain!")
+    assert anilist.plain("Cherry Magic! v03 (2021) (Digital)") == "cherry magic"
+    assert anilist.plain("Solo Leveling") == "solo leveling" and anilist.plain("Eleven Vows 2") == "eleven vows 2"
+
+
 def test_searches_try_the_spellings_sites_need():
     from bookhub.api import query_variants
     assert query_variants("The Savior's Book Café Story in Another World") == [
         "The Savior's Book Café Story in Another World", "The Saviors Book Cafe Story in Another World",
         "Saviors Book Cafe Story in Another World", "Book Cafe Story in Another World"]
     assert query_variants("Bongchon Bride") == ["Bongchon Bride"]
+
+
+def test_new_books_from_the_watchlist_look_for_authors_not_films(app, client, monkeypatch):
+    from bookhub import db
+    login(client, "You")
+    cfg = app.hub.config
+    cfg.prowlarr_url, cfg.prowlarr_api_key = "http://prowlarr:9696", "k"
+    looked = []
+    monkeypatch.setattr(integrations, "prowlarr_search", lambda config, q, limit=60: looked.append(q) or [])
+    pid = client.get("/api/state").get_json()["me"]["id"]
+    con = app.hub.con()
+    for kind, value in (("author", "Bram Stoker"), ("film", "Dune"), ("show", "Severance")):
+        con.execute("INSERT INTO watch(profile_id, kind, value, created) VALUES(?,?,?,?)", (pid, kind, value, db.now()))
+    con.commit()
+    assert client.get("/api/discover/new?refresh=1").status_code == 200
+    # A film or show on the watchlist is not searched for as a book's author.
+    assert "Bram Stoker" in looked and not {"Dune", "Severance"} & set(looked)

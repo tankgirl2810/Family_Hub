@@ -18,10 +18,16 @@ own list: the books they want on their devices.
 - To take a book off your list, open the book's page and press **In my
   books**.
 - Your reading app's catalogue lists My books on their own.
-- **Dashboard → My books** shows the whole list in one place: where each
-  book stands on each Kindle (sent, sending, not sent, with the button
-  that fits), a **Take off my list** button, then what you are reading now
-  and what you have finished, the most recent first.
+- **Dashboard → My books** shows the whole list in one place, in groups:
+  - **For your reading app**: how much of your list your reading app has
+    (see below). It only shows once you have something on your list.
+  - **On my devices**: each book on your list, where it stands on each
+    Kindle (sent, sending, not sent, with the button that fits), and a
+    **Take off my list** button.
+  - **Reading now**, then **Finished**, the most recent first.
+
+  **Refresh** at the top looks for new books and reading straight away and
+  gets your series ready for your reading app.
 
 Taking a book off your list keeps your reading history, rating and tags.
 
@@ -32,8 +38,10 @@ book, then **Remove download** or **Delete permanently**).
 
 ## Add your devices
 
-**Profiles → Settings → Devices and reading apps.** Add as many as you use.
-Only you and admins can see your list.
+Press your name at the top right; under **Settings for** your name is
+**Devices and reading apps**. Choose the **Kind**, give it a **Name** and
+press **Add device**. Add as many as you use. Only you and admins can see
+your list.
 
 | Kind | What Family Hub does for it |
 |---|---|
@@ -49,8 +57,8 @@ type your own to replace it.
 
 ## Readest or KOReader: the catalogue
 
-1. In Family Hub, set a **sync password** under **Profiles → Settings →
-   Reading app sync**. One password covers the catalogue and progress sync.
+1. In Family Hub, set a **sync password** under **Settings for** your
+   name → **Reading app sync** (press your name at the top right). One password covers the catalogue and progress sync.
 2. In the app, add a catalogue. Apps call it an "OPDS catalogue"; in
    KOReader it is under **Search → OPDS catalog**, in Readest look for
    OPDS catalogues in the library's menu. Enter:
@@ -70,9 +78,17 @@ comes again as a new, longer book; delete the shorter one in the reading app.
 
 A long series takes a few minutes to put together the first time. Until it is ready, My books lists it
 with "Being put together on the server" and nothing to download, and Readest's automatic download picks
-it up on a later check. **My books → Series for your reading app** shows each one: being put together
-(with how far along), waiting its turn, ready, or why it could not be made. The series card in the
-Library carries the same as a badge.
+it up on a later check. The series card in the Library carries a badge while this goes on, and on every
+page a note in the bottom-left corner says what is being added and how far along it is.
+
+**My books → For your reading app** lists everything on your list as the reading app gets it (a comic
+series once per part, a series by chapter once per 50 chapters), with a bar for how much of it is on
+the app. What is still to come is split into **Being made on the server** (**Being put together** with
+its percentage, **Waiting its turn**, or why it could not be made) and **Ready, not fetched yet**
+(**Ready** or **A new copy is ready**: the app fetches it at its next check). What the app already has
+is folded under **On your reading app**; press it to see the list. Family Hub counts a book as on the app
+once the app has downloaded it from the catalogue, or reported reading it. For books the app had before
+Family Hub started counting, press **It's on my app**.
 
 Very large scans are shrunk to tablet size in this book. The files in the library are not changed. A
 series that would still be over about 1 GB comes in parts, such as "The Ancient Magus' Bride · Part 2

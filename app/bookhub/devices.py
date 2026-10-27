@@ -17,7 +17,7 @@ from email.message import EmailMessage
 from . import db
 
 KINDS = [("kindle", "Kindle"), ("readest", "Readest"), ("koreader", "KOReader"), ("kobo", "Kobo"), ("other", "Other")]
-KIND_IDS = {k for k, _ in KINDS}
+KIND_IDS = {kind for kind, _ in KINDS}
 # Where "open my library" goes when a device has no link of its own.
 DEFAULT_LINKS = {"kindle": "https://read.amazon.com/kindle-library", "readest": "https://web.readest.com",
                  "kobo": "https://www.kobo.com/library"}
@@ -132,34 +132,35 @@ class Devices:
 
     def shelf(self, profile_id):
         """{book_key: date added} for one profile's "My books"."""
-        return {r["book_key"]: r["added"] for r in
+        return {row["book_key"]: row["added"] for row in
                 self.hub.con().execute("SELECT book_key, added FROM shelf WHERE profile_id=?", (profile_id,))}
 
     def set_shelf(self, profile_id, book, on, by=None):
         """Add or remove a book. Returns the device names it is being sent to, or is still on."""
         con = self.hub.con()
         key = book["key"]
-        kindles = [d for d in self.rows(profile_id) if d["kind"] == "kindle"]
+        kindles = [device for device in self.rows(profile_id) if device["kind"] == "kindle"]
         result = {"on": bool(on), "sending": [], "still_on": []}
         if on:
             self.hub.ensure_meta(key)
             added = con.execute("INSERT OR IGNORE INTO shelf(profile_id, book_key, added_by, added) VALUES(?,?,?,?)",
                                 (profile_id, key, by, db.now())).rowcount
             con.commit()
-            if added:
-                for d in kindles:
-                    if d["auto_send"]:
-                        try:
-                            self.queue(d, book)
-                            result["sending"].append(d["name"])
-                        except ValueError as exc:
-                            self._record(d, key, "failed", str(exc))
+            # rowcount is 0 when it was already on the shelf, so pressing the button twice doesn't email it twice
+            for device in kindles if added else []:
+                if not device["auto_send"]:
+                    continue
+                try:
+                    self.queue(device, book)
+                    result["sending"].append(device["name"])
+                except ValueError as exc:
+                    self._record(device, key, "failed", str(exc))
         else:
-            sent = {r["device_id"] for r in con.execute(
+            sent = {row["device_id"] for row in con.execute(
                 "SELECT device_id FROM deliveries WHERE profile_id=? AND book_key=? AND status='sent'", (profile_id, key))}
-            result["still_on"] = [d["name"] for d in kindles if d["id"] in sent]
+            result["still_on"] = [device["name"] for device in kindles if device["id"] in sent]
             con.execute("DELETE FROM shelf WHERE profile_id=? AND book_key=?", (profile_id, key))
-            # Forget what was sent, so adding the book again later sends it again.
+            # forget it was ever sent, so putting it back on the shelf later sends it again
             con.execute("DELETE FROM deliveries WHERE profile_id=? AND book_key=?", (profile_id, key))
             con.commit()
         self.hub.touch()
@@ -185,7 +186,7 @@ class Devices:
             path = library.file_path(book, fmt) if fmt in book["formats"] else None
             if path:
                 choices.append((fmt, path))
-        choices.sort(key=lambda c: KINDLE_FORMATS.index(c[0]))
+        choices.sort(key=lambda choice: KINDLE_FORMATS.index(choice[0]))
         if not choices:
             have = ", ".join(sorted(book["formats"])) or "no files"
             if set(book["formats"]) & {"CBZ", "CBR", "CB7"}:
@@ -193,7 +194,7 @@ class Devices:
             return None, "A Kindle cannot take this book by email (it has %s)." % have
         limit = self.limit_mb()
         for fmt, path in choices:
-            if path.stat().st_size <= limit * 1048576:
+            if path.stat().st_size <= limit * 1048576:  # 1048576 = one MB in bytes
                 return fmt, path
         size = min(path.stat().st_size for _, path in choices) / 1048576
         return None, "Too big to email: %.0f MB, and the limit is %d MB." % (size, limit)
@@ -221,7 +222,7 @@ class Devices:
     def send_queued(self):
         """Email everything that is waiting. Returns how many were sent."""
         if not self._lock.acquire(blocking=False):
-            return 0  # another thread is already sending
+            return 0  # someone else is already on it
         try:
             con = self.hub.con()
             waiting = con.execute("SELECT * FROM deliveries WHERE status='queued' ORDER BY at").fetchall()
@@ -248,13 +249,13 @@ class Devices:
                     if not fmt:
                         self._finish(row, "failed", path)
                         continue
-                    msg = EmailMessage()
-                    msg["From"], msg["To"], msg["Subject"] = config.mail_sender, device["address"], book["title"]
-                    msg.set_content("Sent from the family library by Family Hub.")
-                    msg.add_attachment(path.read_bytes(), maintype="application", subtype=MIME.get(fmt, "octet-stream"),
-                                       filename=safe_filename(book["title"], book["author"], fmt))
+                    message = EmailMessage()
+                    message["From"], message["To"], message["Subject"] = config.mail_sender, device["address"], book["title"]
+                    message.set_content("Sent from the family library by Family Hub.")
+                    message.add_attachment(path.read_bytes(), maintype="application", subtype=MIME.get(fmt, "octet-stream"),
+                                           filename=safe_filename(book["title"], book["author"], fmt))
                     try:
-                        smtp.send_message(msg)
+                        smtp.send_message(message)
                     except Exception as exc:
                         self._finish(row, "failed", explain(exc))
                         continue
@@ -264,7 +265,7 @@ class Devices:
                 try:
                     smtp.quit()
                 except Exception:
-                    pass
+                    pass  # it's goodbye either way
             return sent
         finally:
             self._lock.release()
@@ -291,16 +292,16 @@ class Devices:
         """Whether a book is on a profile's shelf, and where it stands on each of their Kindles."""
         con = self.hub.con()
         key = book["key"]
-        sent = {r["device_id"]: r for r in con.execute(
+        sent = {row["device_id"]: row for row in con.execute(
             "SELECT * FROM deliveries WHERE profile_id=? AND book_key=?", (profile_id, key))}
         fmt, why = self.sendable(book)
         devices = []
-        for d in self.rows(profile_id):
-            if d["kind"] != "kindle":
+        for device in self.rows(profile_id):
+            if device["kind"] != "kindle":
                 continue
-            row = sent.get(d["id"])
+            row = sent.get(device["id"])
             devices.append({
-                "id": d["id"], "name": d["name"], "can_send": bool(fmt), "why": "" if fmt else why,
+                "id": device["id"], "name": device["name"], "can_send": bool(fmt), "why": "" if fmt else why,
                 "state": row["status"] if row else "none", "reason": row["reason"] if row else "",
                 "at": row["at"] if row else None,
             })

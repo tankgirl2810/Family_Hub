@@ -22,10 +22,6 @@ client Prowlarr supports will work.
 
 Skip this if the home server already runs Prowlarr; use that one.
 
-Sites match whole words exactly, so Discover asks for a few spellings at once: as typed, without accents
-and apostrophes ("Savior's Café" and "Saviors Cafe"), and for a long title without its first word or two.
-Webtoons and manhwa are rarely on these sites at all; follow them chapter by chapter instead (guide 13).
-
 ```bash
 docker compose --profile search up -d
 ```
@@ -43,12 +39,13 @@ carry ebooks.
 In Prowlarr: **Settings → Download Clients → +** and choose your client.
 
 - **Using the bundled qBittorrent:** start it with
-  `docker compose --profile search --profile torrent up -d`. Its first
-  password is printed in `docker logs qbittorrent`. In Prowlarr use host
-  `qbittorrent`, port `8080`.
-- **Using your own client:** enter its address and sign-in as usual.
-
-Press **Test**, then **Save**.
+  `docker compose --profile search --profile torrent up -d`, set its
+  password ([guide 15](15-what-you-need.md), step 5) and press **Connect
+  everything** under **Admin → Hub → Films and TV**. That adds qBittorrent
+  to Prowlarr for you. To do it by hand instead, use host `gluetun` (the
+  VPN container qBittorrent runs inside), port `8080`.
+- **Using your own client:** enter its address and sign-in as usual, then
+  press **Test** and **Save**.
 
 ## D. Tell Family Hub where finished downloads land
 
@@ -56,8 +53,10 @@ Family Hub watches one folder for finished ebook files (EPUB, PDF, MOBI,
 AZW3 and a few others) and copies them into the library manager's import
 folder. It copies rather than moves, so seeding continues.
 
-1. In your torrent client set a **separate folder for unfinished
-   downloads**. In qBittorrent: **Options → Downloads → Keep incomplete
+1. With your own client, set a **separate folder for unfinished
+   downloads**. (With the bundled qBittorrent and its address saved under
+   Connections, Family Hub asks it which files are still downloading, so
+   this is not needed.) In qBittorrent: **Options → Downloads → Keep incomplete
    torrents in**, for example `/downloads/incomplete`, with the default save
    path `/downloads/complete`. Family Hub ignores folders named `incomplete`,
    `temp`, `tmp` or `downloading`, and files less than two minutes old.
@@ -75,28 +74,35 @@ folder. It copies rather than moves, so seeding continues.
 4. Press **Test connection**. It tells you whether the address answered and
    whether the key was accepted. Then press **Save**. It takes effect
    straight away; nothing needs restarting.
-5. Optional, for live progress bars: fill in **Download progress
-   (qBittorrent)** the same way. With the bundled client the address is
-   `http://qbittorrent:8080`.
-6. Check **Admin → Hub → Server**: "Book search" should say Connected
-   and the folders should say Found.
+5. Fill in **Download progress (qBittorrent)** the same way. The Downloads
+   page, the progress card and pausing all need it. With the bundled client
+   the address is `http://gluetun:8080`.
+6. Check the **Server** card further down **Admin → Hub**: "Search
+   (Prowlarr)" should say Connected, and "Book library" and
+   "Finished-downloads folder" should say Found.
 
-Keys and passwords saved here are kept on the server and are never shown
-again; to change one, type the new one over it. **Remove** next to a field
-forgets the saved value. They are not included in **Download book data** or
-the daily backups.
-
-The same settings can still be given in `.env` (`PROWLARR_URL`,
-`PROWLARR_API_KEY`, `QBITTORRENT_URL` and so on). A value saved on the Admin
-page wins over `.env`; removing it goes back to the `.env` value.
+Saving writes the value into the `.env` file (`PROWLARR_URL`,
+`PROWLARR_API_KEY`, `QBITTORRENT_URL` and so on), so typing it in either
+place has the same result. Keys and passwords are never shown again; to
+change one, type the new one over it. **Remove** next to a field clears the
+saved value. They are not included in **Download book data** or the daily
+backups.
 
 ## F. Use it
 
 1. **Discover → Search for a book.** EPUB results are listed first, then by
-   seeders. Books you already own show **In library**.
-2. Press **Download**. The button changes to **Sent**, and a small card in
+   seeders. Books you already own show **In library**. Your last search stays: open a
+   result and come back, and the results (and where you had scrolled to) are
+   still there, without asking the sites again, for two hours in that tab.
+
+   Sites match whole words exactly, so Discover asks for a few spellings at
+   once: as typed, without accents and apostrophes ("Savior's Café" and
+   "Saviors Cafe"), and for a long title without its first word or two.
+   Webtoons and manhwa are rarely on these sites at all; follow them chapter
+   by chapter instead (guide 13).
+2. Press **Download** (**Get (PDF)** on a PDF result). The button changes to **Sent**, and a small card in
    the bottom-right corner follows the book until it is in the library.
-   **Downloads** (in the sidebar, or the tab in Books) shows every download
+   **Downloads** (its own section, or the tab in Books) shows every download
    with **Pause**, **Continue**, the order they download in and, for admins,
    **Delete**, which removes the download and its files (a book already in
    the library stays there; delete it from its page).
@@ -121,9 +127,11 @@ Who can do this: admins and members. Restricted profiles cannot.
 
 Two ways to turn a PDF into an EPUB:
 
-- **On arrival (recommended):** in the library manager's own settings, turn
-  on automatic conversion to EPUB for newly added books. Every PDF that
-  comes in is converted there.
+- **On arrival:** in the library manager's own settings, let automatic
+  conversion to EPUB include PDFs. This project leaves PDFs out on purpose,
+  because a large scanned PDF can hold up every book behind it
+  ([guide 8](08-adding-and-sorting-books.md), "Why PDFs and comics are not
+  converted").
 - **On demand in Family Hub:** build the image with the converter included,
   then use **Convert to EPUB** on a PDF book's page:
 

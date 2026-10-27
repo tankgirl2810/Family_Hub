@@ -23,45 +23,43 @@ def prowlarr_search(config, query, limit=60):
     if not config.discover_configured:
         raise IntegrationError("Search is not set up yet. An admin can add Prowlarr under Admin, Hub, Connections.")
     try:
-        r = requests.get(
+        reply = requests.get(
             config.prowlarr_url + "/api/v1/search",
             params={"query": query, "type": "search", "categories": BOOK_CATEGORIES, "limit": limit},
             headers={"X-Api-Key": config.prowlarr_api_key}, timeout=SEARCH_TIMEOUT,
         )
-        r.raise_for_status()
-        releases = r.json()
+        reply.raise_for_status()
+        releases = reply.json()
     except requests.Timeout:
         raise IntegrationError("Prowlarr took more than two minutes to ask every site. One of them is probably not answering: "
                                "open Prowlarr (Admin, Manage the programs) and remove or switch off sites that keep failing.")
     except (requests.RequestException, ValueError) as exc:
         raise IntegrationError("Could not reach Prowlarr: %s" % exc)
-    results = []
-    for rel in releases:
-        results.append({
-            "guid": rel.get("guid"), "indexer_id": rel.get("indexerId"), "indexer": rel.get("indexer") or "",
-            "title": rel.get("title") or "", "size": rel.get("size") or 0,
-            "seeders": rel.get("seeders"), "protocol": rel.get("protocol") or "",
-            "age_days": rel.get("age"), "format": guess_format(rel.get("title") or ""),
-        })
-    results.sort(key=lambda x: (x["format"] != "EPUB", -(x["seeders"] or 0)))
+    results = [{
+        "guid": release.get("guid"), "indexer_id": release.get("indexerId"), "indexer": release.get("indexer") or "",
+        "title": release.get("title") or "", "size": release.get("size") or 0,
+        "seeders": release.get("seeders"), "protocol": release.get("protocol") or "",
+        "age_days": release.get("age"), "format": guess_format(release.get("title") or ""),
+    } for release in releases]
+    results.sort(key=lambda result: (result["format"] != "EPUB", -(result["seeders"] or 0)))
     return results
 
 
 def prowlarr_grab(config, guid, indexer_id):
     """Ask Prowlarr to send a release to whichever download client it is set up with."""
     try:
-        r = requests.post(
+        reply = requests.post(
             config.prowlarr_url + "/api/v1/search",
             json={"guid": guid, "indexerId": indexer_id},
             headers={"X-Api-Key": config.prowlarr_api_key}, timeout=TIMEOUT,
         )
     except requests.RequestException as exc:
         raise IntegrationError("Prowlarr could not send it to the download client: %s" % exc)
-    if r.status_code >= 400:
-        if "download client isn't configured" in r.text.lower():
+    if reply.status_code >= 400:
+        if "download client isn't configured" in reply.text.lower():
             raise IntegrationError("Prowlarr has no download client yet. An admin can press Connect everything "
                                    "under Admin, Hub, Films and TV to give it qBittorrent.")
-        raise IntegrationError("Prowlarr could not send it to the download client (%s)." % r.status_code)
+        raise IntegrationError("Prowlarr could not send it to the download client (%s)." % reply.status_code)
     return True
 
 
@@ -69,58 +67,55 @@ def prowlarr_status(config):
     if not config.discover_configured:
         return {"configured": False, "ok": False}
     try:
-        r = requests.get(config.prowlarr_url + "/api/v1/system/status",
-                         headers={"X-Api-Key": config.prowlarr_api_key}, timeout=8)
-        r.raise_for_status()
-        return {"configured": True, "ok": True, "version": r.json().get("version")}
+        reply = requests.get(config.prowlarr_url + "/api/v1/system/status",
+                             headers={"X-Api-Key": config.prowlarr_api_key}, timeout=8)
+        reply.raise_for_status()
+        return {"configured": True, "ok": True, "version": reply.json().get("version")}
     except (requests.RequestException, ValueError) as exc:
         return {"configured": True, "ok": False, "error": str(exc)}
 
 
 def guess_format(title):
     low = title.lower()
-    for fmt in ("epub", "pdf", "mobi", "azw3", "cbz", "m4b", "mp3"):
-        if fmt in low:
-            return fmt.upper()
-    return ""
+    return next((fmt.upper() for fmt in ("epub", "pdf", "mobi", "azw3", "cbz", "m4b", "mp3") if fmt in low), "")
 
 
 # ------------------------------------------------------------- qBittorrent
 
 def qbit_session(config):
     """A signed-in session with qBittorrent. Raises IntegrationError when it cannot sign in."""
-    s = requests.Session()
-    s.headers["Referer"] = config.qbit_url
+    session = requests.Session()
+    session.headers["Referer"] = config.qbit_url  # qBittorrent rejects requests without a matching Referer, CSRF thing
     if config.qbit_user:
         try:
-            login = s.post(config.qbit_url + "/api/v2/auth/login",
+            login = session.post(config.qbit_url + "/api/v2/auth/login",
                            data={"username": config.qbit_user, "password": config.qbit_pass}, timeout=8)
         except requests.RequestException as exc:
             raise IntegrationError("Could not reach qBittorrent: %s" % exc)
-        # qBittorrent 5 answers a good sign-in with an empty 204; older versions with 200 "Ok.".
+        # qBittorrent 5 says "yep" with an empty 204, older ones with 200 "Ok.". gotta accept both
         if not (login.status_code == 204 or (login.status_code == 200 and "ok" in login.text.lower())):
             raise IntegrationError("qBittorrent refused the user name or password.")
-    return s
+    return session
 
 
 def qbit_queue(config):
     """Current torrents, for the Downloads panel. Optional."""
     if not config.qbit_url:
         return None
-    s = qbit_session(config)
+    session = qbit_session(config)
     try:
         params = {"sort": "added_on", "reverse": "true", "limit": 25}
         if config.qbit_category:
             params["category"] = config.qbit_category
-        r = s.get(config.qbit_url + "/api/v2/torrents/info", params=params, timeout=8)
-        r.raise_for_status()
-        torrents = r.json()
+        reply = session.get(config.qbit_url + "/api/v2/torrents/info", params=params, timeout=8)
+        reply.raise_for_status()
+        torrents = reply.json()
     except (requests.RequestException, ValueError) as exc:
         raise IntegrationError("Could not reach qBittorrent: %s" % exc)
     return [{
-        "name": t.get("name"), "progress": round((t.get("progress") or 0) * 100),
-        "state": t.get("state"), "done": (t.get("progress") or 0) >= 1,
-    } for t in torrents]
+        "name": torrent.get("name"), "progress": round((torrent.get("progress") or 0) * 100),
+        "state": torrent.get("state"), "done": (torrent.get("progress") or 0) >= 1,
+    } for torrent in torrents]
 
 
 # --------------------------------------------------------------- Hardcover
@@ -149,36 +144,36 @@ def hardcover_sync(hub, profile):
     if not token.lower().startswith("bearer "):
         token = "Bearer " + token
     try:
-        r = requests.post(HARDCOVER_URL, json={"query": HARDCOVER_QUERY},
-                          headers={"authorization": token}, timeout=TIMEOUT)
-        r.raise_for_status()
-        payload = r.json()
+        reply = requests.post(HARDCOVER_URL, json={"query": HARDCOVER_QUERY},
+                              headers={"authorization": token}, timeout=TIMEOUT)
+        reply.raise_for_status()
+        payload = reply.json()
     except (requests.RequestException, ValueError) as exc:
         raise IntegrationError("Could not reach Hardcover: %s" % exc)
     if payload.get("errors"):
         raise IntegrationError("Hardcover returned an error: %s" % payload["errors"][0].get("message"))
     me = (payload.get("data") or {}).get("me")
-    if isinstance(me, list):
+    if isinstance(me, list):  # sometimes a list of one, sometimes not. ¯\_(ツ)_/¯
         me = me[0] if me else {}
     count = 0
-    for ub in (me or {}).get("user_books", []):
-        book = ub.get("book") or {}
+    for user_book in (me or {}).get("user_books", []):
+        book = user_book.get("book") or {}
         title = book.get("title")
         if not title:
             continue
-        authors = [c["author"]["name"] for c in book.get("contributions") or [] if (c.get("author") or {}).get("name")]
+        authors = [credit["author"]["name"] for credit in book.get("contributions") or [] if (credit.get("author") or {}).get("name")]
         author = " & ".join(authors[:2])
         key = db.make_key(title, author)
-        match = next((b for b in hub.library.books() if db.make_key(b["title"], b["author"]) == key), None)
+        match = next((owned for owned in hub.library.books() if db.make_key(owned["title"], owned["author"]) == key), None)
         if match:
             key = match["key"]
-        reads = ub.get("user_book_reads") or []
-        started = next((x.get("started_at") for x in reads if x.get("started_at")), None)
-        finished = next((x.get("finished_at") for x in reads if x.get("finished_at")), None)
-        status = "finished" if ub.get("status_id") == 3 else "reading"
+        reads = user_book.get("user_book_reads") or []
+        started = next((read.get("started_at") for read in reads if read.get("started_at")), None)
+        finished = next((read.get("finished_at") for read in reads if read.get("finished_at")), None)
+        status = "finished" if user_book.get("status_id") == 3 else "reading"
         existing = hub.con().execute("SELECT source, status FROM reading WHERE book_key=? AND profile_id=?",
                                      (key, profile["id"])).fetchone()
-        # Never let an outside tracker overwrite progress that came from a device or by hand.
+        # the e-reader or a human typed it in? that wins over Hardcover. the one exception: Hardcover saying "finished"
         if existing and existing["source"] != "hardcover" and not (status == "finished" and existing["status"] != "finished"):
             continue
         hub.save_reading(

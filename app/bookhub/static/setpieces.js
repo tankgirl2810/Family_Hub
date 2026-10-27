@@ -8,11 +8,13 @@ const SetPieces = (() => {
     const app = document.getElementById('app'), crt = document.getElementById('crt');
     if (!app || !crt) return;
     app.classList.remove('glitch'); crt.classList.remove('run');
+    // reading offsetWidth forces the browser to re-layout right now, so removing and re-adding the class
+    // actually restarts the animation instead of being squashed into "nothing changed". classic CSS trick
     void app.offsetWidth;
     app.classList.add('glitch'); crt.classList.add('run');
     // Tidy up afterwards, so nothing is left parked over or under the page.
     // Only their own animations count: ones inside the page bubble up too.
-    const done = (node, cls) => { const off = (e) => { if (e.target !== node) return; node.classList.remove(cls); node.removeEventListener('animationend', off); }; node.addEventListener('animationend', off); };
+    const done = (node, cls) => { const off = (event) => { if (event.target !== node) return; node.classList.remove(cls); node.removeEventListener('animationend', off); }; node.addEventListener('animationend', off); };
     done(crt, 'run'); done(app, 'glitch');
   }
 

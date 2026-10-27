@@ -52,14 +52,15 @@ class LibraryManager:
         try:
             page = session.get(config.cwa_api_url + "/login", timeout=30)
             token = self._find_token(page.text)
-            r = session.post(config.cwa_api_url + "/login", timeout=30, allow_redirects=False,
-                             data={"username": config.cwa_user, "password": config.cwa_pass, "csrf_token": token or "", "next": "/"})
-            if r.status_code == 429:
+            reply = session.post(config.cwa_api_url + "/login", timeout=30, allow_redirects=False,
+                                 data={"username": config.cwa_user, "password": config.cwa_pass, "csrf_token": token or "", "next": "/"})
+            if reply.status_code == 429:
                 raise ManagerError("The library manager allows three sign-ins a minute. Wait a minute and try again.")
             home = session.get(config.cwa_api_url + "/", timeout=30)
         except requests.RequestException as exc:
             raise ManagerError("Could not reach the library manager: %s" % exc)
-        if r.status_code not in (301, 302, 303) or "/logout" not in home.text:
+        # a good login answers with a redirect, and the home page after it has a logout link. no logout link = not in
+        if reply.status_code not in (301, 302, 303) or "/logout" not in home.text:
             raise ManagerError("The library manager refused the user name or password.")
         self._session, self._token = session, self._find_token(home.text) or token
         self._signed_in_as = (config.cwa_api_url, config.cwa_user)
@@ -72,14 +73,14 @@ class LibraryManager:
                 if self._session is None or self._signed_in_as != (config.cwa_api_url, config.cwa_user):
                     self.sign_in()
                 try:
-                    r = self._session.post(config.cwa_api_url + path, timeout=TIMEOUT, allow_redirects=False,
-                                           headers={"X-CSRFToken": self._token or "", "X-Requested-With": "XMLHttpRequest"}, **kw)
+                    reply = self._session.post(config.cwa_api_url + path, timeout=TIMEOUT, allow_redirects=False,
+                                               headers={"X-CSRFToken": self._token or "", "X-Requested-With": "XMLHttpRequest"}, **kw)
                 except requests.RequestException as exc:
                     raise ManagerError("Could not reach the library manager: %s" % exc)
-                if r.status_code in (301, 302, 303, 400, 401, 403) and attempt == 1:
-                    self._session = None  # the session ran out; sign in again once
+                if reply.status_code in (301, 302, 303, 400, 401, 403) and attempt == 1:
+                    self._session = None  # session went stale, log in again. but only once, we're not hammering a 3-per-minute limit
                     continue
-                return r
+                return reply
         raise ManagerError("The library manager would not accept the request.")
 
     def set_field(self, book_id, field, value):
@@ -88,15 +89,16 @@ class LibraryManager:
 
     def merge(self, keep_id, spare_ids):
         """Move any format only a spare has onto the kept entry, then remove the spares and their files."""
-        r = self._post("/ajax/mergebooks", json={"Merge_books": [keep_id] + list(spare_ids)})
-        if r.status_code != 200 or '"success": true' not in r.text.replace("'", '"'):
-            raise ManagerError("The library manager did not confirm the change (%s). Does this account have permission to edit and delete books?" % r.status_code)
+        reply = self._post("/ajax/mergebooks", json={"Merge_books": [keep_id] + list(spare_ids)})
+        # it answers with python-ish 'single quotes' sometimes, so flip them before looking
+        if reply.status_code != 200 or '"success": true' not in reply.text.replace("'", '"'):
+            raise ManagerError("The library manager did not confirm the change (%s). Does this account have permission to edit and delete books?" % reply.status_code)
 
     def delete(self, book_id):
         """Remove one entry and its files from the library, the way the library manager's own Delete button does."""
-        r = self._post("/ajax/delete/%d" % book_id)
-        if r.status_code != 200 or "success" not in r.text:
-            raise ManagerError("The library manager did not confirm the deletion (%s). Does this account have permission to delete books?" % r.status_code)
+        reply = self._post("/ajax/delete/%d" % book_id)
+        if reply.status_code != 200 or "success" not in reply.text:
+            raise ManagerError("The library manager did not confirm the deletion (%s). Does this account have permission to delete books?" % reply.status_code)
 
     def test(self, config):
         if not configured(config):

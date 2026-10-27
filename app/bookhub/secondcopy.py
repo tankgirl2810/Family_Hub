@@ -29,7 +29,8 @@ SETTINGS = ["cwa-config", "suwayomi", "komga-config", "prowlarr-config", "qbitto
             "radarr-config", "sonarr-config", "bazarr-config", "gluetun", "jellyfin-config"]
 # Folders inside those that are caches, logs or programs: big, and rebuilt without loss.
 SKIP_DIRS = {"processed_books", "thumbnails", "cache", ".cache", "webUI", "bin", "logs", "log_archive", "downloads", "local",
-             "converted", "MediaCover", "ipc-socket", "lucene", "tmp"}
+             "converted", "MediaCover", "ipc-socket", "lucene", "tmp",
+             "series-files", "chapter-files"}  # joined series books and chapter files: gigabytes, made again from the library
 SKIP_ENDS = (".tmp", ".lock", ".pid", "-journal")
 _running = threading.Lock()
 
@@ -55,8 +56,8 @@ def enabled(config):
 def _is_sqlite(path):
     """Other programs use the .db ending too (the series server's is a different kind altogether)."""
     try:
-        with open(path, "rb") as f:
-            return f.read(16) == b"SQLite format 3\x00"
+        with open(path, "rb") as file:
+            return file.read(16) == b"SQLite format 3\x00"  # every real SQLite file starts with exactly these 16 bytes
     except OSError:
         return False
 
@@ -74,7 +75,7 @@ def _copy_database(src, dest):
             source.close()
         return
     except sqlite3.Error:
-        pass  # a read-only folder, or not really a database: take the files as they are
+        pass  # read-only folder, or a fake .db. fine, plain copy it is
     Path(dest).unlink(missing_ok=True)
     shutil.copy2(src, dest)
     for extra in ("-wal", "-shm"):
@@ -92,14 +93,15 @@ def _copy_file(src, dest, tally):
         shutil.copy2(src, part)
     os.replace(part, dest)
     stamp = src.stat()
-    os.utime(dest, (stamp.st_atime, stamp.st_mtime))  # so tomorrow's run can tell it has not changed
+    os.utime(dest, (stamp.st_atime, stamp.st_mtime))  # copy the timestamp over, it's how tomorrow knows nothing changed
     tally.copied += 1
     tally.bytes += dest.stat().st_size
 
 
 def _files(root, skip_dirs=()):
     for base, dirs, names in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        # dirs[:] edits the list in place, which is how you tell os.walk "don't go in there"
+        dirs[:] = [name for name in dirs if name not in skip_dirs]
         for name in names:
             if name.endswith(SKIP_ENDS) or name.endswith(("-wal", "-shm")):
                 continue
@@ -115,6 +117,14 @@ def snapshot(src, dest, tally):
             tally.error(path, exc)
 
 
+def _unchanged(path, target):
+    """Same time (and, apart from databases, same size) means the copy is still good."""
+    here, there = path.stat(), target.stat()
+    same_time = int(there.st_mtime) == int(here.st_mtime)
+    # a database copy is made with SQLite's backup, so its size can differ even when nothing changed
+    return same_time if path.suffix == ".db" else same_time and there.st_size == here.st_size
+
+
 def mirror(src, dest, attic, tally):
     """Bring ``dest`` in line with ``src``. Anything replaced or no longer at the source goes to ``attic``."""
     seen = set()
@@ -123,13 +133,8 @@ def mirror(src, dest, attic, tally):
         seen.add(rel)
         target = dest / rel
         try:
-            stamp = path.stat()
             if target.is_file():
-                there = target.stat()
-                if there.st_size == stamp.st_size and int(there.st_mtime) == int(stamp.st_mtime) and path.suffix != ".db":
-                    tally.kept += 1
-                    continue
-                if path.suffix == ".db" and int(there.st_mtime) == int(stamp.st_mtime):
+                if _unchanged(path, target):
                     tally.kept += 1
                     continue
                 _set_aside(target, attic / rel, tally)
@@ -148,7 +153,7 @@ def mirror(src, dest, attic, tally):
 
 def _set_aside(path, to, tally):
     to.parent.mkdir(parents=True, exist_ok=True)
-    if to.exists():  # a second run on the same day: keep the first one set aside
+    if to.exists():  # second run today? don't trample the first one's set-aside copy
         to = to.with_name("%s.%s" % (to.name, datetime.now().strftime("%H%M%S")))
     os.replace(path, to)
     tally.moved += 1
@@ -162,7 +167,7 @@ def sources(config):
     big = [("library", config.library_dir)]
     if config.series_dir and config.series_dir.is_dir():
         big.append(("series", config.series_dir))
-    return small, [(n, p) for n, p in big if p and p.is_dir()]
+    return small, [(name, path) for name, path in big if path and path.is_dir()]
 
 
 def run(hub):
@@ -182,7 +187,7 @@ def run(hub):
             mirror(src, target / name, target / "removed" / today / name, tally)
         result = {"ok": not tally.errors, "at": db.now(), "day": today, "copied": tally.copied, "unchanged": tally.kept,
                   "set_aside": tally.moved, "bytes": tally.bytes, "seconds": round(time.monotonic() - started),
-                  "folders": [n for n, _ in small + big], "errors": tally.errors,
+                  "folders": [name for name, _ in small + big], "errors": tally.errors,
                   "error": "%d files could not be copied. The first: %s" % (len(tally.errors), tally.errors[0]) if tally.errors else ""}
     except OSError as exc:
         result = {"ok": False, "at": db.now(), "day": today, "error": "The copy stopped: %s" % exc, "errors": [str(exc)]}

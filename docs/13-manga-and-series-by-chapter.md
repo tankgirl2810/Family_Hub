@@ -94,7 +94,8 @@ whole series, which can be several GB.
 ## Following a series
 
 1. Open **Library → Graphic novels**.
-2. Under **Follow a new series** type a title and press **Search**. Results
+2. Press **Follow a new series** (once something is followed it is folded
+   into one line), type a title and press **Search**. Results
    are grouped by site.
 3. Press **Follow**.
 
@@ -102,8 +103,32 @@ Every chapter is queued to download straight away. New chapters are looked
 for twice a day and downloaded as they appear. **Look for new chapters**
 does it on demand.
 
-Each series card shows how many chapters have been read, how many are new,
-and how many are kept on the server so far.
+A series whose publication is **Finished** or **Cancelled** is not looked at for new chapters: every
+chapter already found is downloaded, and it is put in the series server's category "Finished or
+cancelled (not checked for new chapters)", which its updates leave out. If the site later says it is
+ongoing again, it comes back out. **Look for new chapters** on its page still checks once.
+
+### Chapters the site lists twice
+
+Some sites list a chapter twice: two translations, or "Ch. 21" and "Ch. 21 (18+)". Family Hub keeps
+one copy of each chapter number. It prefers the copy marked 18+, uncensored, uncut or similar, then the
+one whose name says more than the number, then the newest. Only that copy is downloaded, counted,
+shown and put in the comic file and the reading-app book. The series' page says how many chapters the
+site lists twice. If the other copy was already downloaded, it is deleted from the series server once
+the kept copy has arrived (checked every ten minutes, with the comic files).
+
+Chapters are fetched through the VPN (guide 14), like torrents: the series server shares the VPN
+container's connection. Starting the `series` profile starts the VPN container too, so the VPN settings
+in `.env` are needed. If the VPN drops, no chapters are fetched until it is back. Some reading sites are
+stricter with VPN addresses; if one stops answering, try another VPN country (`VPN_COUNTRIES`).
+
+Followed series sit in the Library with the other graphic novels (the **Series** tab
+too), tagged **Chapter by chapter** and with how far publication has got: **Ongoing**,
+**Hiatus**, **Finished** (or Cancelled, Licensed). The reading site's own genres become
+community tags. All of these can be searched and picked like any tag, and the series can
+be sorted with the rest. Each card shows how many chapters have been read and how many
+are new, and has **Add to my books** and, once the comic file is made, **Download CBZ**; the title opens the series, where chapters can be
+read in the browser.
 
 ## One comic file for the whole series
 
@@ -129,7 +154,7 @@ Tachimanga reads from Komga through its Komga source.
 3. Fill in:
    - **Address**: `http://<the computer's address>:25600`, with no slash at
      the end. On the home network that is the computer's local address, for
-     example `http://192.168.0.73:25600`.
+     example `http://192.168.1.50:25600`.
    - **Username** and **Password**: the reader's Komga account.
 4. Go back, open the Komga source and pick a series.
 
@@ -145,21 +170,26 @@ not yet been tried on a real iPad.**
 Press **Add to my books** on a series' page. Your reading app's catalogue (guide 9) then has the series
 as **one book**: every chapter kept so far, in order, with a contents entry per chapter. The catalogue
 offers the comic file above as a second download once it is made. Either is kept on the tablet, so it
-reads offline. While the series
-is ongoing, each new chapter makes the catalogue offer a longer copy, which Readest downloads by itself if
-automatic download is on. The longer copy is a new book in Readest: open it from the contents list at the
-chapter you were up to, and delete the shorter one.
+reads offline. A long series comes as parts of 50 chapters, the same parts as the comic files. While the
+series is ongoing, each new chapter makes the catalogue offer a longer copy of the last part, which
+Readest downloads by itself if automatic download is on. The longer copy is a new book in Readest: open
+it from the contents list at the chapter you were up to, and delete the shorter one.
+
+**Finding a chapter in Readest.** The pages are pictures, so the first page of each chapter also carries
+the chapter's name as text you cannot see. Search the book in Readest for "Chapter 21" and it goes to
+the start of chapter 21. The contents list does the same.
 
 ## Reading in a browser
 
-Press **Continue** on a series card in Family Hub, or open the series and pick
-a chapter.
+Open the series (its title or cover on the card) and pick a chapter.
 
 - The chapter opens with every page under the last, which is how manhwa are
   drawn and works for manga on a tablet.
 - Reaching the end, or pressing **Next**, marks the chapter read.
 - Each kept chapter has a **File** button that downloads it as a CBZ file,
-  for any comic reader app.
+  for any comic reader app, and **Mark read** / **Mark unread** to set your
+  place by hand.
+- When every chapter is read, the card says **All caught up**.
 
 ## What is not built yet
 

@@ -21,9 +21,9 @@ Weather (and where the globe starts turning) uses the household's home town, set
 **Admin → Hub → Connections → Visuals on Home**:
 
 ```
-HOME_PLACE=Your town
-HOME_LAT=-33.87
-HOME_LON=151.21
+HOME_PLACE=Greenwich
+HOME_LAT=51.48
+HOME_LON=-0.01
 ```
 
 Find the numbers on any map (south of the equator and west of Greenwich are negative). They are only

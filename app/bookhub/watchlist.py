@@ -28,18 +28,18 @@ OPEN_LIBRARY = "https://openlibrary.org/search.json"
 
 
 def _words(text):
-    return [w for w in db.slug(text or "").split("-") if w]
+    return [word for word in db.slug(text or "").split("-") if word]
 
 
 def matches(query, title, year=None):
     """Does a title fit what someone typed? Every word typed must be in the title ("dune part three" fits
     "Dune: Part Three"); a year typed must be the year."""
-    q, t = _words(query), set(_words(title))
-    years = [w for w in q if re.fullmatch(r"(19|20)\d\d", w)]
-    rest = [w for w in q if w not in years and w not in ("the", "a", "an")]
+    typed, in_title = _words(query), set(_words(title))
+    years = [word for word in typed if re.fullmatch(r"(19|20)\d\d", word)]
+    rest = [word for word in typed if word not in years and word not in ("the", "a", "an")]
     if years and str(year or "") not in years:
         return False
-    return bool(rest) and all(w in t for w in rest)
+    return bool(rest) and all(word in in_title for word in rest)
 
 
 def _day(text):
@@ -48,16 +48,17 @@ def _day(text):
 
 def _nice(day):
     try:
-        d = date.fromisoformat(day)
+        when = date.fromisoformat(day)
     except ValueError:
         return day
-    return "%d %s %d" % (d.day, d.strftime("%b"), d.year)
+    return "%d %s %d" % (when.day, when.strftime("%b"), when.year)
 
 
 def _film(item, today):
     """How a film stands: words for it, and whether it is still to come."""
     cinema, digital, disc = _day(item.get("inCinemas")), _day(item.get("digitalRelease")), _day(item.get("physicalRelease"))
-    out_at = min([d for d in (digital, disc) if d] or [""])
+    out_at = min([day for day in (digital, disc) if day] or [""])
+    # these are all "YYYY-MM-DD" strings, which happily compare just like dates do
     status = (item.get("status") or "").lower()
     if out_at and out_at <= today:
         return "Out now", False
@@ -73,9 +74,9 @@ def _film(item, today):
 
 
 def _show(item, today):
-    first, nxt, status = _day(item.get("firstAired")), _day(item.get("nextAiring")), (item.get("status") or "").lower()
-    if nxt:
-        return "Next episode %s" % _nice(nxt), nxt > today
+    first, next_ep, status = _day(item.get("firstAired")), _day(item.get("nextAiring")), (item.get("status") or "").lower()
+    if next_ep:
+        return "Next episode %s" % _nice(next_ep), next_ep > today
     if status == "upcoming" or (first and first > today) or not first:
         return ("Starts %s" % _nice(first)) if first and first > today else "Announced", True
     return ("Running" if status == "continuing" else "Ended"), False
@@ -84,29 +85,32 @@ def _show(item, today):
 def check_media(hub, kind, value):
     media = hub.media
     arr = media.arr(kind)
-    found = arr.get("movie/lookup" if kind == "film" else "series/lookup", term=value) or []
-    library = {(i.get("tmdbId") if kind == "film" else i.get("tvdbId")): i for i in arr.get("movie" if kind == "film" else "series") or []}
+    film = kind == "film"
+    external_id = lambda item: item.get("tmdbId") if film else item.get("tvdbId")  # noqa: E731
+    found = arr.get("movie/lookup" if film else "series/lookup", term=value) or []
+    library = {external_id(item): item for item in arr.get("movie" if film else "series") or []}
     today = date.today().isoformat()
-    out = []
+    results = []
     for item in found:
         if not matches(value, item.get("title"), item.get("year")):
             continue
-        ext = item.get("tmdbId") if kind == "film" else item.get("tvdbId")
+        ext = external_id(item)
         have = library.get(ext)
-        words, coming = (_film if kind == "film" else _show)(have or item, today)
-        out.append({"key": "%s:%s" % (kind, ext), "title": item.get("title") or "", "year": item.get("year"),
-                    "words": words, "coming": coming, "external_id": ext, "arr_id": have.get("id") if have else None,
-                    "in_library": bool(have), "poster": media.poster(item, kind)})
-    # What is still to come first (that is what a watchlist is for), then the newest.
-    out.sort(key=lambda f: (not f["coming"], -(f["year"] or 0)))
-    return out[:MAX_FOUND]
+        words, coming = (_film if film else _show)(have or item, today)
+        results.append({"key": "%s:%s" % (kind, ext), "title": item.get("title") or "", "year": item.get("year"),
+                        "words": words, "coming": coming, "external_id": ext, "arr_id": have.get("id") if have else None,
+                        "in_library": bool(have), "poster": media.poster(item, kind)})
+    # the stuff that's still coming goes first, that's the whole point of a watchlist. then newest
+    results.sort(key=lambda result: (not result["coming"], -(result["year"] or 0)))
+    return results[:MAX_FOUND]
 
 
 def check_author(hub, value):
     """New and coming books by an author that the library does not have."""
-    owned = {db.slug(b["title"]) for b in hub.library.books() if any(w in b["author"].lower() for w in [value.lower()])}
+    owned = {db.slug(book["title"]) for book in hub.library.books() if value.lower() in book["author"].lower()}
     this_year = date.today().year
-    out, seen = [], set()
+    books, seen = [], set()
+    by_them = lambda names: any(set(_words(value)) <= set(_words(name)) for name in names)  # noqa: E731
 
     def add(key, title, when, cover):
         mark = db.slug(title)
@@ -114,34 +118,35 @@ def check_author(hub, value):
             return
         seen.add(mark)
         today = date.today().isoformat()
+        # "when" might be just "2027" or a full date; chop today to the same length so they compare fairly
         coming = bool(when) and when > today[:len(when)]
-        out.append({"key": key, "title": title, "year": int(when[:4]) if when[:4].isdigit() else None,
+        books.append({"key": key, "title": title, "year": int(when[:4]) if when[:4].isdigit() else None,
                     "words": ("Coming %s" % _nice(when) if len(when) == 10 else "Coming %s" % when) if coming else
                              ("Published %s" % (when[:4] or "recently")),
                     "coming": coming, "cover": cover})
 
     docs = catalogues._get(OPEN_LIBRARY, {"author": value, "sort": "new", "limit": 30,
                                           "fields": "key,title,first_publish_year,author_name,cover_i"}).get("docs") or []
-    for d in docs:
-        names = d.get("author_name") or []
-        if not any(set(_words(value)) <= set(_words(n)) for n in names):
+    for doc in docs:
+        if not by_them(doc.get("author_name") or []):
             continue
-        year = d.get("first_publish_year") or 0
+        year = doc.get("first_publish_year") or 0
         if year >= this_year - 1:
-            add("ol:" + (d.get("key") or d.get("title", "")), d.get("title"), str(year),
-                "https://covers.openlibrary.org/b/id/%s-M.jpg" % d["cover_i"] if d.get("cover_i") else "")
+            add("ol:" + (doc.get("key") or doc.get("title", "")), doc.get("title"), str(year),
+                "https://covers.openlibrary.org/b/id/%s-M.jpg" % doc["cover_i"] if doc.get("cover_i") else "")
     key = hub.config.google_books_key
     if key:
         items = catalogues._get(catalogues.GOOGLE, {"q": 'inauthor:"%s"' % value, "orderBy": "newest", "maxResults": 20,
                                                     "key": key}).get("items") or []
-        for it in items:
-            info = it.get("volumeInfo") or {}
+        for volume in items:
+            info = volume.get("volumeInfo") or {}
             when = info.get("publishedDate") or ""
-            if not any(set(_words(value)) <= set(_words(n)) for n in info.get("authors") or []) or when[:4] < str(this_year - 1):
+            if not by_them(info.get("authors") or []) or when[:4] < str(this_year - 1):
                 continue
-            add("gb:" + it.get("id", ""), info.get("title"), when, ((info.get("imageLinks") or {}).get("thumbnail") or "").replace("http://", "https://"))
-    out.sort(key=lambda x: (not x["coming"], -(x["year"] or 0)))
-    return out[:MAX_FOUND]
+            thumbnail = ((info.get("imageLinks") or {}).get("thumbnail") or "").replace("http://", "https://")
+            add("gb:" + volume.get("id", ""), info.get("title"), when, thumbnail)
+    books.sort(key=lambda book: (not book["coming"], -(book["year"] or 0)))
+    return books[:MAX_FOUND]
 
 
 def check(hub, row):
@@ -157,8 +162,8 @@ def check(hub, row):
     except (MediaError, catalogues.LookupError_) as exc:
         found, error = json.loads(row["found"] or "[]"), str(exc)
     seen = json.loads(row["seen"] or "null")
-    if seen is None:  # the first look: what is there already is the starting point, not news
-        seen = [f["key"] for f in found]
+    if seen is None:  # first ever look: everything there now is the baseline, not "news!!"
+        seen = [item["key"] for item in found]
     if row["auto"] and row["kind"] in ("film", "show") and not error:
         found = _request_coming(hub, row, found)
     con.execute("UPDATE watch SET found=?, seen=?, checked=?, error=? WHERE id=?",
@@ -172,13 +177,14 @@ def _request_coming(hub, row, found):
     who = hub.con().execute("SELECT * FROM profiles WHERE id=?", (row["profile_id"],)).fetchone()
     if not who or not can_request_media(who, _allowed(hub)):
         return found
-    for f in found:
-        if f["coming"] and not f["in_library"] and f.get("external_id"):
-            try:
-                added = hub.media.request(row["kind"], f["external_id"], who)
-                f.update(in_library=True, arr_id=added.get("id"), requested=True)
-            except MediaError as exc:
-                f["request_error"] = "Could not get it automatically: %s" % exc
+    for item in found:
+        if not item["coming"] or item["in_library"] or not item.get("external_id"):
+            continue
+        try:
+            added = hub.media.request(row["kind"], item["external_id"], who)
+            item.update(in_library=True, arr_id=added.get("id"), requested=True)
+        except MediaError as exc:
+            item["request_error"] = "Could not get it automatically: %s" % exc
     return found
 
 
@@ -190,11 +196,11 @@ def _allowed(hub):
 def describe(row):
     found = json.loads(row["found"] or "[]")
     seen = set(json.loads(row["seen"] or "[]") or [])
-    for f in found:
-        f["new"] = f["key"] not in seen
+    for item in found:
+        item["new"] = item["key"] not in seen
     return {"id": row["id"], "kind": row["kind"], "value": row["value"], "auto": bool(row["auto"]),
             "checked": row["checked"] or "", "error": row["error"] or "", "found": found,
-            "new": sum(1 for f in found if f["new"])}
+            "new": sum(1 for item in found if item["new"])}
 
 
 def due(row):
@@ -210,7 +216,7 @@ def due(row):
 def run(hub, limit=3):
     """Check a few entries that are due; run every minute by the background jobs."""
     rows = hub.con().execute("SELECT * FROM watch WHERE kind IN ('author','film','show') ORDER BY checked").fetchall()
-    for row in [r for r in rows if due(r)][:limit]:
+    for row in [row for row in rows if due(row)][:limit]:
         if row["kind"] in ("film", "show") and not hub.media.configured(row["kind"]):
             continue
         check(hub, row)

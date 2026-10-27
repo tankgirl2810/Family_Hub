@@ -55,14 +55,14 @@ def _archive_tool():
     if tool:
         return tool
     tool = shutil.which("tar")
-    if tool:
-        try:
-            out = subprocess.run([tool, "--version"], capture_output=True, text=True, timeout=10).stdout
-            if "bsdtar" in out:
-                return tool
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return None
+    if not tool:
+        return None
+    # plain "tar" is sometimes secretly bsdtar (macOS, Windows). GNU tar can't do rar/7z, so ask it who it is
+    try:
+        version = subprocess.run([tool, "--version"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return tool if "bsdtar" in version else None
 
 
 def looks_whole(path):
@@ -71,12 +71,13 @@ def looks_whole(path):
     are still blank, and a zip-based book (EPUB, CBZ) has no header or no table of contents yet."""
     try:
         size = path.stat().st_size
-        with open(path, "rb") as f:
-            head = f.read(EDGE)
-            f.seek(max(0, size - EDGE))
-            tail = f.read(EDGE)
+        with open(path, "rb") as file:
+            head = file.read(EDGE)
+            file.seek(max(0, size - EDGE))
+            tail = file.read(EDGE)
     except OSError:
         return False
+    # torrent clients make the file full-size up front and fill it in as pieces land. all zeros at either end = not done
     if not head.strip(b"\0") or not tail.strip(b"\0"):
         return False
     if path.suffix.lower() in ZIP_FORMATS:
@@ -92,13 +93,12 @@ def unfinished_names(config):
     from .integrations import IntegrationError, qbit_session
     names = set()
     try:
-        s = qbit_session(config)
-        for t in s.get(config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []:
-            if (t.get("progress") or 0) >= 1:
+        session = qbit_session(config)
+        for torrent in session.get(config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []:
+            if (torrent.get("progress") or 0) >= 1:
                 continue
-            for f in s.get(config.qbit_url + "/api/v2/torrents/files", params={"hash": t.get("hash")}, timeout=8).json() or []:
-                if (f.get("progress") or 0) < 1:
-                    names.add(Path(f.get("name") or "").name)
+            files = session.get(config.qbit_url + "/api/v2/torrents/files", params={"hash": torrent.get("hash")}, timeout=8).json() or []
+            names |= {Path(file.get("name") or "").name for file in files if (file.get("progress") or 0) < 1}
     except (IntegrationError, requests.RequestException, ValueError):
         return set()  # the other checks still stand
     return names
@@ -106,16 +106,16 @@ def unfinished_names(config):
 
 def _has_epub_twin(path):
     return path.suffix.lower() in TWIN_EXTENSIONS and any(
-        p.is_file() for p in (path.with_suffix(".epub"), path.with_suffix(".EPUB")))
+        twin.is_file() for twin in (path.with_suffix(".epub"), path.with_suffix(".EPUB")))
 
 
 def _free_name(folder, name):
     """A name in ``folder`` that is not taken: "Book.epub", then "Book (2).epub"."""
     target = Path(folder) / name
-    n = 2
+    copy_no = 2
     while target.exists():
-        target = Path(folder) / ("%s (%d)%s" % (Path(name).stem, n, Path(name).suffix))
-        n += 1
+        target = Path(folder) / ("%s (%d)%s" % (Path(name).stem, copy_no, Path(name).suffix))
+        copy_no += 1
     return target
 
 
@@ -157,17 +157,18 @@ class Intake:
         ingest = Path(self.config.ingest_dir)
         ingest.mkdir(parents=True, exist_ok=True)
         target = _free_name(ingest, name or path.name)
-        tmp = target.with_name(target.name + ".part")
+        # land it as "x.part" then rename. the library manager ignores .part, so it never grabs half a book
+        partial = target.with_name(target.name + ".part")
         size = path.stat().st_size
         try:
             if move:
-                shutil.move(str(path), str(tmp))
+                shutil.move(str(path), str(partial))
             else:
-                shutil.copyfile(path, tmp)
-            tmp.replace(target)
+                shutil.copyfile(path, partial)
+            partial.replace(target)
         except OSError:
             if not move:
-                tmp.unlink(missing_ok=True)
+                partial.unlink(missing_ok=True)
             return None
         self._log(target.name, origin, size, "delivered")
         return target.name
@@ -188,25 +189,25 @@ class Intake:
 
     def _archive_names(self, path):
         if path.suffix.lower() == ".zip":
-            with zipfile.ZipFile(path) as z:
-                return [i.filename for i in z.infolist() if not i.is_dir()]
+            with zipfile.ZipFile(path) as archive:
+                return [info.filename for info in archive.infolist() if not info.is_dir()]
         tool = _archive_tool()
         if not tool:
             raise OSError("no tool to read %s files" % path.suffix)
-        out = subprocess.run([tool, "-tf", str(path)], capture_output=True, text=True, timeout=120, check=True).stdout
-        return [n for n in out.splitlines() if n and not n.endswith("/")]
+        listing = subprocess.run([tool, "-tf", str(path)], capture_output=True, text=True, timeout=120, check=True).stdout
+        return [name for name in listing.splitlines() if name and not name.endswith("/")]
 
     def _extract_books(self, path, into, extensions):
         """Unpack only the book files, flat, into ``into``."""
         found = []
         if path.suffix.lower() == ".zip":
-            with zipfile.ZipFile(path) as z:
-                for info in z.infolist():
-                    name = Path(info.filename).name
+            with zipfile.ZipFile(path) as archive:
+                for info in archive.infolist():
+                    name = Path(info.filename).name  # just the name: flattening also defuses "../../" tricks
                     if info.is_dir() or Path(name).suffix.lower() not in extensions:
                         continue
                     target = _free_name(into, name)
-                    with z.open(info) as src, open(target, "wb") as dst:
+                    with archive.open(info) as src, open(target, "wb") as dst:
                         shutil.copyfileobj(src, dst)
                     found.append(target)
             return found
@@ -214,7 +215,7 @@ class Intake:
         raw.mkdir()
         subprocess.run([_archive_tool(), "-xf", str(path), "-C", str(raw)], capture_output=True, timeout=1800, check=True)
         for item in sorted(raw.rglob("*")):
-            # A link inside the archive could point at any file on the server; only real files are books.
+            # a "book" inside the archive could be a sneaky link to some file elsewhere on the server. real files only
             if (item.is_file() and not item.is_symlink() and item.suffix.lower() in extensions
                     and raw.resolve() in item.resolve().parents):
                 target = _free_name(into, item.name)
@@ -228,10 +229,10 @@ class Intake:
             names = self._archive_names(path)
         except (OSError, zipfile.BadZipFile, subprocess.SubprocessError):
             return [], CANNOT_OPEN
-        books = [n for n in names if Path(n).suffix.lower() in extensions]
-        pages = [n for n in names if Path(n).suffix.lower() in IMAGE_EXTENSIONS]
+        books = [name for name in names if Path(name).suffix.lower() in extensions]
+        pages = [name for name in names if Path(name).suffix.lower() in IMAGE_EXTENSIONS]
         if not books:
-            # A comic is nearly all page images. A saved web page has images too, but is not one.
+            # a comic is basically ALL pictures (80%+). a saved web page has pictures too, but it's not a comic
             if len(pages) < MIN_COMIC_PAGES or len(pages) < 0.8 * len(names):
                 return [], EMPTY_ARCHIVE
             # A comic that was never renamed: the file is already what the library wants.
@@ -267,20 +268,21 @@ class Intake:
             except OSError:
                 return False
 
-        # Folders of loose page images first, so the pages are not mistaken for covers.
-        for folder in sorted((p for p in inbox.rglob("*") if p.is_dir()), reverse=True):
-            files = [f for f in folder.iterdir() if f.is_file()]
-            pages = sorted(f for f in files if f.suffix.lower() in IMAGE_EXTENSIONS)
-            if len(pages) < MIN_COMIC_PAGES or any(f.suffix.lower() not in SIDECAR_EXTENSIONS for f in files):
+        # folders of loose pictures go first, otherwise the pages get mistaken for covers and binned as sidecars.
+        # reverse order = deepest folders first, so a folder's subfolders are dealt with before it is
+        for folder in sorted((found for found in inbox.rglob("*") if found.is_dir()), reverse=True):
+            files = [file for file in folder.iterdir() if file.is_file()]
+            pages = sorted(file for file in files if file.suffix.lower() in IMAGE_EXTENSIONS)
+            if len(pages) < MIN_COMIC_PAGES or any(file.suffix.lower() not in SIDECAR_EXTENSIONS for file in files):
                 continue
-            if any(d.is_dir() for d in folder.iterdir()) or not all(settled(f) for f in files):
+            if any(inner.is_dir() for inner in folder.iterdir()) or not all(settled(file) for file in files):
                 continue
             rel = folder.relative_to(inbox)
             comic = Path(self.config.data_dir) / (folder.name + ".cbz.building")
             try:
-                with zipfile.ZipFile(comic, "w", zipfile.ZIP_STORED) as z:
+                with zipfile.ZipFile(comic, "w", zipfile.ZIP_STORED) as cbz:
                     for page in pages:
-                        z.write(page, page.name)
+                        cbz.write(page, page.name)
             except OSError:
                 comic.unlink(missing_ok=True)
                 continue
@@ -289,11 +291,12 @@ class Intake:
                 comic.unlink(missing_ok=True)
                 continue
             result["delivered"].append(name)
-            for f in files:
-                self._set_aside(f, rel / f.name, "Made into a comic", folder=PROCESSED)
+            for file in files:
+                self._set_aside(file, rel / file.name, "Made into a comic", folder=PROCESSED)
 
-        files = sorted(p for p in inbox.rglob("*") if p.is_file())
-        twins = {p for p in files if _has_epub_twin(p)}  # worked out first: the EPUBs are about to be moved
+        files = sorted(found for found in inbox.rglob("*") if found.is_file())
+        # work out the twins BEFORE moving anything, or the EPUB's gone and the MOBI looks like an only child
+        twins = {file for file in files if _has_epub_twin(file)}
         for path in files:
             if path.name.lower().endswith(UNFINISHED_SUFFIXES) or not settled(path):
                 continue
@@ -322,9 +325,9 @@ class Intake:
                 self._set_aside(path, rel, NOT_A_BOOK)
                 result["attention"] += 1
 
-        for folder in sorted((p for p in inbox.rglob("*") if p.is_dir()), reverse=True):
+        for folder in sorted((found for found in inbox.rglob("*") if found.is_dir()), reverse=True):
             try:
-                folder.rmdir()  # only succeeds when empty
+                folder.rmdir()  # rmdir refuses non-empty folders, which is exactly the safety net we want
             except OSError:
                 pass
         self.hub.con().commit()
@@ -354,7 +357,7 @@ class Intake:
                 continue
             if con.execute("SELECT 1 FROM imported_files WHERE path=?", (str(path),)).fetchone():
                 continue
-            # Not yet: a file still downloading (a stalled torrent stops changing it, so its age proves nothing).
+            # a stalled torrent stops touching its file, so "it's old" proves nothing. ask qBittorrent instead
             if busy is None:
                 busy = unfinished_names(self.config)
             if path.name in busy or not looks_whole(path):
@@ -376,7 +379,7 @@ class Intake:
                     continue
                 delivered = [name]
             con.execute("INSERT OR REPLACE INTO imported_files(path, at) VALUES(?,?)", (str(path), db.now()))
-            # Kept straight away: a run cut short (Family Hub stopped mid-batch) must never hand a file over twice.
+            # commit after EVERY file: if we get killed mid-batch, nothing gets handed over twice
             con.commit()
             copied += delivered
         return copied
@@ -397,13 +400,15 @@ class Intake:
             self._first_seen = {}
             return 0
         now = time.time()
-        here = {p for p in Path(folder).rglob("*")
-                if p.is_file() and not p.name.lower().endswith(UNFINISHED_SUFFIXES)}
-        self._first_seen = {p: self._first_seen.get(p, now) for p in here}
-        stuck = sorted((p for p, since in self._first_seen.items() if now - since >= wait),
-                       key=lambda p: self._first_seen[p])
+        here = {file for file in Path(folder).rglob("*")
+                if file.is_file() and not file.name.lower().endswith(UNFINISHED_SUFFIXES)}
+        self._first_seen = {file: self._first_seen.get(file, now) for file in here}
+        stuck = sorted((file for file, since in self._first_seen.items() if now - since >= wait),
+                       key=lambda file: self._first_seen[file])
         for path in stuck[:batch]:
             try:
+                # open-for-append-then-close plus a fresh date looks like a brand new arrival to the watcher.
+                # a bit of a poke in the ribs, totally harmless to the file
                 with open(path, "ab"):
                     pass
                 path.touch()
@@ -420,7 +425,7 @@ class Intake:
         if not folder or not Path(folder).is_dir():
             return {"items": [], "total": 0, "processed": 0}
         folder = Path(folder)
-        reasons = {r["name"]: r for r in self.hub.con().execute(
+        reasons = {row["name"]: row for row in self.hub.con().execute(
             "SELECT name, reason, at FROM intake_log WHERE action='attention' ORDER BY id")}
         items, processed = [], 0
         for path in folder.rglob("*"):
@@ -433,7 +438,7 @@ class Intake:
             row = reasons.get(rel)
             items.append({"path": rel, "size": path.stat().st_size,
                           "reason": row["reason"] if row else "Set aside", "at": row["at"] if row else ""})
-        items.sort(key=lambda i: (i["at"], i["path"]), reverse=True)
+        items.sort(key=lambda item: (item["at"], item["path"]), reverse=True)
         return {"items": items[:limit], "total": len(items), "processed": processed}
 
     def retry_attention(self):
@@ -443,7 +448,7 @@ class Intake:
             return 0
         folder = Path(folder)
         count = 0
-        for path in sorted(p for p in folder.rglob("*") if p.is_file()):
+        for path in sorted(file for file in folder.rglob("*") if file.is_file()):
             rel = path.relative_to(folder)
             if rel.parts[0] == PROCESSED:
                 continue
@@ -461,4 +466,4 @@ class Intake:
         """How many files sit in a folder, or None when it is not set up."""
         if not folder or not Path(folder).is_dir():
             return None
-        return sum(1 for p in Path(folder).rglob("*") if p.is_file())
+        return sum(1 for file in Path(folder).rglob("*") if file.is_file())

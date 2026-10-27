@@ -5,6 +5,7 @@ import io
 import ipaddress
 import json
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -48,7 +49,7 @@ def me():
     """The signed-in profile row, the string 'guest', or None."""
     pid = session.get("pid")
     if pid == "guest":
-        # Checked on every request, not only at sign-in: a phone signed in as a guest at home keeps its cookie when it leaves.
+        # re-checked on EVERY request: a phone that signed in as a guest at home still has the cookie at the pub
         config = hub().config
         return "guest" if config.guest_enabled and (not config.guest_lan_only or on_home_network()) else None
     if pid:
@@ -94,8 +95,8 @@ def admin_only(view):
 
 def client_ip():
     if hub().config.trust_proxy:
-        # The proxy adds the address it saw to the end. Anything before that came from the browser, which can
-        # claim to be on the home network, so only the last entry is believed.
+        # the proxy tacks the address it really saw onto the END. everything before that came from the browser,
+        # which can lie and claim to be "on the home network". so: trust only the last one
         forwarded = request.headers.get("X-Forwarded-For", "")
         if forwarded:
             return forwarded.split(",")[-1].strip()
@@ -116,12 +117,13 @@ _attempts_lock = threading.Lock()
 def check_passcode(profile, passcode):
     """True if the passcode is right. Locks a profile briefly after repeated misses."""
     attempts = hub().attempts
-    # Each try is counted before the (slow) check, so tries sent side by side cannot all slip under the limit.
+    # count the try BEFORE the slow hash check. otherwise someone firing 50 guesses at once gets them all in
+    # before the counter catches up
     with _attempts_lock:
-        entry = attempts.get(profile["id"], [0, 0])
-        if entry[0] >= MAX_TRIES and time.time() - entry[1] < LOCK_SECONDS:
+        misses, last_miss = attempts.get(profile["id"], [0, 0])
+        if misses >= MAX_TRIES and time.time() - last_miss < LOCK_SECONDS:
             return None
-        count = entry[0] + 1 if time.time() - entry[1] < LOCK_SECONDS else 1
+        count = misses + 1 if time.time() - last_miss < LOCK_SECONDS else 1
         attempts[profile["id"]] = [count, time.time()]
     if profile["passcode_hash"] and check_password_hash(profile["passcode_hash"], str(passcode or "")):
         with _attempts_lock:
@@ -160,10 +162,10 @@ def series_only(view):
 MEDIA_KEY = "media:allowed"
 
 
-def media_allowed_ids(h):
+def media_allowed_ids(family_hub):
     """Members an admin has allowed to request films and TV. Admins always can; guests never."""
     try:
-        return {int(i) for i in json.loads(db.kv_get(h.con(), MEDIA_KEY) or "[]")}
+        return {int(profile_id) for profile_id in json.loads(db.kv_get(family_hub.con(), MEDIA_KEY) or "[]")}
     except ValueError:
         return set()
 
@@ -176,16 +178,17 @@ def can_request_media(who, allowed=None):
     return who["id"] in (allowed if allowed is not None else media_allowed_ids(hub()))
 
 
-def public_profile(p, full=False, blocked=None):
+def public_profile(profile, full=False, blocked=None, allowed=None):
+    """What anyone may know about a profile: never the passcode or keys themselves, only whether they're set."""
     data = {
-        "id": p["id"], "name": p["name"], "role": p["role"], "color": p["color"],
-        "has_passcode": bool(p["passcode_hash"]), "can_request": bool(p["can_request"]),
-        "can_tag": bool(p["can_tag"]), "tracker_linked": bool(p["hardcover_token"]),
-        "can_series": can_series(p, blocked),
-        "can_request_media": can_request_media(p),
+        "id": profile["id"], "name": profile["name"], "role": profile["role"], "color": profile["color"],
+        "has_passcode": bool(profile["passcode_hash"]), "can_request": bool(profile["can_request"]),
+        "can_tag": bool(profile["can_tag"]), "tracker_linked": bool(profile["hardcover_token"]),
+        "can_series": can_series(profile, blocked),
+        "can_request_media": can_request_media(profile, allowed),
     }
     if full:
-        data["sync_ready"] = bool(p["sync_key"])
+        data["sync_ready"] = bool(profile["sync_key"])
     return data
 
 
@@ -193,36 +196,38 @@ def public_profile(p, full=False, blocked=None):
 
 @bp.get("/state")
 def state():
-    h = hub()
+    family_hub = hub()
     who = me()
-    profiles = h.profiles()
-    blocked = series.blocked_ids(h)
+    profiles = family_hub.profiles()
+    blocked, allowed = series.blocked_ids(family_hub), media_allowed_ids(family_hub)
     return jsonify({
         "setup_needed": not profiles,
         "me": None if who is None else ({"guest": True, "name": "Guest"} if who == "guest" else
-                                        dict(public_profile(who, True, blocked), via_admin=bool(session.get("via_admin")))),
-        "profiles": [public_profile(p, blocked=blocked) for p in profiles],
-        "series": h.series.configured and can_series(who, blocked),
-        "guest_enabled": h.config.guest_enabled and (not h.config.guest_lan_only or on_home_network()),
-        "discover_configured": h.config.discover_configured,
-        "library_available": h.library.available,
-        "cwa_url": h.config.cwa_url,
+                                        dict(public_profile(who, True, blocked, allowed), via_admin=bool(session.get("via_admin")))),
+        "profiles": [public_profile(profile, blocked=blocked, allowed=allowed) for profile in profiles],
+        "series": family_hub.series.configured and can_series(who, blocked),
+        "guest_enabled": family_hub.config.guest_enabled and (not family_hub.config.guest_lan_only or on_home_network()),
+        "discover_configured": family_hub.config.discover_configured,
+        "library_available": family_hub.library.available,
+        "cwa_url": family_hub.config.cwa_url,
         "can_convert": bool(shutil.which("ebook-convert")),
         "kinds": kinds.KINDS,
         "device_kinds": devices.KINDS,
-        "look": looks.current(h.con()),
+        "look": looks.current(family_hub.con()),
         # The visuals' version (so a new one from GitHub is fetched) and, for someone signed in, the home town.
-        "visuals": {"version": visuals.version(h),
-                    "place": _home_place(h) if who else None},
-        "media": {"films": h.media.configured("film"), "shows": h.media.configured("show"),
-                  "jellyfin": bool(h.config.jellyfin_url and h.config.jellyfin_api_key)},
+        "visuals": {"version": visuals.version(family_hub),
+                    "place": _home_place(family_hub) if who else None},
+        "media": {"films": family_hub.media.configured("film"), "shows": family_hub.media.configured("show"),
+                  "jellyfin": bool(family_hub.config.jellyfin_url and family_hub.config.jellyfin_api_key)},
     })
 
 
-def _home_place(h):
-    c = h.config
+def _home_place(family_hub):
+    config = family_hub.config
+    if not (config.home_lat and config.home_lon):
+        return None
     try:
-        return {"name": c.home_place, "lat": float(c.home_lat), "lon": float(c.home_lon)} if c.home_lat and c.home_lon else None
+        return {"name": config.home_place, "lat": float(config.home_lat), "lon": float(config.home_lon)}
     except ValueError:
         return None
 
@@ -242,14 +247,14 @@ def admin_visuals_check(who):
 
 @bp.post("/setup")
 def setup():
-    h = hub()
-    if h.profiles():
+    family_hub = hub()
+    if family_hub.profiles():
         return fail("Setup has already been done.", 409)
     data = request.get_json(silent=True) or {}
     name, passcode = db.clean_tag(data.get("name")), str(data.get("passcode") or "")
     if not name or len(passcode) < 4:
         return fail("Enter a name and a passcode of at least 4 characters.")
-    con = h.con()
+    con = family_hub.con()
     cur = con.execute(
         "INSERT INTO profiles(name, role, passcode_hash, color, created) VALUES(?, 'admin', ?, ?, ?)",
         (name, generate_password_hash(passcode), COLORS[0], db.now()),
@@ -263,23 +268,23 @@ def setup():
 
 @bp.post("/login")
 def login():
-    h = hub()
+    family_hub = hub()
     data = request.get_json(silent=True) or {}
     if data.get("guest"):
-        if not h.config.guest_enabled:
+        if not family_hub.config.guest_enabled:
             return fail("Guest access is turned off.", 403)
-        if h.config.guest_lan_only and not on_home_network():
+        if family_hub.config.guest_lan_only and not on_home_network():
             return fail("Guest access only works on the home network.", 403)
         session.clear()
         session["pid"] = "guest"
         return jsonify({"ok": True})
-    target = h.profile(data.get("profile_id") or 0)
+    target = family_hub.profile(data.get("profile_id") or 0)
     if not target:
         return fail("That profile does not exist.", 404)
 
     via_admin = False
     if data.get("admin_id"):
-        admin = h.profile(data["admin_id"])
+        admin = family_hub.profile(data["admin_id"])
         if not admin or admin["role"] != "admin":
             return fail("That is not an admin profile.", 403)
         ok = check_passcode(admin, data.get("admin_passcode"))
@@ -332,8 +337,8 @@ def create_profile(who):
 @bp.patch("/profiles/<int:profile_id>")
 @profile_only
 def update_profile(who, profile_id):
-    h = hub()
-    target = h.profile(profile_id)
+    family_hub = hub()
+    target = family_hub.profile(profile_id)
     if not target:
         return fail("That profile does not exist.", 404)
     admin = is_admin(who)
@@ -359,7 +364,7 @@ def update_profile(who, profile_id):
             sets.append("name=?")
             args.append(db.clean_tag(data["name"]))
         if "role" in data and data["role"] in ("admin", "member"):
-            admins = [p for p in h.profiles() if p["role"] == "admin"]
+            admins = [profile for profile in family_hub.profiles() if profile["role"] == "admin"]
             if data["role"] == "member" and target["role"] == "admin" and len(admins) <= 1:
                 return fail("There has to be at least one admin.")
             sets.append("role=?")
@@ -369,16 +374,19 @@ def update_profile(who, profile_id):
                 sets.append(flag + "=?")
                 args.append(1 if data[flag] else 0)
         if "can_series" in data:
-            series.allow(h, profile_id, bool(data["can_series"]))
+            series.allow(family_hub, profile_id, bool(data["can_series"]))
         if "can_request_media" in data:
-            allowed = media_allowed_ids(h)
-            (allowed.add if data["can_request_media"] else allowed.discard)(profile_id)
-            db.kv_set(h.con(), MEDIA_KEY, json.dumps(sorted(allowed)))
+            allowed = media_allowed_ids(family_hub)
+            if data["can_request_media"]:
+                allowed.add(profile_id)
+            else:
+                allowed.discard(profile_id)
+            db.kv_set(family_hub.con(), MEDIA_KEY, json.dumps(sorted(allowed)))
     if sets:
-        con = h.con()
+        con = family_hub.con()
         try:
             con.execute("UPDATE profiles SET %s WHERE id=?" % ", ".join(sets), (*args, profile_id))
-        except Exception:
+        except sqlite3.IntegrityError:
             return fail("There is already a profile with that name.", 409)
         con.commit()
     return jsonify({"ok": True})
@@ -387,20 +395,20 @@ def update_profile(who, profile_id):
 @bp.delete("/profiles/<int:profile_id>")
 @admin_only
 def delete_profile(who, profile_id):
-    h = hub()
+    family_hub = hub()
     if profile_id == who["id"]:
         return fail("You cannot delete the profile you are using.")
-    if not h.profile(profile_id):
+    if not family_hub.profile(profile_id):
         return fail("That profile does not exist.", 404)
-    h.backup_now()  # keep a copy of their ratings and tags before removing them
-    con = h.con()
+    family_hub.backup_now()  # keep a copy of their ratings and tags before removing them
+    con = family_hub.con()
     for table in ("personal_tags", "ratings", "reading", "watch"):
         con.execute("DELETE FROM %s WHERE profile_id=?" % table, (profile_id,))
-    h.devices.forget_profile(profile_id)
-    goodreads.forget_profile(h, profile_id)
-    recommend.forget_profile(h, profile_id)
-    series.forget_profile(h, profile_id)
-    allowed = media_allowed_ids(h)
+    family_hub.devices.forget_profile(profile_id)
+    goodreads.forget_profile(family_hub, profile_id)
+    recommend.forget_profile(family_hub, profile_id)
+    series.forget_profile(family_hub, profile_id)
+    allowed = media_allowed_ids(family_hub)
     if profile_id in allowed:  # nothing left behind in the films and TV permission list
         db.kv_set(con, MEDIA_KEY, json.dumps(sorted(allowed - {profile_id})))
     con.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
@@ -423,12 +431,12 @@ def list_devices(who, profile_id):
     target = _for_profile(who, profile_id)
     if not target:
         return fail("You can only see your own devices.", 403)
-    h = hub()
+    family_hub = hub()
     return jsonify({
         "profile": {"id": target["id"], "name": target["name"], "sync_ready": bool(target["sync_key"])},
-        "devices": [h.devices.describe(d) for d in h.devices.rows(target["id"])],
-        "mail_ready": h.config.mail_configured, "sender": h.config.mail_sender if h.config.mail_configured else "",
-        "limit_mb": h.devices.limit_mb(),
+        "devices": [family_hub.devices.describe(device) for device in family_hub.devices.rows(target["id"])],
+        "mail_ready": family_hub.config.mail_configured, "sender": family_hub.config.mail_sender if family_hub.config.mail_configured else "",
+        "limit_mb": family_hub.devices.limit_mb(),
     })
 
 
@@ -479,9 +487,9 @@ def remove_device(who, device_id):
 def _goodreads_view(who, target):
     """A profile's Goodreads link. Only its owner is shown the link itself; an
     admin helping someone is told whether one is saved and how the last sync went."""
-    h = hub()
-    data = goodreads.describe(h, target["id"])
-    data["busy"] = target["id"] in h.goodreads_busy
+    family_hub = hub()
+    data = goodreads.describe(family_hub, target["id"])
+    data["busy"] = target["id"] in family_hub.goodreads_busy
     data["mine"] = target["id"] == who["id"]
     if not data["mine"]:
         data["url"] = data["user_id"] = ""
@@ -489,10 +497,10 @@ def _goodreads_view(who, target):
 
 
 def _goodreads_sync_later(profile_id, full):
-    h = hub()
-    if profile_id in h.goodreads_busy:
+    family_hub = hub()
+    if profile_id in family_hub.goodreads_busy:
         return False
-    h.goodreads_busy.add(profile_id)
+    family_hub.goodreads_busy.add(profile_id)
     app = current_app._get_current_object()
 
     def work():
@@ -527,16 +535,16 @@ def goodreads_set(who, profile_id):
     if not target:
         return fail("You can only change your own Goodreads link.", 403)
     data = request.get_json(silent=True) or {}
-    h = hub()
+    family_hub = hub()
     if "link" in data:
         try:
-            linked = goodreads.set_link(h, target["id"], data.get("link"))
+            linked = goodreads.set_link(family_hub, target["id"], data.get("link"))
         except goodreads.GoodreadsError as exc:
             return fail(str(exc))
         if linked:
             _goodreads_sync_later(target["id"], full=True)
     elif data.get("sync"):
-        if not goodreads.link(h, target["id"]):
+        if not goodreads.link(family_hub, target["id"]):
             return fail("Save a Goodreads link first.")
         _goodreads_sync_later(target["id"], full=True)
     return jsonify(_goodreads_view(who, target))
@@ -564,11 +572,12 @@ def goodreads_import(who, profile_id):
 @admin_only
 def admin_elsewhere(who):
     """Books on people's Goodreads shelves that the library does not hold, and whose they are."""
-    h = hub()
-    names = h.profile_names()
-    books = [{"key": key, "title": e["title"], "author": e["author"], "goodreads_id": e["gr_id"],
-              "people": [names.get(p, "?") for p in e["profiles"]]} for key, e in goodreads.elsewhere(h).items()]
-    books.sort(key=lambda b: (-len(b["people"]), b["title"].lower()))
+    family_hub = hub()
+    names = family_hub.profile_names()
+    books = [{"key": key, "title": entry["title"], "author": entry["author"], "goodreads_id": entry["gr_id"],
+              "people": [names.get(profile_id, "?") for profile_id in entry["profiles"]]}
+             for key, entry in goodreads.elsewhere(family_hub).items()]
+    books.sort(key=lambda book: (-len(book["people"]), book["title"].lower()))
     return jsonify({"books": books})
 
 
@@ -588,28 +597,102 @@ def refresh_mine(who):
     """The Refresh button on Personal and My books: catch up now instead of at the next background round.
     Reads the library again (a book that has just arrived), fetches Hardcover if this person linked it, and
     starts putting together the comic series on their list, so their reading app's next check finds them."""
-    h = hub()
-    h.library.refresh()
+    family_hub = hub()
+    family_hub.library.refresh()
     out = {"hardcover": None, "hardcover_error": "", "series_ready": 0, "series_making": 0}
     if who["hardcover_token"]:
         try:
-            out["hardcover"] = integrations.hardcover_sync(h, who)
+            out["hardcover"] = integrations.hardcover_sync(family_hub, who)
         except integrations.IntegrationError as exc:
             out["hardcover_error"] = str(exc)
-    for item in _my_series(h, who):
+    for item in _my_series(family_hub, who):
         for part in item["parts"]:
             out["series_ready" if part["state"] == "ready" else "series_making"] += 1
     return jsonify(out)
 
 
-def _my_series(h, who):
+def _my_series(family_hub, who):
     """The comic series on this person's list and where each part stands for their reading app (starting any
     not started). [{name, parts: [{title, state, percent, error}]}]"""
     from . import opds
-    shelf = h.devices.shelf(who["id"])
-    books = [b for b in (h.library.by_key(k) for k in shelf) if b]
-    return [{"name": item["series"], "parts": opds.series_status(h, item["volumes"])}
-            for item in opds._gather(books, h.library.books()) if "volumes" in item]
+    shelf = family_hub.devices.shelf(who["id"])
+    books = [book for book in (family_hub.library.by_key(key) for key in shelf) if book]
+    return [{"name": item["series"], "parts": opds.series_status(family_hub, item["volumes"])}
+            for item in opds._gather(books, family_hub.library.books()) if "volumes" in item]
+
+
+def reading_app(family_hub, who):
+    """Everything on this person's list as their reading app gets it, and where each stands:
+    "on_app" (the app downloaded this version), "newer" (it has an older, shorter copy), "ready" (not downloaded
+    yet), "making" (being put together, with percent), "waiting" or "failed"."""
+    from . import chapterfile, opds
+    shelf = family_hub.devices.shelf(who["id"])
+    books = [book for book in (family_hub.library.by_key(key) for key in shelf) if book]
+    listed = []
+    con = family_hub.con()
+    # if the app's sent us a reading position for it, it's obviously ON the app, whatever our download notes say
+    synced = {row["book_key"] for row in family_hub.reading_rows(who["id"]) if row["source"] == "device"}
+
+    def placed(path):
+        row = con.execute("SELECT hash FROM joined_books WHERE path=?", (path,)).fetchone()
+        return bool(row and db.kv_get(con, "joined:%d:%s" % (who["id"], row["hash"])))
+
+    def seen(item, version, ready_state, has=False):
+        if ready_state != "ready":
+            return ready_state
+        got = opds.fetched_version(family_hub, who["id"], item)
+        # same version as offered = on the app. an older one = "a newer copy's waiting". never fetched = ready
+        return "on_app" if got == str(version) or has else "newer" if got else "ready"
+
+    for item in opds._gather(books, family_hub.library.books()):
+        if "volumes" in item:
+            for part in opds.series_status(family_hub, item["volumes"]):
+                listed.append({"title": part["title"], "kind": "series", "item": part["item"], "version": part["version"],
+                               "state": seen(part["item"], part["version"], part["state"], placed(part["path"])),
+                               "percent": part["percent"], "error": part["error"], "link": "#/shelf/" + item["series"]})
+        else:
+            listed.append({"title": item["title"], "kind": "book", "item": "book:%d" % item["id"], "version": "file",
+                           "state": seen("book:%d" % item["id"], "file", "ready", item["key"] in synced),
+                           "percent": 0, "error": "", "link": "#/book/%d" % item["id"]})
+    if family_hub.series.configured and can_series(who):
+        for series_id in series.my_books(family_hub, who["id"]):
+            try:
+                info = family_hub.series.detail(series_id)
+            except series.SeriesError:
+                continue
+            parts = opds._chapter_parts(info)
+            for part_no, kept in enumerate(parts, 1):
+                if not kept:
+                    continue
+                title = info["title"] if len(parts) == 1 else "%s · Part %d" % (info["title"], part_no)
+                item_name = "chapters:%d:%d" % (series_id, part_no)
+                listed.append({"title": title, "kind": "chapters", "item": item_name, "version": chapterfile.version(kept),
+                               "state": seen(item_name, chapterfile.version(kept), "ready"),
+                               "percent": 0, "error": "", "link": "#/series/%d" % series_id})
+    return listed
+
+
+@bp.get("/me/reading-app")
+@profile_only
+def my_reading_app(who):
+    """For My books, and the note shown on every page while something is being put together."""
+    items = reading_app(hub(), who)
+    return jsonify({"items": items, "on_app": sum(1 for item in items if item["state"] == "on_app"), "total": len(items),
+                    "making": [item for item in items if item["state"] in ("making", "waiting")]})
+
+
+@bp.post("/me/reading-app/have")
+@profile_only
+def my_reading_app_have(who):
+    """"It's on my app": for books the reading app downloaded before Family Hub noted downloads."""
+    from . import opds
+    data = request.get_json(silent=True) or {}
+    wanted = {item["item"]: item for item in reading_app(hub(), who)}
+    row = wanted.get(str(data.get("item") or ""))
+    if not row:
+        return fail("That is not on your list.", 404)
+    opds.fetched(hub(), who, row["item"], row["version"])
+    return jsonify({"ok": True})
 
 
 @bp.get("/me/series")
@@ -629,7 +712,7 @@ def add_outside(who):
         return fail("Enter the book's title.")
     author = db.clean_tag(data.get("author"))
     key = db.make_key(title, author)
-    match = next((b for b in hub().library.books() if db.make_key(b["title"], b["author"]) == key), None)
+    match = next((book for book in hub().library.books() if db.make_key(book["title"], book["author"]) == key), None)
     if match:
         key = match["key"]
     pages = data.get("pages")
@@ -646,40 +729,41 @@ def add_outside(who):
 @profile_only
 def my_shelf(who):
     """Where each book on this person's list stands on each of their devices."""
-    h = hub()
-    shelf = h.devices.shelf(who["id"])
+    family_hub = hub()
+    shelf = family_hub.devices.shelf(who["id"])
     books = {}
-    for book in h.library.books():
+    for book in family_hub.library.books():
         if book["key"] in shelf:
-            books[book["id"]] = {"added": shelf[book["key"]], "devices": h.devices.book_view(who["id"], book)["devices"]}
-    return jsonify({"devices": [{"id": d["id"], "name": d["name"], "kind": d["kind"]} for d in h.devices.rows(who["id"])],
+            books[book["id"]] = {"added": shelf[book["key"]], "devices": family_hub.devices.book_view(who["id"], book)["devices"]}
+    return jsonify({"devices": [{"id": device["id"], "name": device["name"], "kind": device["kind"]}
+                                for device in family_hub.devices.rows(who["id"])],
                     "books": books})
 
 
 # ----------------------------------------------------------------- books
 
-def _user_maps(h, who):
-    con = h.con()
+def _user_maps(family_hub, who):
+    con = family_hub.con()
     if who == "guest":
         return {}, {}
-    reading = {r["book_key"]: r for r in h.reading_rows(who["id"])}
-    ratings = {r["book_key"]: r["rating"] for r in
+    reading = {row["book_key"]: row for row in family_hub.reading_rows(who["id"])}
+    ratings = {row["book_key"]: row["rating"] for row in
                con.execute("SELECT book_key, rating FROM ratings WHERE profile_id=?", (who["id"],))}
     return reading, ratings
 
 
 def _summary(book, tags, reading, ratings, pages, kind_of, shelf=()):
-    r = reading.get(book["key"])
+    progress = reading.get(book["key"])
     return {
         "id": book["id"], "key": book["key"], "title": book.get("shown_title") or book["title"],
         "author": book.get("shown_author", book["author"]), "part": book.get("part", ""), "subtitle": book.get("subtitle", ""),
         "kind": kind_of.get(book["key"], kinds.UNSORTED),
         "series": book["series"], "series_index": book.get("series_index"), "collection": book.get("collection") or book["series"],
         "formats": sorted(book["formats"]), "has_cover": book["has_cover"],
-        "in_library": True, "added": book["added"][:10], "pages": pages.get(book["key"]),
+        "in_library": True, "added": book["added"][:10], "added_at": book["added"], "pages": pages.get(book["key"]),
         "tags": tags.get(book["key"], {"epub": book["tags"], "community": [], "family": [], "mine": []}),
-        "status": r["status"] if r else "none", "percent": r["percent"] if r else 0,
-        "finished": r["finished"] if r else None, "device": r["device"] if r else None,
+        "status": progress["status"] if progress else "none", "percent": progress["percent"] if progress else 0,
+        "finished": progress["finished"] if progress else None, "device": progress["device"] if progress else None,
         "rating": ratings.get(book["key"], 0), "on_shelf": book["key"] in shelf,
     }
 
@@ -688,72 +772,76 @@ def _summary(book, tags, reading, ratings, pages, kind_of, shelf=()):
 @signed_in
 def home(who):
     """What is newest on the family server, for the Home page."""
-    h = hub()
-    library = sorted(h.library.books(), key=lambda b: b["added"], reverse=True)
-    chosen = h.covers.index()
+    family_hub = hub()
+    library = sorted(family_hub.library.books(), key=lambda book: book["added"], reverse=True)
+    chosen = family_hub.covers.index()
     month = date.today().isoformat()[:7]
     return jsonify({
-        "books": [{"id": b["id"], "title": b.get("shown_title") or b["title"], "author": b.get("shown_author", b["author"]), "added": b["added"][:10],
-                   "formats": sorted(b["formats"]), "has_cover": b["has_cover"] or b["key"] in chosen,
-                   "cover_v": chosen.get(b["key"])} for b in library[:12]],
-        "books_month": sum(1 for b in library if b["added"][:7] == month),
+        "books": [{"id": book["id"], "title": book.get("shown_title") or book["title"], "author": book.get("shown_author", book["author"]),
+                   "added": book["added"][:10], "formats": sorted(book["formats"]), "has_cover": book["has_cover"] or book["key"] in chosen,
+                   "cover_v": chosen.get(book["key"])} for book in library[:12]],
+        "books_month": sum(1 for book in library if book["added"][:7] == month),
     })
 
 
 @bp.get("/books")
 @signed_in
 def books(who):
-    h = hub()
+    family_hub = hub()
     pid = None if who == "guest" else who["id"]
-    tags = h.tag_index(pid)
-    reading, ratings = _user_maps(h, who)
-    pages = {r["book_key"]: r["pages"] for r in h.con().execute("SELECT book_key, pages FROM book_meta")}
-    kind_of = h.kind_index()
-    shelf = h.devices.shelf(pid) if pid else {}
-    items = [_summary(b, tags, reading, ratings, pages, kind_of, shelf) for b in h.library.books()]
+    tags = family_hub.tag_index(pid)
+    reading, ratings = _user_maps(family_hub, who)
+    pages = {row["book_key"]: row["pages"] for row in family_hub.con().execute("SELECT book_key, pages FROM book_meta")}
+    kind_of = family_hub.kind_index()
+    shelf = family_hub.devices.shelf(pid) if pid else {}
+    items = [_summary(book, tags, reading, ratings, pages, kind_of, shelf) for book in family_hub.library.books()]
 
-    keys = h.library.keys()
+    keys = family_hub.library.keys()
     # Guests see the library and nothing else. Everyone else also sees books somebody
     # in the family has on Goodreads but the library lacks, without being told whose.
-    elsewhere = goodreads.elsewhere(h) if pid else {}
-    mine = goodreads.book_ids(h, pid) if pid else {}
+    elsewhere = goodreads.elsewhere(family_hub) if pid else {}
+    mine = goodreads.book_ids(family_hub, pid) if pid else {}
 
-    def outside(key, title, author, book_pages, r=None):
+    def outside(key, title, author, book_pages, progress=None):
+        """A book read somewhere else (Kindle, Goodreads) dressed up like a library item, minus the files."""
         return {
             "id": None, "key": key, "title": title or key, "author": author or "", "series": "",
             "kind": kind_of.get(key, kinds.UNSORTED),
             "formats": [], "has_cover": False, "in_library": False, "added": "", "pages": book_pages,
             "tags": tags.get(key, {"epub": [], "community": [], "family": [], "mine": []}),
-            "status": r["status"] if r else "none", "percent": r["percent"] if r else 0,
-            "finished": r["finished"] if r else None, "device": None,
+            "status": progress["status"] if progress else "none", "percent": progress["percent"] if progress else 0,
+            "finished": progress["finished"] if progress else None, "device": None,
             "rating": ratings.get(key, 0), "on_shelf": False, "kindle": key in elsewhere,
             "goodreads_id": mine.get(key) or (elsewhere[key]["gr_id"] if key in elsewhere else ""),
         }
 
-    chosen = h.covers.index()
+    chosen = family_hub.covers.index()
     for item in items:
         item["kindle"] = False
         item["goodreads_id"] = mine.get(item["key"], "")
         if item["key"] in chosen:  # a cover picked in Family Hub; the date makes browsers fetch the new picture
             item["has_cover"], item["cover_v"] = True, chosen[item["key"]]
-    for key, r in reading.items():  # books read elsewhere (Kindle and so on)
+    for key, progress in reading.items():  # books read elsewhere (Kindle and so on)
         if key in keys or key.startswith("doc:"):
             continue
-        items.append(outside(key, r["title"], r["author"], r["pages"], r))
-    for key, e in elsewhere.items():
+        items.append(outside(key, progress["title"], progress["author"], progress["pages"], progress))
+    for key, entry in elsewhere.items():
         if key not in reading:
-            items.append(outside(key, e["title"], e["author"], e["pages"]))
+            items.append(outside(key, entry["title"], entry["author"], entry["pages"]))
 
-    public = readers.index(h)
+    public = readers.index(family_hub)
     for item in items:
         item["readers"] = public.get(item["key"])  # what readers at large think; None when nobody knows
+    if not (request.args.get("series") or request.args.get("collection")) and (request.args.get("filter") or "all") in (
+            "all", "reading", "unread", "read"):
+        items += chapter_items(family_hub, who, tags, ratings)
 
-    q = (request.args.get("q") or "").strip().lower()
+    query = (request.args.get("q") or "").strip().lower()
     tag = (request.args.get("tag") or "").strip().lower()
-    scopes = [s for s in (request.args.get("scopes") or "epub,community,family,mine").split(",") if s]
-    flt = request.args.get("filter") or "all"
-    only_kinds = {k for k in (request.args.get("kinds") or "").split(",") if k}
-    series = (request.args.get("series") or "").strip().lower()
+    scopes = [scope for scope in (request.args.get("scopes") or "epub,community,family,mine").split(",") if scope]
+    shown = request.args.get("filter") or "all"
+    only_kinds = {kind for kind in (request.args.get("kinds") or "").split(",") if kind}
+    one_series = (request.args.get("series") or "").strip().lower()
     collection = (request.args.get("collection") or "").strip().lower()
     try:
         terms = search.clean(json.loads(request.args.get("terms") or "[]"))
@@ -763,28 +851,31 @@ def books(who):
 
     def series_tags(item):
         """Tags put on the item's series (or set of runs) as a whole."""
-        out = {"family": [], "mine": []}
+        found = {"family": [], "mine": []}
         for name in {item.get("series") or "", item.get("collection") or ""} - {""}:
             got = tags.get(series_key(name))
             if got:
-                out["family"] += got["family"]
-                out["mine"] += got["mine"]
-        return out
+                found["family"] += got["family"]
+                found["mine"] += got["mine"]
+        return found
 
     def keep(item):
+        # a gauntlet of cheap checks first; whatever survives faces the filter at the bottom
         if only_kinds and item["kind"] not in only_kinds:
             return False
-        if series and (item.get("series") or "").lower() != series:
+        if one_series and (item.get("series") or "").lower() != one_series:
             return False
         if collection and (item.get("collection") or "").lower() != collection:
             return False
-        if q:
-            hay = " ".join([item["title"], item["author"], item["series"], item.get("subtitle") or ""] +
-                           [t for g in item["tags"].values() for t in g]).lower()
-            if q not in hay:
+        if query:
+            haystack = " ".join([item["title"], item["author"], item["series"], item.get("subtitle") or ""] +
+                                [found for group in item["tags"].values() for found in group]).lower()
+            if query not in haystack:
                 return False
-        if tag and not any(t.lower() == tag for s in scopes for t in item["tags"].get(s, []) + series_tags(item).get(s, [])):
-            return False
+        if tag:
+            every_tag = [found for scope in scopes for found in item["tags"].get(scope, []) + series_tags(item).get(scope, [])]
+            if not any(found.lower() == tag for found in every_tag):
+                return False
         if terms and not matches(item, series_tags(item)):
             return False
         return {
@@ -798,30 +889,60 @@ def books(who):
             "read": item["status"] == "finished",
             "rated4": item["rating"] >= 4,
             "pdf": "PDF" in item["formats"] and "EPUB" not in item["formats"],
-        }.get(flt, True)
+        }.get(shown, True)
 
-    items = [i for i in items if keep(i)]
-    if flt == "foryou" and pid:
+    items = [item for item in items if keep(item)]
+    if shown == "foryou" and pid:
         # Unread library books, best match with what this person has finished and rated first.
-        mine = recommend.for_you(h, pid)
-        items = [dict(i, why=mine["books"][i["key"]]["why"]) for i in items if i["in_library"] and i["key"] in mine["books"]]
-        items.sort(key=lambda i: -mine["books"][i["key"]]["score"])
+        mine = recommend.for_you(family_hub, pid, tags)
+        items = [dict(item, why=mine["books"][item["key"]]["why"]) for item in items if item["in_library"] and item["key"] in mine["books"]]
+        items.sort(key=lambda item: -mine["books"][item["key"]]["score"])
         return jsonify({"books": items, "total": len(items),
                         "taste": {"ready": mine["ready"], "have": mine["have"], "need": mine["need"]}})
-    if series or collection:  # one series or set, run by run, in reading order
-        items.sort(key=lambda i: ((i.get("series") or "").lower(), i.get("series_index") or 0, i["title"].lower()))
+    if one_series or collection:  # one series or set, run by run, in reading order
+        items.sort(key=lambda item: ((item.get("series") or "").lower(), item.get("series_index") or 0, item["title"].lower()))
     # The series' own ratings and tags, by series name in lower case, for the series cards.
     info = {}
-    for name in {n for i in items for n in (i.get("series"), i.get("collection")) if n}:
-        k = series_key(name)
-        info[name.lower()] = {"rating": ratings.get(k, 0),
-                              "tags": {"family": tags[k]["family"], "mine": tags[k]["mine"]} if k in tags else {"family": [], "mine": []}}
+    for name in {name for item in items for name in (item.get("series"), item.get("collection")) if name}:
+        key = series_key(name)
+        info[name.lower()] = {"rating": ratings.get(key, 0),
+                              "tags": {"family": tags[key]["family"], "mine": tags[key]["mine"]} if key in tags else {"family": [], "mine": []}}
     return jsonify({"books": items, "total": len(items), "series_info": info})
 
 
-def series_key(name):
-    """A series (or set of runs) is tagged and rated as a whole under this key, beside its volumes' own."""
-    return "series:" + db.slug(name)
+def chapter_items(family_hub, who, tags, ratings):
+    """Series followed chapter by chapter, as items in the library beside the books: tagged "Chapter by chapter"
+    and with how far publication has got (Ongoing, Hiatus, Finished), the reading site's own genres as community
+    tags, and the tags and rating given to the series as a whole."""
+    if not family_hub.series.configured or not can_series(who):
+        return []
+    from . import chapterfile
+    items = []
+    mine = set(series.my_books(family_hub, who["id"]))
+    for followed in family_hub.series.shelf_cached()["series"]:
+        own = tags.get(series_key(followed["title"]), {})
+        badges = [series.CHAPTER_TAG] + ([followed["status"]] if followed["status"] else [])
+        if followed["chapters"] and not followed["unread"]:
+            status = "finished"
+        else:
+            status = "reading" if followed["read"] else "none"
+        items.append({
+            "id": None, "key": "chapters:%d" % followed["id"], "series_id": followed["id"], "chapter_series": True,
+            "title": followed["title"], "author": followed["author"], "series": "", "collection": "", "part": "", "subtitle": "",
+            "kind": kinds.GRAPHIC, "formats": [], "has_cover": True, "in_library": True, "added": "", "added_at": "",
+            "pages": None, "publication": followed["status"], "source": followed["source"],
+            "chapters": followed["chapters"], "read": followed["read"], "unread": followed["unread"],
+            "downloaded": followed["downloaded"], "next": followed["next"],
+            "tags": {"epub": badges, "community": list(followed["genres"]), "family": own.get("family", []), "mine": own.get("mine", [])},
+            "status": status, "percent": round(100 * followed["read"] / followed["chapters"]) if followed["chapters"] else 0,
+            "finished": None, "device": None, "file_parts": chapterfile.made_parts(family_hub, followed["id"]),
+            "rating": ratings.get(series_key(followed["title"]), 0), "on_shelf": followed["id"] in mine,
+            "kindle": False, "goodreads_id": "", "readers": None,
+        })
+    return items
+
+
+series_key = db.series_key  # a series is tagged and rated as a whole under this key
 
 
 def _series_name():
@@ -834,9 +955,9 @@ def _series_name():
                 return name, data
     if asked and hub().series.configured:  # a series followed chapter by chapter is tagged and rated the same way
         try:
-            for s in hub().series.shelf()["series"]:
-                if s["title"].lower() == asked:
-                    return s["title"], data
+            for followed in hub().series.shelf()["series"]:
+                if followed["title"].lower() == asked:
+                    return followed["title"], data
         except series.SeriesError:
             pass
     return "", data
@@ -849,17 +970,18 @@ def series_info(who):
     name, _ = _series_name()
     if not name:
         return fail("Nothing in the library belongs to that series.", 404)
-    h = hub()
+    family_hub = hub()
     pid = None if who == "guest" else who["id"]
     key = series_key(name)
-    tagged = h.tag_index(pid).get(key, {"family": [], "mine": []})
-    reading, ratings = _user_maps(h, who)
+    tagged = family_hub.tag_index(pid).get(key, {"family": [], "mine": []})
+    reading, ratings = _user_maps(family_hub, who)
     low = name.lower()
-    vols = [ratings.get(b["key"]) for b in h.library.books() if low in ((b["series"] or "").lower(), (b.get("collection") or "").lower())]
-    rated = [r for r in vols if r]
+    volume_ratings = [ratings.get(book["key"]) for book in family_hub.library.books()
+                      if low in ((book["series"] or "").lower(), (book.get("collection") or "").lower())]
+    rated = [rating for rating in volume_ratings if rating]
     return jsonify({"name": name, "key": key, "tags": {"family": tagged["family"], "mine": tagged["mine"]},
                     "rating": ratings.get(key, 0), "volume_average": round(sum(rated) / len(rated), 1) if rated else None,
-                    "volumes_rated": len(rated), "volumes": len(vols)})
+                    "volumes_rated": len(rated), "volumes": len(volume_ratings)})
 
 
 @bp.post("/series-info/tags")
@@ -871,9 +993,9 @@ def series_add_tag(who):
     kind = "family" if data.get("kind") == "family" else "mine"
     if kind == "family" and not (who["can_tag"] or is_admin(who)):
         return fail("This profile cannot change family tags.", 403)
-    h = hub()
-    h.ensure_meta(series_key(name), title=name, source="series")
-    if not h.add_tag(kind, series_key(name), data.get("tag"), who["id"]):
+    family_hub = hub()
+    family_hub.ensure_meta(series_key(name), title=name, source="series")
+    if not family_hub.add_tag(kind, series_key(name), data.get("tag"), who["id"]):
         return fail("Type a tag first.")
     return jsonify({"ok": True})
 
@@ -897,9 +1019,9 @@ def series_rate(who):
     name, data = _series_name()
     if not name:
         return fail("Nothing in the library belongs to that series.", 404)
-    h = hub()
-    h.ensure_meta(series_key(name), title=name, source="series")
-    h.set_rating(series_key(name), who["id"], int(data.get("rating") or 0))
+    family_hub = hub()
+    family_hub.ensure_meta(series_key(name), title=name, source="series")
+    family_hub.set_rating(series_key(name), who["id"], int(data.get("rating") or 0))
     return jsonify({"ok": True})
 
 
@@ -911,81 +1033,82 @@ def _book_or_404(book_id):
 @admin_only
 def delete_book(who, book_id):
     """Delete a book from the library, with every copy of it. Admins only; the library's database is copied first."""
-    h = hub()
+    family_hub = hub()
     book = _book_or_404(book_id)
     if not book:
         return fail("That book is not in the library.", 404)
     from . import librarymanager
-    if not librarymanager.configured(h.config):
+    if not librarymanager.configured(family_hub.config):
         return fail("The library manager's sign-in is not set up yet. Add it under Admin, Hub, Connections, Library manager.")
-    ids = [book["id"]] + [c["id"] for c in book["copies"]]
+    ids = [book["id"]] + [copy["id"] for copy in book["copies"]]
     done = 0
     try:
-        saved = h.duplicates.backup()
+        saved = family_hub.duplicates.backup()
         for entry in ids:
-            h.manager.delete(entry)
+            family_hub.manager.delete(entry)
             done += 1
     except (OSError, librarymanager.ManagerError) as exc:
         if done:
             return fail("%s %d of %d entries were already deleted before it stopped." % (exc, done, len(ids)), 502)
         return fail(str(exc), 502)
     finally:
-        h.library.refresh(force=True)
+        family_hub.library.refresh(force=True)
     return jsonify({"removed": book["title"], "entries": len(ids), "backup": saved.name})
 
 
 @bp.get("/books/<int:book_id>")
 @signed_in
 def book_detail(who, book_id):
-    h = hub()
+    family_hub = hub()
     book = _book_or_404(book_id)
     if not book:
         return fail("That book is not in the library.", 404)
     if book["copy_of"]:  # an old link to a copy: show the book it is a copy of
-        book = h.library.get(book["copy_of"]) or book
+        book = family_hub.library.get(book["copy_of"]) or book
         book_id = book["id"]
     pid = None if who == "guest" else who["id"]
-    tags = h.tag_index(pid)
-    reading, ratings = _user_maps(h, who)
-    con = h.con()
+    tags = family_hub.tag_index(pid)
+    reading, ratings = _user_maps(family_hub, who)
+    con = family_hub.con()
     pages = {book["key"]: (con.execute("SELECT pages FROM book_meta WHERE book_key=?", (book["key"],)).fetchone() or [None])[0]}
-    data = _summary(book, tags, reading, ratings, pages, h.kind_index(), h.devices.shelf(pid) if pid else {})
+    data = _summary(book, tags, reading, ratings, pages, family_hub.kind_index(), family_hub.devices.shelf(pid) if pid else {})
     data["synopsis"] = book["synopsis"]
     data["pubdate"] = book["pubdate"]
-    data["goodreads_id"] = goodreads.book_ids(h, pid).get(book["key"], "") if pid else ""
-    data["readers"] = readers.index(h).get(book["key"])
-    chosen = h.covers.row(book["key"])
+    data["goodreads_id"] = goodreads.book_ids(family_hub, pid).get(book["key"], "") if pid else ""
+    data["readers"] = readers.index(family_hub).get(book["key"])
+    chosen = family_hub.covers.row(book["key"])
     data["own_cover"] = chosen["source"] if chosen else ""
     if chosen:
         data["has_cover"], data["cover_v"] = True, chosen["at"]
-    names = h.profile_names()
+    names = family_hub.profile_names()
     data["family_ratings"] = [] if who == "guest" else [
-        {"name": names.get(r["profile_id"], "?"), "rating": r["rating"]}
-        for r in con.execute("SELECT profile_id, rating FROM ratings WHERE book_key=? ORDER BY profile_id", (book["key"],))
-        if r["profile_id"] != who["id"]
+        {"name": names.get(row["profile_id"], "?"), "rating": row["rating"]}
+        for row in con.execute("SELECT profile_id, rating FROM ratings WHERE book_key=? ORDER BY profile_id", (book["key"],))
+        if row["profile_id"] != who["id"]
     ]
-    data["community_sources"] = sorted({catalogues.label(r["source"]) for r in con.execute(
+    data["community_sources"] = sorted({catalogues.label(row["source"]) for row in con.execute(
         "SELECT source FROM community_tags WHERE book_key=?", (book["key"],))})
-    data["can_look_up"] = bool(catalogues.active(h.config))
+    data["can_look_up"] = bool(catalogues.active(family_hub.config))
     if pid:
-        data["shelf"] = h.devices.book_view(pid, book)
+        data["shelf"] = family_hub.devices.book_view(pid, book)
     if is_admin(who):  # admins look after other people's shelves, such as Nan's
-        theirs = {r["profile_id"]: r["status"] for r in con.execute(
+        theirs = {row["profile_id"]: row["status"] for row in con.execute(
             "SELECT profile_id, status FROM reading WHERE book_key=?", (book["key"],))}
         data["family_shelves"] = [
-            dict(h.devices.book_view(p["id"], book), profile_id=p["id"], name=p["name"], status=theirs.get(p["id"], "none"))
-            for p in h.profiles() if p["id"] != pid]
+            dict(family_hub.devices.book_view(profile["id"], book), profile_id=profile["id"], name=profile["name"],
+                 status=theirs.get(profile["id"], "none"))
+            for profile in family_hub.profiles() if profile["id"] != pid]
     if book["series"]:  # the whole series' own tags and rating apply to each of its volumes
         key = series_key(book["series"])
         own = tags.get(key, {})
         data["from_series"] = {"name": book["series"], "rating": ratings.get(key) or 0,
                                "tags": {"family": own.get("family", []), "mine": own.get("mine", [])}}
-    data["converted"] = (h.config.converted_dir / ("%d.epub" % book_id)).exists()
+    data["converted"] = (family_hub.config.converted_dir / ("%d.epub" % book_id)).exists()
     data["convert_status"] = db.kv_get(con, "convert:%d" % book_id)
     if is_admin(who):
-        data["copies"] = [{"id": c["id"], "added": c["added"][:10],
-                           "files": [{"format": f, "size": c["sizes"].get(f, 0)} for f in sorted(c["own_formats"])]}
-                          for c in book["copies"]]
+        data["copies"] = [{"id": copy["id"], "added": copy["added"][:10],
+                           "files": [{"format": fmt, "size": copy["sizes"].get(fmt, 0)} for fmt in sorted(copy["own_formats"])]}
+                          for copy in book["copies"]]
     return jsonify(data)
 
 
@@ -1072,17 +1195,17 @@ def remove_cover(who, book_id):
 @bp.get("/books/<int:book_id>/download/<fmt>")
 @signed_in
 def download(who, book_id, fmt):
-    h = hub()
+    family_hub = hub()
     book = _book_or_404(book_id)
     if not book:
         return fail("That book is not in the library.", 404)
     if fmt.lower() == "converted":
-        path = h.config.converted_dir / ("%d.epub" % book_id)
+        path = family_hub.config.converted_dir / ("%d.epub" % book_id)
         ext = "epub"
         if not path.exists():
             return fail("There is no converted copy yet.", 404)
     else:
-        path = h.library.file_path(book, fmt)
+        path = family_hub.library.file_path(book, fmt)
         ext = fmt.lower()
         if not path:
             return fail("That format is not available.", 404)
@@ -1097,8 +1220,8 @@ def download_series(who):
     """Every volume of a series in one file: joined into one comic for comics, one ZIP for anything else."""
     from . import seriesfile
     name = (request.args.get("series") or "").strip()
-    volumes = sorted((b for b in hub().library.books() if name and (b["series"] or "").lower() == name.lower()),
-                     key=lambda b: (b.get("series_index") or 0, b["title"].lower()))
+    volumes = sorted((book for book in hub().library.books() if name and (book["series"] or "").lower() == name.lower()),
+                     key=lambda book: (book.get("series_index") or 0, book["title"].lower()))
     if not volumes:
         return fail("Nothing in the library belongs to that series.", 404)
     try:
@@ -1106,7 +1229,7 @@ def download_series(who):
     except seriesfile.SeriesFileError as exc:
         return fail(str(exc), 422)
     response = send_file(path, as_attachment=True, download_name=download_name)
-    response.call_on_close(lambda: path.unlink(missing_ok=True))
+    response.call_on_close(lambda: path.unlink(missing_ok=True))  # temp file, binned once it's been sent
     return response
 
 
@@ -1148,13 +1271,13 @@ def look_up_tags(who, book_id):
         return fail("That book is not in the library.", 404)
     if not (who["can_tag"] or is_admin(who)):
         return fail("This profile cannot change tags.", 403)
-    h = hub()
-    if not catalogues.active(h.config):
+    family_hub = hub()
+    if not catalogues.active(family_hub.config):
         return fail("Looking up tags is switched off. An admin can turn it on under Admin, Hub, Connections.")
-    result = h.catalogues.look_up(book, force=True)
-    failed = [catalogues.label(s) for s, n in result.items() if n is None]
-    return jsonify({"added": sum(n or 0 for n in result.values()), "failed": failed,
-                    "sources": [catalogues.label(s) for s, n in result.items() if n]})
+    result = family_hub.catalogues.look_up(book, force=True)
+    failed = [catalogues.label(source) for source, added in result.items() if added is None]  # None = it errored
+    return jsonify({"added": sum(added or 0 for added in result.values()), "failed": failed,
+                    "sources": [catalogues.label(source) for source, added in result.items() if added]})
 
 
 @bp.post("/books/kind")
@@ -1169,19 +1292,19 @@ def set_kind(who):
         return fail("Unknown kind of book.")
     if not kind and not tag:
         return fail("Choose a kind or type a tag.")
-    h = hub()
+    family_hub = hub()
     count = 0
     for book_id in data.get("ids") or []:
-        book = h.library.get(book_id) if isinstance(book_id, int) else None
+        book = family_hub.library.get(book_id) if isinstance(book_id, int) else None
         if not book:
             continue
         if kind:
-            h.set_kind(book["key"], kind)
+            family_hub.set_kind(book["key"], kind)
         if tag:
-            h.add_tag("family", book["key"], tag, who["id"])
+            family_hub.add_tag("family", book["key"], tag, who["id"])
         count += 1
-    h.con().commit()
-    h.touch()
+    family_hub.con().commit()
+    family_hub.touch()
     return jsonify({"updated": count})
 
 
@@ -1226,10 +1349,10 @@ def set_shelf(who, book_id):
     target = _for_profile(who, data.get("profile_id"))
     if not target:
         return fail("Only an admin can change someone else's books.", 403)
-    h = hub()
-    result = h.devices.set_shelf(target["id"], book, bool(data.get("on")), by=who["id"])
+    family_hub = hub()
+    result = family_hub.devices.set_shelf(target["id"], book, bool(data.get("on")), by=who["id"])
     if result["sending"]:
-        h.devices.kick(current_app._get_current_object())
+        family_hub.devices.kick(current_app._get_current_object())
     return jsonify(result)
 
 
@@ -1243,33 +1366,33 @@ def send_to_device(who, book_id):
     device = _device_or_fail(who, data.get("device_id") if isinstance(data.get("device_id"), int) else 0)
     if not device:
         return fail("That device does not exist.", 404)
-    h = hub()
+    family_hub = hub()
     try:
-        h.devices.queue(device, book)
+        family_hub.devices.queue(device, book)
     except ValueError as exc:
         return fail(str(exc))
-    h.devices.kick(current_app._get_current_object())
+    family_hub.devices.kick(current_app._get_current_object())
     return jsonify({"ok": True, "device": device["name"]})
 
 
 @bp.post("/books/<int:book_id>/convert")
 @profile_only
 def convert(who, book_id):
-    h = hub()
+    family_hub = hub()
     book = _book_or_404(book_id)
     if not book:
         return fail("That book is not in the library.", 404)
-    source = h.library.file_path(book, "PDF")
+    source = family_hub.library.file_path(book, "PDF")
     if not source:
         return fail("This book has no PDF to convert.")
     tool = shutil.which("ebook-convert")
     if not tool:
-        hint = " Open it in the library manager and use its Convert button." if h.config.cwa_url else ""
+        hint = " Open it in the library manager and use its Convert button." if family_hub.config.cwa_url else ""
         return fail("The converter is not installed in Family Hub." + hint, 501)
-    h.config.converted_dir.mkdir(parents=True, exist_ok=True)
-    target = h.config.converted_dir / ("%d.epub" % book_id)
+    family_hub.config.converted_dir.mkdir(parents=True, exist_ok=True)
+    target = family_hub.config.converted_dir / ("%d.epub" % book_id)
     key = "convert:%d" % book_id
-    db.kv_set(h.con(), key, "running")
+    db.kv_set(family_hub.con(), key, "running")
     app = current_app._get_current_object()
 
     def work():
@@ -1289,28 +1412,39 @@ def convert(who, book_id):
 @bp.get("/tags")
 @signed_in
 def tags(who):
-    h = hub()
+    family_hub = hub()
     pid = None if who == "guest" else who["id"]
-    scopes = [s for s in (request.args.get("scopes") or "epub,community,family,mine").split(",") if s]
-    q = (request.args.get("q") or "").strip().lower()
-    keys = set(h.library.keys())
+    scopes = [scope for scope in (request.args.get("scopes") or "epub,community,family,mine").split(",") if scope]
+    query = (request.args.get("q") or "").strip().lower()
+    keys = set(family_hub.library.keys())
     if pid:  # books this profile read elsewhere are listed in the library too
-        keys |= {r["book_key"] for r in h.reading_rows(pid)}
-    wanted = {k for k in (request.args.get("kinds") or "").split(",") if k}
+        keys |= {row["book_key"] for row in family_hub.reading_rows(pid)}
+    wanted = {kind for kind in (request.args.get("kinds") or "").split(",") if kind}
     if wanted:  # only the tags of the part of the library being looked at
-        kind_of = h.kind_index()
-        keys = {k for k in keys if kind_of.get(k, kinds.UNSORTED) in wanted}
+        kind_of = family_hub.kind_index()
+        keys = {key for key in keys if kind_of.get(key, kinds.UNSORTED) in wanted}
+    tagged = family_hub.tag_index(pid)
+    index = {key: groups for key, groups in tagged.items() if key in keys or key.startswith("series:")}  # a series' own tags count too
+    if not wanted or kinds.GRAPHIC in wanted:
+        for item in chapter_items(family_hub, who, tagged, {}):
+            index.pop(series_key(item["title"]), None)  # its own tags are in its entry; counted once
+            index[item["key"]] = item["tags"]
+    merged = request.args.get("merged") == "1"  # one entry per name, whichever sorts of tag carry it
     counts = {}
-    for key, groups in h.tag_index(pid).items():
-        if key not in keys and not key.startswith("series:"):  # a series' own tags count too
-            continue
+    for key, groups in index.items():
         for scope in scopes:
             for tag in groups.get(scope, []):
-                if q and q not in tag.lower():
+                if query and query not in tag.lower():
                     continue
-                entry = counts.setdefault((tag.lower(), scope), {"tag": tag, "source": scope, "count": 0})
-                entry["count"] += 1
-    result = sorted(counts.values(), key=lambda e: (-e["count"], e["tag"].lower()))
+                # keys is a SET of books, so a book tagged "Fantasy" by both family and file still counts once
+                entry = counts.setdefault(tag.lower() if merged else (tag.lower(), scope),
+                                          {"tag": tag, "source": scope, "sources": [], "keys": set()})
+                if scope not in entry["sources"]:
+                    entry["sources"].append(scope)
+                entry["keys"].add(key)
+    result = sorted(({"tag": entry["tag"], "source": entry["source"], "sources": entry["sources"], "count": len(entry["keys"])}
+                     for entry in counts.values()),
+                    key=lambda entry: (-entry["count"], entry["tag"].lower()))
     return jsonify({"tags": result[:120]})
 
 
@@ -1325,37 +1459,38 @@ def stats_me(who):
 @bp.get("/stats/admin")
 @admin_only
 def stats_admin(who):
-    h = hub()
-    data = h.admin_stats()
-    data["attention"] = h.intake.attention_items(limit=50)
-    kind_of = h.kind_index()
-    data["kinds"] = [[k, sum(1 for b in h.library.books() if kind_of.get(b["key"], kinds.UNSORTED) == k)] for k in kinds.KINDS]
-    machine = h.machine_tags()
+    family_hub = hub()
+    data = family_hub.admin_stats()
+    data["attention"] = family_hub.intake.attention_items(limit=50)
+    kind_of = family_hub.kind_index()
+    library = family_hub.library.books()
+    data["kinds"] = [[kind, sum(1 for book in library if kind_of.get(book["key"], kinds.UNSORTED) == kind)] for kind in kinds.KINDS]
+    machine = family_hub.machine_tags()
     data["tags"] = {
-        "lookups": h.catalogues.progress(),
-        "community": sum(1 for t in machine["tags"] if t["sources"] != ["Book file"] and t["becomes"] is None),
-        "file": sum(1 for t in machine["tags"] if "Book file" in t["sources"] and t["becomes"] is None),
-        "removed": len(machine["removed"]), "hidden": sum(1 for t in machine["tags"] if t["becomes"] is not None),
+        "lookups": family_hub.catalogues.progress(),
+        "community": sum(1 for tag in machine["tags"] if tag["sources"] != ["Book file"] and tag["becomes"] is None),
+        "file": sum(1 for tag in machine["tags"] if "Book file" in tag["sources"] and tag["becomes"] is None),
+        "removed": len(machine["removed"]), "hidden": sum(1 for tag in machine["tags"] if tag["becomes"] is not None),
     }
-    data["elsewhere"] = len(goodreads.elsewhere(h))
-    sets = h.copy_sets()
+    data["elsewhere"] = len(goodreads.elsewhere(family_hub))
+    sets = family_hub.copy_sets()
     data["copies"] = {
-        "sets": sum(1 for s in sets if s["together"] or s["partly"]),
-        "hidden": len(h.library.all_books()) - len(h.library.books()),
-        "apart": sum(1 for s in sets if not s["together"]),
-        "spare": sum(s["spare"] for s in sets),
+        "sets": sum(1 for group in sets if group["together"] or group["partly"]),
+        "hidden": len(family_hub.library.all_books()) - len(library),
+        "apart": sum(1 for group in sets if not group["together"]),
+        "spare": sum(group["spare"] for group in sets),
     }
     data["services"] = {
-        "library": h.library.available,
-        "search": integrations.prowlarr_status(h.config),
-        "series": h.series.status(),
-        "second_copy": secondcopy.status(h),
-        "downloads_folder": bool(h.config.downloads_dir and h.config.downloads_dir.is_dir()),
-        "ingest_folder": bool(h.config.ingest_dir and h.config.ingest_dir.is_dir()),
-        "ingest_waiting": h.intake.waiting(h.config.ingest_dir),
-        "ingest_stuck": h.ingest_stuck,
-        "inbox_waiting": h.intake.waiting(h.config.inbox_dir),
-        "remote_guest_blocked": h.config.guest_lan_only,
+        "library": family_hub.library.available,
+        "search": integrations.prowlarr_status(family_hub.config),
+        "series": family_hub.series.status(),
+        "second_copy": secondcopy.status(family_hub),
+        "downloads_folder": bool(family_hub.config.downloads_dir and family_hub.config.downloads_dir.is_dir()),
+        "ingest_folder": bool(family_hub.config.ingest_dir and family_hub.config.ingest_dir.is_dir()),
+        "ingest_waiting": family_hub.intake.waiting(family_hub.config.ingest_dir),
+        "ingest_stuck": family_hub.ingest_stuck,
+        "inbox_waiting": family_hub.intake.waiting(family_hub.config.inbox_dir),
+        "remote_guest_blocked": family_hub.config.guest_lan_only,
     }
     return jsonify(data)
 
@@ -1383,24 +1518,66 @@ def similar_by_key(who):
 @profile_only
 def recommendations(who):
     """This week's books the library does not have, picked for this person."""
-    h = hub()
-    mine = recommend.taste(h, who["id"])
-    data = recommend.listing(h, who["id"])
-    data.update(ready=mine["ready"], have=mine["have"], need=mine["need"], on=h.config.tag_lookups == "on")
+    family_hub = hub()
+    mine = recommend.taste(family_hub, who["id"])
+    data = recommend.listing(family_hub, who["id"])
+    data.update(ready=mine["ready"], have=mine["have"], need=mine["need"], on=family_hub.config.tag_lookups == "on")
     return jsonify(data)
 
 
 @bp.post("/recommendations/refresh")
 @profile_only
 def recommendations_refresh(who):
-    h = hub()
+    family_hub = hub()
     try:
-        count = recommend.refresh(h, who["id"])
+        count = recommend.refresh(family_hub, who["id"])
     except catalogues.LookupError_ as exc:
         return fail("Open Library could not be reached: %s" % exc, 502)
-    if count is None and h.config.tag_lookups != "on":
+    if count is None and family_hub.config.tag_lookups != "on":
         return fail("Looking things up outside is switched off. An admin can turn it on under Admin, Hub, Connections.")
-    return recommendations.__wrapped__(who)
+    return recommendations.__wrapped__(who)  # __wrapped__ = the view without its sign-in check (we've done that already)
+
+
+@bp.get("/recommendations/manga")
+@profile_only
+def recommendations_manga(who):
+    """Manga and manhwa to try next, from AniList readers' recommendations for the series this person enjoyed.
+    ?look=1 asks AniList about a few more liked series now; otherwise only answers already kept are used."""
+    from . import anilist
+    family_hub = hub()
+    data = anilist.suggestions(family_hub, who["id"], look=request.args.get("look") == "1")
+    data.update(on=family_hub.config.tag_lookups == "on", series=bool(family_hub.series.configured and can_series(who)))
+    return jsonify(data)
+
+
+@bp.post("/recommendations/manga/dismiss")
+@profile_only
+def recommendations_manga_dismiss(who):
+    from . import anilist
+    try:
+        anilist.dismiss(hub(), who["id"], int((request.get_json(silent=True) or {}).get("id")))
+    except (TypeError, ValueError):
+        return fail("Say which one.")
+    return jsonify({"ok": True})
+
+
+@bp.get("/me/authors")
+@profile_only
+def my_authors(who):
+    """The authors this profile likes and does not, for suggestions; the library's authors to pick from."""
+    names = sorted({author.strip() for book in hub().library.books() for author in (book["author"] or "").split("&")
+                    if author.strip() and catalogues.author_known(author.strip())}, key=str.lower)
+    return jsonify(dict(recommend.author_prefs(hub(), who["id"]), known=names))
+
+
+@bp.post("/me/authors")
+@profile_only
+def my_authors_set(who):
+    """Like an author, not like one, or take them off both lists: {"author", "how": "like" | "dislike" | "none"}."""
+    data = request.get_json(silent=True) or {}
+    if data.get("how") not in ("like", "dislike", "none") or not str(data.get("author") or "").strip():
+        return fail("Say which author, and like or not.")
+    return jsonify(recommend.set_author_pref(hub(), who["id"], data["author"], data["how"]))
 
 
 @bp.post("/recommendations/dismiss")
@@ -1416,46 +1593,48 @@ def can_request(who):
     return who not in (None, "guest") and (who["role"] == "admin" or who["can_request"])
 
 
-def query_variants(q):
+def query_variants(query):
     """The spellings to ask the sites for. They match whole words exactly, so "Saviors" misses "Savior's" and "Cafe"
     may miss "Café". Asked for as typed; with accents and apostrophes taken out; and, for a long title, without its
     first word or two (which is where possessives and "The" usually are)."""
     import unicodedata
-    folded = unicodedata.normalize("NFKD", q).encode("ascii", "ignore").decode()
+    # NFKD splits "é" into "e" + an accent mark, then the ascii encode quietly drops the mark. café -> cafe
+    folded = unicodedata.normalize("NFKD", query).encode("ascii", "ignore").decode()
     folded = re.sub(r"['’`]", "", folded)
     folded = re.sub(r"[^A-Za-z0-9]+", " ", folded).strip()
     words = folded.split()
-    out = [q]
-    for v in (folded, " ".join(words[1:]) if len(words) >= 4 else "", " ".join(words[2:]) if len(words) >= 5 else ""):
-        if v and v.lower() not in [x.lower() for x in out]:
-            out.append(v)
-    return out
+    variants = [query]
+    for variant in (folded, " ".join(words[1:]) if len(words) >= 4 else "", " ".join(words[2:]) if len(words) >= 5 else ""):
+        if variant and variant.lower() not in [known.lower() for known in variants]:
+            variants.append(variant)
+    return variants
 
 
-def search_variants(config, q):
+def search_variants(config, query):
     """Ask for every spelling at once and put the answers together, the closest matches to what was typed first."""
     from concurrent.futures import ThreadPoolExecutor
-    variants = query_variants(q)
+    variants = query_variants(query)
     with ThreadPoolExecutor(max_workers=len(variants)) as pool:
-        answers = list(pool.map(lambda v: _try_search(config, v), variants))
-    if all(isinstance(a, integrations.IntegrationError) for a in answers):
-        raise answers[0]
-    typed = set(db.slug(query_variants(q)[1] if len(variants) > 1 else q).split("-"))
+        answers = list(pool.map(lambda variant: _try_search(config, variant), variants))
+    if all(isinstance(answer, integrations.IntegrationError) for answer in answers):
+        raise answers[0]  # only give up if EVERY spelling failed; one working is good enough
+    typed = set(db.slug(query_variants(query)[1] if len(variants) > 1 else query).split("-"))
     merged, seen = [], set()
     for answer in answers:
-        for r in answer if isinstance(answer, list) else []:
-            key = r.get("guid") or r["title"]
+        for result in answer if isinstance(answer, list) else []:
+            key = result.get("guid") or result["title"]
             if key not in seen:
                 seen.add(key)
-                merged.append(r)
-    score = lambda r: len(typed & set(db.slug(r["title"]).split("-")))  # noqa: E731
-    merged.sort(key=lambda r: (-score(r), r["format"] != "EPUB", -(r["seeders"] or 0)))
+                merged.append(result)
+    score = lambda result: len(typed & set(db.slug(result["title"]).split("-")))  # noqa: E731  (words in common)
+    merged.sort(key=lambda result: (-score(result), result["format"] != "EPUB", -(result["seeders"] or 0)))
     return merged
 
 
-def _try_search(config, q):
+def _try_search(config, query):
+    """The answer, or the error itself (handed back, not raised), so one failing spelling can't sink the others."""
     try:
-        return integrations.prowlarr_search(config, q)
+        return integrations.prowlarr_search(config, query)
     except integrations.IntegrationError as exc:
         return exc
 
@@ -1465,18 +1644,19 @@ def _try_search(config, q):
 def discover_search(who):
     if not can_request(who):
         return fail("This profile cannot search for new books.", 403)
-    q = (request.args.get("q") or "").strip()
-    if len(q) < 2:
+    query = (request.args.get("q") or "").strip()
+    if len(query) < 2:
         return fail("Type a title or author.")
-    h = hub()
+    family_hub = hub()
     try:
-        results = search_variants(h.config, q)
+        results = search_variants(family_hub.config, query)
     except integrations.IntegrationError as exc:
         return fail(str(exc), 502)
-    titles = [(db.slug(b["title"]), b["id"]) for b in h.library.books()]
-    for r in results:
-        s = db.slug(r["title"])
-        r["library_id"] = next((bid for t, bid in titles if len(t) > 3 and t in s), None)
+    titles = [(db.slug(book["title"]), book["id"]) for book in family_hub.library.books()]
+    for result in results:
+        release = db.slug(result["title"])
+        # "already got it?" = one of our titles (4+ letters, so "it" doesn't match everything) inside the release name
+        result["library_id"] = next((book_id for title, book_id in titles if len(title) > 3 and title in release), None)
     return jsonify({"results": results})
 
 
@@ -1488,12 +1668,12 @@ def discover_grab(who):
     data = request.get_json(silent=True) or {}
     if not data.get("guid") or data.get("indexer_id") is None:
         return fail("Pick a result first.")
-    h = hub()
+    family_hub = hub()
     try:
-        integrations.prowlarr_grab(h.config, data["guid"], data["indexer_id"])
+        integrations.prowlarr_grab(family_hub.config, data["guid"], data["indexer_id"])
     except integrations.IntegrationError as exc:
         return fail(str(exc), 502)
-    con = h.con()
+    con = family_hub.con()
     con.execute("INSERT INTO requests(profile_id, title, indexer, guid, status, created) VALUES(?,?,?,?,?,?)",
                 (who["id"], str(data.get("title") or "")[:300], str(data.get("indexer") or "")[:80],
                  str(data["guid"])[:500], "sent", db.now()))
@@ -1504,27 +1684,27 @@ def discover_grab(who):
 @bp.get("/discover/queue")
 @profile_only
 def discover_queue(who):
-    h = hub()
-    names = h.profile_names()
-    con = h.con()
-    requests_ = [{"title": r["title"], "indexer": r["indexer"], "by": names.get(r["profile_id"], "?"),
-                  "created": r["created"]} for r in
-                 con.execute("SELECT * FROM requests ORDER BY id DESC LIMIT 15")]
-    imported = [{"name": r["path"].replace("\\", "/").split("/")[-1], "at": r["at"]} for r in
+    family_hub = hub()
+    names = family_hub.profile_names()
+    con = family_hub.con()
+    asked = [{"title": row["title"], "indexer": row["indexer"], "by": names.get(row["profile_id"], "?"),
+              "created": row["created"], "swapped": row["status"] == "swapped"} for row in
+             con.execute("SELECT * FROM requests ORDER BY id DESC LIMIT 15")]
+    imported = [{"name": row["path"].replace("\\", "/").split("/")[-1], "at": row["at"]} for row in
                 con.execute("SELECT * FROM imported_files ORDER BY at DESC LIMIT 10")]
     client, client_error = None, None
     try:
-        client = integrations.qbit_queue(h.config)
+        client = integrations.qbit_queue(family_hub.config)
     except integrations.IntegrationError as exc:
         client_error = str(exc)
-    return jsonify({"requests": requests_, "imported": imported, "client": client, "client_error": client_error})
+    return jsonify({"requests": asked, "imported": imported, "client": client, "client_error": client_error})
 
 
 @bp.get("/watch")
 @profile_only
 def watch_list(who):
     rows = hub().con().execute("SELECT * FROM watch WHERE profile_id=? ORDER BY kind, value", (who["id"],))
-    return jsonify({"watch": [{"id": r["id"], "kind": r["kind"], "value": r["value"]} for r in rows]})
+    return jsonify({"watch": [{"id": row["id"], "kind": row["kind"], "value": row["value"]} for row in rows]})
 
 
 @bp.post("/watch")
@@ -1566,9 +1746,11 @@ def watchlist_page(who):
     if who == "guest":
         return fail("Choose your profile to keep a watchlist.", 403)
     rows = hub().con().execute("SELECT * FROM watch WHERE profile_id=? ORDER BY kind, value COLLATE NOCASE", (who["id"],)).fetchall()
-    items = [watchlist.describe(r) if r["kind"] in watchlist.KINDS else {"id": r["id"], "kind": r["kind"], "value": r["value"], "found": [], "new": 0}
-             for r in rows]
-    return jsonify({"items": items, "news": sum(i["new"] for i in items), "can_request_media": can_request_media(who),
+    # "tag" rows are Discover's, not the watchlist's: shown plain, never checked
+    items = [watchlist.describe(row) if row["kind"] in watchlist.KINDS else
+             {"id": row["id"], "kind": row["kind"], "value": row["value"], "found": [], "new": 0}
+             for row in rows]
+    return jsonify({"items": items, "news": sum(item["new"] for item in items), "can_request_media": can_request_media(who),
                     "films": hub().media.configured("film"), "shows": hub().media.configured("show")})
 
 
@@ -1624,8 +1806,9 @@ def watchlist_auto(who, watch_id):
 def watchlist_seen(who):
     """The person has looked: nothing on the list is new any more."""
     con = hub().con()
-    for r in con.execute("SELECT id, found FROM watch WHERE profile_id=?", (who["id"],)).fetchall():
-        con.execute("UPDATE watch SET seen=? WHERE id=?", (json.dumps([f["key"] for f in json.loads(r["found"] or "[]")]), r["id"]))
+    for row in con.execute("SELECT id, found FROM watch WHERE profile_id=?", (who["id"],)).fetchall():
+        everything_found = [item["key"] for item in json.loads(row["found"] or "[]")]
+        con.execute("UPDATE watch SET seen=? WHERE id=?", (json.dumps(everything_found), row["id"]))
     con.commit()
     return jsonify({"ok": True})
 
@@ -1634,8 +1817,8 @@ def watchlist_seen(who):
 @profile_only
 def discover_new(who):
     """Suggestions from the watchlist. Cached for 12 hours per profile."""
-    h = hub()
-    con = h.con()
+    family_hub = hub()
+    con = family_hub.con()
     cache_key = "new:%d" % who["id"]
     cached = db.kv_get(con, cache_key)
     if cached and not request.args.get("refresh"):
@@ -1643,39 +1826,33 @@ def discover_new(who):
         if time.time() - data.get("at", 0) < 12 * 3600:
             return jsonify(data)
     items = []
-    index = h.tag_index(who["id"])
-    keys = h.library.keys()
-    meta = {r["book_key"]: r for r in con.execute("SELECT * FROM book_meta")}
-    finished = {r["book_key"] for r in h.reading_rows(who["id"]) if r["status"] == "finished"}
-    for w in con.execute("SELECT * FROM watch WHERE profile_id=?", (who["id"],)).fetchall():
-        if w["kind"] == "tag":
-            low = w["value"].lower()
+    index = family_hub.tag_index(who["id"])
+    keys = family_hub.library.keys()
+    meta = {row["book_key"]: row for row in con.execute("SELECT * FROM book_meta")}
+    finished = {row["book_key"] for row in family_hub.reading_rows(who["id"]) if row["status"] == "finished"}
+    for watched in con.execute("SELECT * FROM watch WHERE profile_id=?", (who["id"],)).fetchall():
+        if watched["kind"] == "tag":
+            low = watched["value"].lower()
             for key, groups in index.items():
-                if key in finished or not any(t.lower() == low for g in groups.values() for t in g):
+                if key in finished or not any(tag.lower() == low for group in groups.values() for tag in group):
                     continue
-                m = meta.get(key)
-                lib = keys.get(key)
-                if not lib and not m:
+                book_meta, owned = meta.get(key), keys.get(key)
+                if not owned and not book_meta:
                     continue
-                items.append({"reason": "Tagged " + w["value"], "title": lib["title"] if lib else m["title"],
-                              "author": lib["author"] if lib else m["author"],
-                              "in_library": bool(lib), "id": lib["id"] if lib else None})
-        elif can_request(who) and h.config.discover_configured:
-            owned = [db.slug(b["title"]) for b in h.library.books() if w["value"].lower() in b["author"].lower()]
+                known = owned or book_meta
+                items.append({"reason": "Tagged " + watched["value"], "title": known["title"], "author": known["author"],
+                              "in_library": bool(owned), "id": owned["id"] if owned else None})
+        elif watched["kind"] == "author" and can_request(who) and family_hub.config.discover_configured:  # films and shows are not books
+            owned_titles = [db.slug(book["title"]) for book in family_hub.library.books() if watched["value"].lower() in book["author"].lower()]
             try:
-                results = integrations.prowlarr_search(h.config, w["value"], limit=40)
+                results = integrations.prowlarr_search(family_hub.config, watched["value"], limit=40)
             except integrations.IntegrationError:
                 results = []
-            seen = 0
-            for r in results:
-                s = db.slug(r["title"])
-                if any(len(t) > 3 and t in s for t in owned):
-                    continue
-                items.append({"reason": "By " + w["value"], "title": r["title"], "author": w["value"],
-                              "in_library": False, "id": None, "release": r})
-                seen += 1
-                if seen >= 5:
-                    break
+            fresh = [result for result in results
+                     if not any(len(title) > 3 and title in db.slug(result["title"]) for title in owned_titles)]
+            for result in fresh[:5]:  # five per author is plenty, or one prolific author drowns out the rest
+                items.append({"reason": "By " + watched["value"], "title": result["title"], "author": watched["value"],
+                              "in_library": False, "id": None, "release": result})
     data = {"at": time.time(), "items": items[:40]}
     db.kv_set(con, cache_key, json.dumps(data))
     return jsonify(data)
@@ -1715,23 +1892,23 @@ def admin_backup(who):
 @bp.post("/admin/rescan")
 @admin_only
 def admin_rescan(who):
-    h = hub()
-    h.library.refresh()
-    tags_added = h.load_tagpacks()
-    kosync.index_library(h)
-    h.fill_page_counts(limit=500)
-    tidied = h.intake.tidy_inbox()
-    copied = h.import_downloads()
-    h.sort_new_books()
-    return jsonify({"books": len(h.library.books()), "pack_tags": tags_added,
+    family_hub = hub()
+    family_hub.library.refresh()
+    tags_added = family_hub.load_tagpacks()
+    kosync.index_library(family_hub)
+    family_hub.fill_page_counts(limit=500)
+    tidied = family_hub.intake.tidy_inbox()
+    copied = family_hub.import_downloads()
+    family_hub.sort_new_books()
+    return jsonify({"books": len(family_hub.library.books()), "pack_tags": tags_added,
                     "imported": tidied["delivered"] + copied})
 
 
 @bp.get("/admin/copies")
 @admin_only
 def admin_copies(who):
-    h = hub()
-    return jsonify({"sets": h.copy_sets(), "entries": len(h.library.all_books()), "books": len(h.library.books())})
+    family_hub = hub()
+    return jsonify({"sets": family_hub.copy_sets(), "entries": len(family_hub.library.all_books()), "books": len(family_hub.library.books())})
 
 
 @bp.post("/admin/copies")
@@ -1739,20 +1916,20 @@ def admin_copies(who):
 def admin_copies_choose(who):
     """Show library entries that share a name as one book, or keep them apart."""
     data = request.get_json(silent=True) or {}
-    h = hub()
+    family_hub = hub()
     key = data.get("key")
-    if not any(s["key"] == key for s in h.library.sets()):
+    if not any(group["key"] == key for group in family_hub.library.sets()):
         return fail("Those entries are no longer in the library.", 404)
     choice = data.get("choice")
-    h.set_copy_choice(key, choice if choice in (calibre.TOGETHER, calibre.APART) else None)
+    family_hub.set_copy_choice(key, choice if choice in (calibre.TOGETHER, calibre.APART) else None)
     return jsonify({"ok": True})
 
 
 @bp.get("/admin/tags")
 @admin_only
 def admin_tags(who):
-    h = hub()
-    return jsonify(dict(h.machine_tags(), lookups=h.catalogues.progress()))
+    family_hub = hub()
+    return jsonify(dict(family_hub.machine_tags(), lookups=family_hub.catalogues.progress()))
 
 
 @bp.post("/admin/tags/rule")
@@ -1760,6 +1937,7 @@ def admin_tags(who):
 def admin_tag_rule(who):
     """Hide a machine tag everywhere, rename it, or put it back."""
     data = request.get_json(silent=True) or {}
+    # three-way switch: None = put it back, "" = hide it, anything else = rename it to that
     becomes = None if data.get("restore") else ("" if data.get("hide") else data.get("becomes"))
     if becomes is not None and not data.get("hide") and not db.clean_tag(becomes):
         return fail("Type the new name for the tag.")
@@ -1771,15 +1949,15 @@ def admin_tag_rule(who):
 @bp.post("/admin/tags/lookup")
 @admin_only
 def admin_tags_lookup(who):
-    h = hub()
-    if not catalogues.active(h.config):
+    family_hub = hub()
+    if not catalogues.active(family_hub.config):
         return fail("Looking up tags is switched off. Turn it on under Connections first.")
     data = request.get_json(silent=True) or {}
     if data.get("again"):  # forget the books the catalogues did not know, and ask about them again
-        h.con().execute("DELETE FROM tag_lookups WHERE status!='found'")
-        h.con().commit()
-    started = h.catalogues.start(current_app._get_current_object())
-    return jsonify({"started": started, "lookups": h.catalogues.progress()})
+        family_hub.con().execute("DELETE FROM tag_lookups WHERE status!='found'")
+        family_hub.con().commit()
+    started = family_hub.catalogues.start(current_app._get_current_object())
+    return jsonify({"started": started, "lookups": family_hub.catalogues.progress()})
 
 
 @bp.get("/admin/connections")
@@ -1808,19 +1986,21 @@ def admin_services(who):
     """Each program's port (the page builds the link from the address it was opened with) and whether it answers."""
     import requests as http
     from concurrent.futures import ThreadPoolExecutor
-    c = hub().config
-    inside = {"radarr": c.radarr_url, "sonarr": c.sonarr_url, "prowlarr": c.prowlarr_url, "qbittorrent": c.qbit_url,
-              "bazarr": c.bazarr_url, "jellyfin": c.jellyfin_url, "cwa": c.cwa_api_url}
+    config = hub().config
+    inside = {"radarr": config.radarr_url, "sonarr": config.sonarr_url, "prowlarr": config.prowlarr_url, "qbittorrent": config.qbit_url,
+              "bazarr": config.bazarr_url, "jellyfin": config.jellyfin_url, "cwa": config.cwa_api_url}
+    links = {"jellyfin": config.jellyfin_link, "cwa": config.cwa_url}
 
     def check(service):
-        sid, name, what, default = service
+        service_id, name, what, default = service
         try:
-            http.get(inside.get(sid) or default, timeout=2, allow_redirects=False)
+            # ANY answer counts as running, even a 401. we only want to know if something's home
+            http.get(inside.get(service_id) or default, timeout=2, allow_redirects=False)
             running = True
         except http.RequestException:
             running = False
-        link = c.jellyfin_link if sid == "jellyfin" else c.cwa_url if sid == "cwa" else ""
-        return {"id": sid, "name": name, "what": what, "port": c.service_ports[sid], "link": link, "running": running}
+        return {"id": service_id, "name": name, "what": what, "port": config.service_ports[service_id],
+                "link": links.get(service_id, ""), "running": running}
 
     with ThreadPoolExecutor(max_workers=len(SERVICES)) as pool:
         return jsonify({"services": list(pool.map(check, SERVICES))})
@@ -1857,18 +2037,18 @@ def admin_connections_save(who):
 @bp.get("/admin/look")
 @admin_only
 def admin_look(who):
-    h = hub()
-    return jsonify({"designs": looks.catalogue(), "look": looks.current(h.con())})
+    family_hub = hub()
+    return jsonify({"designs": looks.catalogue(), "look": looks.current(family_hub.con())})
 
 
 @bp.post("/admin/look")
 @admin_only
 def admin_look_save(who):
-    h = hub()
-    problem = looks.save(h.con(), request.get_json(silent=True) or {})
+    family_hub = hub()
+    problem = looks.save(family_hub.con(), request.get_json(silent=True) or {})
     if problem:
         return fail(problem)
-    return jsonify({"look": looks.current(h.con())})
+    return jsonify({"look": looks.current(family_hub.con())})
 
 
 @bp.post("/admin/connections/test")
@@ -1885,9 +2065,9 @@ def admin_connections_test(who):
 @admin_only
 def admin_attention_retry(who):
     """Put everything that was set aside back through the inbox."""
-    h = hub()
-    moved = h.intake.retry_attention()
-    result = h.intake.tidy_inbox(min_age=0)
+    family_hub = hub()
+    moved = family_hub.intake.retry_attention()
+    result = family_hub.intake.tidy_inbox(min_age=0)
     return jsonify({"retried": moved, "delivered": len(result["delivered"]), "attention": result["attention"]})
 
 
@@ -1897,10 +2077,10 @@ def admin_attention_retry(who):
 @bp.get("/series")
 @series_only
 def series_shelf(who):
-    h = hub()
-    if not h.series.configured:
+    family_hub = hub()
+    if not family_hub.series.configured:
         return jsonify({"configured": False, "series": [], "queued": 0})
-    return jsonify(dict(h.series.shelf(), configured=True))
+    return jsonify(dict(family_hub.series.shelf(), configured=True))
 
 
 @bp.get("/series/search")
@@ -1908,10 +2088,10 @@ def series_shelf(who):
 def series_search(who):
     if not can_follow(who):
         return fail("This profile can read series but not follow new ones.", 403)
-    q = (request.args.get("q") or "").strip()
-    if len(q) < 2:
+    query = (request.args.get("q") or "").strip()
+    if len(query) < 2:
         return fail("Type at least two letters.")
-    return jsonify(hub().series.search(q))
+    return jsonify(hub().series.search(query))
 
 
 @bp.post("/series/check")
@@ -1925,7 +2105,7 @@ def series_check(who):
 @series_only
 def series_mark(who):
     data = request.get_json(silent=True) or {}
-    ids = [i for i in data.get("ids") or [] if isinstance(i, int)]
+    ids = [chapter_id for chapter_id in data.get("ids") or [] if isinstance(chapter_id, int)]
     if not ids:
         return fail("No chapters given.")
     hub().series.mark(ids, data.get("read", True))
@@ -1937,7 +2117,9 @@ def series_mark(who):
 def series_detail(who, series_id):
     from . import chapterfile
     info = hub().series.detail(series_id, refresh=request.args.get("refresh") == "1")
-    return jsonify(dict(info, mine=series_id in series.my_books(hub(), who["id"]), files=chapterfile.files(hub(), info)))
+    detail = dict(info, mine=series_id in series.my_books(hub(), who["id"]), files=chapterfile.files(hub(), info))
+    detail.pop("every_chapter", None)  # the twice-listed copies are not shown
+    return jsonify(detail)
 
 
 @bp.get("/series/<int:series_id>/file/<int:part>")
@@ -1946,7 +2128,7 @@ def series_part_file(who, series_id, part):
     """One part of a series by chapter as a comic file, every chapter in it, once the server has made it."""
     from . import chapterfile
     from .devices import safe_filename
-    path, title = chapterfile.ready_file(hub(), hub().series.detail(series_id), part)
+    path, title = chapterfile.ready_file(hub(), hub().series.detail(series_id), part, older=True)
     if not path:
         return fail("That part is still being put together on the server. Try again in a few minutes.", 404)
     return send_file(path, as_attachment=True, download_name=safe_filename(title, "", "cbz"), mimetype="application/vnd.comicbook+zip")
@@ -1955,12 +2137,12 @@ def series_part_file(who, series_id, part):
 @bp.post("/series/<int:series_id>/follow")
 @series_only
 def series_follow(who, series_id):
-    h = hub()
+    family_hub = hub()
     if not can_follow(who):
         return fail("This profile can read series but not follow or stop following them.", 403)
     if (request.get_json(silent=True) or {}).get("on", True):
-        return jsonify({"ok": True, "queued": h.series.follow(series_id)})
-    h.series.unfollow(series_id)
+        return jsonify({"ok": True, "queued": family_hub.series.follow(series_id)})
+    family_hub.series.unfollow(series_id)
     return jsonify({"ok": True, "queued": 0})
 
 
@@ -2031,6 +2213,7 @@ def series_file(who, chapter_id):
     name = "chapter-%d.cbz" % chapter_id
     given = upstream.headers.get("Content-Disposition") or ""
     if "filename=" in given:
+        # ascii only: a fancy unicode filename in a header is a recipe for a 500 somewhere down the line
         name = given.split("filename=")[-1].strip('"; ').encode("ascii", "ignore").decode() or name
     return _passed_on(upstream, name)
 
@@ -2039,12 +2222,12 @@ def series_file(who, chapter_id):
 @admin_only
 def admin_second_copy(who):
     """Start the copy to the second disk now."""
-    h = hub()
-    if secondcopy.folder(h.config) is None:
+    family_hub = hub()
+    if secondcopy.folder(family_hub.config) is None:
         return fail("No second disk is set up. Guide 6 has the steps.")
-    if secondcopy.status(h)["running"]:
+    if secondcopy.status(family_hub)["running"]:
         return fail("A copy is already running.", 409)
-    secondcopy.start(h, current_app._get_current_object())
+    secondcopy.start(family_hub, current_app._get_current_object())
     return jsonify({"ok": True})
 
 
@@ -2054,11 +2237,11 @@ def admin_second_copy(who):
 @bp.get("/admin/duplicates")
 @admin_only
 def admin_duplicates(who):
-    h = hub()
-    plans = h.duplicates.plans()
+    family_hub = hub()
+    plans = family_hub.duplicates.plans()
     return jsonify({
-        "blocked": h.duplicates.ready(), "job": h.duplicates.job, "sets": plans, "log": h.duplicates.log(),
-        "counts": {cls: sum(1 for p in plans if p["cls"] == cls) for cls in duplicates.AUTOMATIC + (duplicates.REVIEW,)},
+        "blocked": family_hub.duplicates.ready(), "job": family_hub.duplicates.job, "sets": plans, "log": family_hub.duplicates.log(),
+        "counts": {cls: sum(1 for plan in plans if plan["cls"] == cls) for cls in duplicates.AUTOMATIC + (duplicates.REVIEW,)},
         "set_aside": "needs-attention/" + duplicates.SET_ASIDE,
     })
 
@@ -2067,28 +2250,28 @@ def admin_duplicates(who):
 @admin_only
 def admin_duplicates_apply(who):
     """Carry out one set, every set of one sort, or a person's choice on a set that needed review."""
-    h = hub()
-    blocked = h.duplicates.ready()
+    family_hub = hub()
+    blocked = family_hub.duplicates.ready()
     if blocked:
         return fail(blocked)
     data = request.get_json(silent=True) or {}
-    plans = h.duplicates.plans()
+    plans = family_hub.duplicates.plans()
     keep = data.get("keep")
     if data.get("key"):
-        wanted = [p for p in plans if p["key"] == data["key"]]
+        wanted = [plan for plan in plans if plan["key"] == data["key"]]
         if not wanted:
             return fail("Those entries are no longer in the library as a set.", 404)
         if keep is None and wanted[0]["cls"] not in duplicates.AUTOMATIC:
             return fail("This set needs a person to choose which entry to keep.")
-        if keep is not None and keep not in [b["id"] for b in wanted[0]["books"]]:
+        if keep is not None and keep not in [book["id"] for book in wanted[0]["books"]]:
             return fail("That entry is not part of this set.")
     elif data.get("cls") in duplicates.AUTOMATIC:
-        wanted, keep = [p for p in plans if p["cls"] == data["cls"]], None
+        wanted, keep = [plan for plan in plans if plan["cls"] == data["cls"]], None
     else:
         return fail("Say which set, or which sort of set.")
     if not wanted:
         return fail("There is nothing of that sort to do.")
-    if not h.duplicates.start(current_app._get_current_object(), wanted, keep):
+    if not family_hub.duplicates.start(current_app._get_current_object(), wanted, keep):
         return fail("A batch is already running. Wait for it to finish.", 409)
     return jsonify({"ok": True, "started": len(wanted)})
 
@@ -2099,8 +2282,8 @@ def admin_duplicates_apply(who):
 @bp.get("/admin/book-details")
 @admin_only
 def admin_book_details(who):
-    h = hub()
-    return jsonify({"blocked": h.bookfix.ready(), "books": h.bookfix.needing()})
+    family_hub = hub()
+    return jsonify({"blocked": family_hub.bookfix.ready(), "books": family_hub.bookfix.needing()})
 
 
 @bp.get("/admin/book-details/<int:book_id>")
@@ -2117,18 +2300,18 @@ def admin_book_details_find(who, book_id):
 def admin_book_details_apply(who, book_id):
     """Give a book its real details, or with {"leave": true} say it is right as it is."""
     data = request.get_json(silent=True) or {}
-    h = hub()
+    family_hub = hub()
     if data.get("leave") is True:
-        h.bookfix.leave(book_id)
+        family_hub.bookfix.leave(book_id)
         return jsonify({"ok": True})
     authors = data.get("authors")
     if isinstance(authors, str):
-        authors = [a for a in re.split(r"\s*(?:&|;)\s*", authors) if a]
-    texts = [data.get(k, "") for k in ("title", "synopsis", "publisher", "cover")]
-    if not isinstance(authors, list) or not all(isinstance(a, str) for a in authors) or not all(isinstance(t, str) for t in texts):
+        authors = [name for name in re.split(r"\s*(?:&|;)\s*", authors) if name]
+    texts = [data.get(field, "") for field in ("title", "synopsis", "publisher", "cover")]
+    if not isinstance(authors, list) or not all(isinstance(name, str) for name in authors) or not all(isinstance(text, str) for text in texts):
         return fail("Give a title and authors as text.")
     try:
-        done = h.bookfix.apply(book_id, data.get("title", ""), authors, data.get("synopsis", ""), data.get("publisher", ""),
+        done = family_hub.bookfix.apply(book_id, data.get("title", ""), authors, data.get("synopsis", ""), data.get("publisher", ""),
                                data.get("cover", ""), who["id"])
     except bookfix.FixError as exc:
         return fail(str(exc))
@@ -2182,13 +2365,13 @@ def media_tracking(who):
     items=film:3,show:1 and book=<release name> (at most six of each). A removed film or show comes back as gone."""
     wanted = []
     for part in (request.args.get("items") or "").split(",")[:6]:
-        kind, _, num = part.partition(":")
-        if _kind(kind) and num.isdigit():
-            wanted.append((kind, int(num)))
-    books = [b for b in request.args.getlist("book") if b.strip()][:6]
+        kind, _, number = part.partition(":")
+        if _kind(kind) and number.isdigit():
+            wanted.append((kind, int(number)))
+    books = [title for title in request.args.getlist("book") if title.strip()][:6]
 
     def build():
-        out = []
+        items = []
         if books:
             # qBittorrent being away (the VPN restarting, say) must not stop the films and shows from updating.
             try:
@@ -2196,22 +2379,22 @@ def media_tracking(who):
             except media.MediaError:
                 torrents = None
             for title in books:
-                b = hub().media.book_status(title, torrents or [])
-                if torrents is None and not b["finished"]:
-                    b["now"] = dict(b["now"], text="qBittorrent cannot be reached at the moment", state="bad")
-                out.append(dict(b, kind="book", id=title))
+                status = hub().media.book_status(title, torrents or [])
+                if torrents is None and not status["finished"]:
+                    status["now"] = dict(status["now"], text="qBittorrent cannot be reached at the moment", state="bad")
+                items.append(dict(status, kind="book", id=title))
         for kind, arr_id in wanted:
             try:
-                a = hub().media.activity(kind, arr_id)
-                out.append({"kind": kind, "id": arr_id, "title": a["title"], "now": a["now"], "finished": a["finished"],
-                            "downloaded": a.get("downloaded", False), "filing": a.get("filing")})
+                activity = hub().media.activity(kind, arr_id)
+                items.append({"kind": kind, "id": arr_id, "title": activity["title"], "now": activity["now"], "finished": activity["finished"],
+                              "downloaded": activity.get("downloaded", False), "filing": activity.get("filing")})
             except media.MediaError as exc:
                 if str(exc).startswith("404"):
-                    out.append({"kind": kind, "id": arr_id, "gone": True})
+                    items.append({"kind": kind, "id": arr_id, "gone": True})
                 else:  # Radarr or Sonarr not answering: say so, and keep following it
-                    out.append({"kind": kind, "id": arr_id, "title": "", "finished": False, "unreachable": True,
-                                "now": {"text": str(exc), "state": "bad", "progress": 0}})
-        return jsonify({"items": out})
+                    items.append({"kind": kind, "id": arr_id, "title": "", "finished": False, "unreachable": True,
+                                  "now": {"text": str(exc), "state": "bad", "progress": 0}})
+        return jsonify({"items": items})
     return media_call(build)
 
 
@@ -2220,10 +2403,10 @@ def media_tracking(who):
 def media_search(who):
     if not can_request_media(who):
         return fail("This profile cannot request films and TV. An admin can switch that on.", 403)
-    kind, q = _kind(request.args.get("kind")), (request.args.get("q") or "").strip()
-    if not kind or len(q) < 2:
+    kind, query = _kind(request.args.get("kind")), (request.args.get("q") or "").strip()
+    if not kind or len(query) < 2:
         return fail("Type at least two letters.")
-    return media_call(lambda: jsonify({"results": hub().media.lookup(kind, q)}))
+    return media_call(lambda: jsonify({"results": hub().media.lookup(kind, query)}))
 
 
 @bp.post("/media/request")
@@ -2237,7 +2420,7 @@ def media_request(who):
         return fail("Choose a film or show first.")
     seasons = data.get("seasons") if data.get("seasons") in ("all", "latest", "pick") else "all"
     try:
-        external_id, picked = int(data["id"]), [int(n) for n in (data.get("picked") or [])]
+        external_id, picked = int(data["id"]), [int(season) for season in (data.get("picked") or [])]
     except (TypeError, ValueError):
         return fail("Choose a film or show first.")
     return media_call(lambda: jsonify(hub().media.request(kind, external_id, who, seasons, picked)))
@@ -2246,11 +2429,11 @@ def media_request(who):
 @bp.get("/media/queue")
 @profile_only
 def media_queue(who):
-    h = hub()
+    family_hub = hub()
 
     def build():
-        q = h.media.queue()
-        return jsonify(dict(q, history=h.media.history(), vpn=h.media.vpn()))
+        queue = family_hub.media.queue()
+        return jsonify(dict(queue, history=family_hub.media.history(), vpn=family_hub.media.vpn()))
     return media_call(build)
 
 
@@ -2267,6 +2450,74 @@ def media_torrents(who):
 def media_torrent_delete(who, torrent_hash):
     """Delete a download, its files, and the film or show it is for, from the whole hub."""
     return media_call(lambda: jsonify({"message": hub().media.delete_download(torrent_hash)}))
+
+
+@bp.post("/media/torrents/forget")
+@admin_only
+def media_torrents_forget(who):
+    """Take downloads whose files are missing off qBittorrent's list. Their files, wherever they are, are not touched."""
+    data = request.get_json(silent=True) or {}
+
+    def go():
+        missing = {torrent["hash"].lower() for torrent in hub().media.torrents() if torrent["missing"]}
+        # only ones that really ARE missing: this endpoint can't be used to quietly drop healthy downloads
+        asked = [torrent_hash for torrent_hash in (data.get("hashes") or [])
+                 if isinstance(torrent_hash, str) and torrent_hash.lower() in missing]
+        forgotten = hub().media.forget(asked)
+        return jsonify({"forgotten": forgotten,
+                        "message": "%d download%s taken off the list. No files were touched." % (forgotten, "" if forgotten == 1 else "s")})
+    return media_call(go)
+
+
+def _book_download(who, torrent_hash):
+    """The unfinished book download with this hash, or an error to send back."""
+    found = next((torrent for torrent in hub().media.torrents() if torrent["hash"].lower() == torrent_hash.lower()), None)
+    if not found or found["type"] != "Book" or found["done"]:
+        return None, fail("That is not a book still downloading.", 404)
+    if not can_request(who):
+        return None, fail("This profile cannot download new books.", 403)
+    return found, None
+
+
+@bp.get("/media/torrents/<torrent_hash>/others")
+@profile_only
+def media_torrent_others(who, torrent_hash):
+    """Other copies of a book download's book that someone is sharing, the best first."""
+    from . import bookswap
+
+    def go():
+        found, err = _book_download(who, torrent_hash)
+        if err:
+            return err
+        try:
+            picks = bookswap.others(hub().config, found["name"])
+        except integrations.IntegrationError as exc:
+            return fail(str(exc), 502)
+        return jsonify({"others": picks[:8], "looked_for": " ".join(bookswap.words(found["name"])[:8])})
+    return media_call(go)
+
+
+@bp.post("/media/torrents/<torrent_hash>/swap")
+@profile_only
+def media_torrent_swap(who, torrent_hash):
+    """Download the chosen copy instead, and delete the stuck one with its unfinished files."""
+    from . import bookswap
+    data = request.get_json(silent=True) or {}
+    if not data.get("guid") or data.get("indexer_id") is None:
+        return fail("Pick a copy first.")
+
+    def go():
+        found, err = _book_download(who, torrent_hash)
+        if err:
+            return err
+        pick = {"guid": data["guid"], "indexer_id": data["indexer_id"], "title": str(data.get("title") or "")[:300],
+                "indexer": str(data.get("indexer") or ""), "seeders": data.get("seeders")}
+        try:
+            bookswap.swap(hub(), integrations.qbit_session(hub().config), found["hash"], found["name"], pick)
+        except integrations.IntegrationError as exc:
+            return fail(str(exc), 502)
+        return jsonify({"ok": True})
+    return media_call(go)
 
 
 @bp.get("/media/speed")
@@ -2292,7 +2543,7 @@ def media_torrent_action(who, torrent_hash, action):
 
     def go():
         # Books need "Can find new books"; films and TV need "Can request films and TV".
-        found = next((t for t in hub().media.torrents() if t["hash"].lower() == torrent_hash.lower()), None)
+        found = next((torrent for torrent in hub().media.torrents() if torrent["hash"].lower() == torrent_hash.lower()), None)
         if not found:
             return fail("That download is not in qBittorrent any more.", 404)
         if not (can_request(who) if found["type"] == "Book" else can_request_media(who)):
@@ -2315,11 +2566,11 @@ def media_watch(who, kind, arr_id):
 @profile_only
 def search_progress(who):
     """How many torrent sites have answered a search that is still running. q=the search, ago=seconds since it began."""
-    q = (request.args.get("q") or "").strip()
+    query = (request.args.get("q") or "").strip()
     ago = request.args.get("ago", default=0, type=float)
-    if not q:
+    if not query:
         return fail("Say what is being searched for.")
-    return media_call(lambda: jsonify(hub().media.search_progress(q, min(ago, 600))))
+    return media_call(lambda: jsonify(hub().media.search_progress(query, min(ago, 600))))
 
 
 @bp.get("/media/latest")
@@ -2460,22 +2711,24 @@ def media_status(who):
 @admin_only
 def media_connect(who):
     steps = hub().media.connect_everything()
-    return jsonify({"steps": [{"step": a, "ok": b, "message": c} for a, b, c in steps]})
+    return jsonify({"steps": [{"step": step, "ok": ok, "message": message} for step, ok, message in steps]})
 
 
 POSTER_HOSTS = ("image.tmdb.org", "artworks.thetvdb.com", "www.thetvdb.com", "thetvdb.com", "assets.fanart.tv")
 
 
 def _image(fetch):
+    """Pass a picture from another server through to the browser, but only if it really is a (smallish) picture."""
     try:
-        r = fetch()
+        reply = fetch()
     except requests.RequestException:
         return fail("No picture.", 404)
-    if r.status_code != 200 or _safe_type(r.headers.get("Content-Type")) == "application/octet-stream":
+    # _safe_type says octet-stream for anything that isn't a plain image. no sneaky HTML or SVG gets through
+    if reply.status_code != 200 or _safe_type(reply.headers.get("Content-Type")) == "application/octet-stream":
         return fail("No picture.", 404)
-    if len(r.content) > 8 * 1024 * 1024:
+    if len(reply.content) > 8 * 1024 * 1024:
         return fail("No picture.", 404)
-    return send_file(io.BytesIO(r.content), mimetype=_safe_type(r.headers.get("Content-Type")), max_age=86400)
+    return send_file(io.BytesIO(reply.content), mimetype=_safe_type(reply.headers.get("Content-Type")), max_age=86400)
 
 
 @bp.get("/media/poster/<kind>/<int:arr_id>")
@@ -2500,14 +2753,15 @@ def media_poster_remote(who):
     parts = urlparse(url)
     if parts.scheme not in ("http", "https") or (parts.hostname or "") not in POSTER_HOSTS:
         return fail("No picture.", 404)
+    # no redirects: otherwise an allowed host could bounce us anywhere on the internet (or the home network!)
     return _image(lambda: requests.get(url, timeout=15, allow_redirects=False))
 
 
 @bp.get("/media/jellyfin-image/<item_id>")
 @profile_only
 def media_jellyfin_image(who, item_id):
-    c = hub().config
-    if not (c.jellyfin_url and c.jellyfin_api_key) or not item_id.isalnum():
+    config = hub().config
+    if not (config.jellyfin_url and config.jellyfin_api_key) or not item_id.isalnum():
         return fail("No picture.", 404)
-    return _image(lambda: requests.get("%s/Items/%s/Images/Primary" % (c.jellyfin_url, item_id),
-                                       params={"maxHeight": 450}, headers=media.jellyfin_auth(c.jellyfin_api_key), timeout=15))
+    return _image(lambda: requests.get("%s/Items/%s/Images/Primary" % (config.jellyfin_url, item_id),
+                                       params={"maxHeight": 450}, headers=media.jellyfin_auth(config.jellyfin_api_key), timeout=15))

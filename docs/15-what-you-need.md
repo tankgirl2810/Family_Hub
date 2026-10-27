@@ -8,9 +8,10 @@ address, key and password goes. There are two places to put things:
   before anything starts, so anything a container needs to *start* lives
   here. After changing it run `docker compose ... up -d` again (the same
   command as in step 4 below).
-- **Admin → Hub → Connections** (front end), signed in as an admin. Each
-  box has a **Test connection** button. A value saved here wins over the `.env` file
-  and needs no restart.
+- **Admin → Hub → Connections** (front end), signed in as an admin. Press
+  a service's name to open its box; each has a **Test connection** button.
+  Pressing **Save** writes the value into the same `.env` file and it takes
+  effect straight away, with no restart.
 
 Most API keys you never type at all: **Connect everything** (Admin → Hub →
 Films and TV) reads them from each program's own settings.
@@ -152,15 +153,19 @@ Guide 5 covers using Prowlarr for books.
 
 The first time you open each one's page (ports 7878, 8989, 6767) it may ask
 you to make a sign-in for that page; choose **Forms** and any user name and
-password. Nothing else to do by hand: step 8 sets them up.
+password. Or save one user name and password under **Admin → Hub →
+Connections → Sign-in for the programs' own pages**, and step 8 sets it on
+Radarr, Sonarr, Prowlarr, Bazarr and qBittorrent for you. Nothing else to do
+by hand: step 8 sets them up.
 
 ### 8. Connect everything
 
 1. In Family Hub, sign in as an admin and open **Admin → Hub → Films and
    TV**.
 2. Press **Connect everything**. Every step is listed with what happened:
-   API keys, folders, the quality profile, qBittorrent, Prowlarr,
-   subtitles, Jellyfin's libraries and the VPN.
+   API keys, the programs' sign-ins, folders, the quality profile,
+   qBittorrent, Prowlarr (for films, TV and books), subtitles, Jellyfin's
+   libraries and the VPN.
 3. A step marked as failed says why in words. Fix that and press the button
    again: whatever is already in place is left alone.
 4. "VPN for torrents" on the same page should say **VPN connected · … ·
@@ -201,7 +206,7 @@ person who may ask for films and shows. Admins always can.
 
 ## Extras you may already have set up
 
-These are the book side, each in its own guide:
+These are the book side and the look of Home, each in its own guide:
 
 | What | Where it goes | Guide |
 |---|---|---|
@@ -210,6 +215,7 @@ These are the book side, each in its own guide:
 | Google Books, Comic Vine, Hardcover keys (tags and ratings) | Connections → Community tags from book catalogues | 10 |
 | Series server sign-in (manga) | Connections → Series by chapter | 13 |
 | A folder on a second disk (nightly copy) | `.env`: `BACKUP_PATH`, then Connections → Nightly copy | 6 |
+| Home town and your own visuals repository | Connections → Visuals on Home | 16 |
 
 ## Checklist
 

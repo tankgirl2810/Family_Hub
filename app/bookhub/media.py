@@ -115,13 +115,13 @@ def _quality_from_name(name):
     return ""
 
 
-def _seconds_between(a, b):
+def _seconds_between(first, second):
     from datetime import datetime
     try:
-        parse = lambda t: datetime.fromisoformat(t.replace("Z", "+00:00")[:25])
-        return abs((parse(b) - parse(a)).total_seconds())
+        parse = lambda stamp: datetime.fromisoformat(stamp.replace("Z", "+00:00")[:25])  # noqa: E731
+        return abs((parse(second) - parse(first)).total_seconds())
     except ValueError:
-        return 1e9
+        return 1e9  # can't read the dates? call them "ages apart"
 
 
 def jellyfin_auth(key):
@@ -131,24 +131,25 @@ def jellyfin_auth(key):
 
 def _call(method, url, headers, **kw):
     try:
-        r = requests.request(method, url, headers=headers, timeout=kw.pop("timeout", TIMEOUT), **kw)
-        if r.status_code >= 400:
+        reply = requests.request(method, url, headers=headers, timeout=kw.pop("timeout", TIMEOUT), **kw)
+        if reply.status_code >= 400:
             detail = ""
             try:
-                body = r.json()
+                # the *arrs complain as [{"errorMessage": ...}], everyone else as {"message": ...}. dig out whichever
+                body = reply.json()
                 if isinstance(body, list) and body and isinstance(body[0], dict):
                     detail = body[0].get("errorMessage") or ""
                 elif isinstance(body, dict):
                     detail = body.get("message") or body.get("error") or ""
             except ValueError:
                 pass
-            raise MediaError("%s %s" % (r.status_code, detail or r.reason))
-        if not r.content:
+            raise MediaError("%s %s" % (reply.status_code, detail or reply.reason))
+        if not reply.content:
             return None
         try:
-            return r.json()
+            return reply.json()
         except ValueError:
-            return r.text
+            return reply.text
     except requests.RequestException as exc:
         raise MediaError(_explain(exc))
 
@@ -161,14 +162,22 @@ def key_from_files(stack_dir, service):
     try:
         if service == "bazarr":
             text = (stack_dir / "bazarr-config" / "config" / "config.yaml").read_text(encoding="utf-8")
-            m = re.search(r"^auth:\s*$(.*?)(?=^\S)", text + "\nend:", re.M | re.S)
-            m = re.search(r"apikey:\s*'?([0-9a-fA-F]{20,})", m.group(1) if m else text)
+            # poor man's YAML: grab the "auth:" section (up to the next unindented line), then the apikey inside it
+            section = re.search(r"^auth:\s*$(.*?)(?=^\S)", text + "\nend:", re.M | re.S)
+            found = re.search(r"apikey:\s*'?([0-9a-fA-F]{20,})", section.group(1) if section else text)
         else:
             text = (stack_dir / (service + "-config") / "config.xml").read_text(encoding="utf-8")
-            m = re.search(r"<ApiKey>([^<]+)</ApiKey>", text)
-        return m.group(1).strip() if m else ""
+            found = re.search(r"<ApiKey>([^<]+)</ApiKey>", text)
+        return found.group(1).strip() if found else ""
     except OSError:
         return ""
+
+
+def _fill(schema, values, only=None):
+    """Set the values of a Radarr/Sonarr/Prowlarr settings form (its "fields" list), the ones we know, or just ``only``."""
+    for field in schema.get("fields") or []:
+        if field.get("name") in values and (only is None or field.get("name") in only):
+            field["value"] = values[field["name"]]
 
 
 class Arr:
@@ -241,7 +250,7 @@ class Media:
         except MediaError as exc:
             return {"configured": True, "ok": False, "message": "VPN not connected · %s" % exc}
         port = self.forwarded_port()
-        where = ", ".join(x for x in (ip.get("city"), ip.get("country")) if x)
+        where = ", ".join(place for place in (ip.get("city"), ip.get("country")) if place)
         if self.config.qbit_url and not self._qbit_answers():
             # qBittorrent shares the VPN container's network. When that container restarts, qBittorrent is left
             # cut off (safe: it cannot leak) until it is restarted too. Only Docker can do that.
@@ -270,40 +279,34 @@ class Media:
                 return int(port)
         return 0
 
+    @staticmethod
+    def _check(label, configured, version):
+        """One service's line on the Admin page: asks version() for its version when it is set up."""
+        found = {"label": label, "configured": configured, "ok": False}
+        if configured:
+            try:
+                found["version"] = version()
+                found["ok"] = True
+            except MediaError as exc:
+                found["error"] = str(exc)
+        return found
+
     def status(self):
-        out = {}
+        services = {}
         for kind, label in (("film", "Films (Radarr)"), ("show", "TV shows (Sonarr)")):
-            item = {"label": label, "configured": self.configured(kind), "ok": False}
-            if item["configured"]:
-                try:
-                    item["version"] = self.arr(kind).get("system/status").get("version")
-                    item["ok"] = True
-                except MediaError as exc:
-                    item["error"] = str(exc)
-            out[KINDS[kind]] = item
-        sub = {"label": "Subtitles (Bazarr)", "configured": bool(self.config.bazarr_url), "ok": False}
-        if sub["configured"]:
-            try:
-                sub["version"] = ((self.bazarr("GET", "system/status") or {}).get("data") or {}).get("bazarr_version")
-                sub["ok"] = True
-            except MediaError as exc:
-                sub["error"] = str(exc)
-        out["bazarr"] = sub
-        jf = {"label": "Watching (Jellyfin)", "configured": bool(self.config.jellyfin_url), "ok": False}
-        if jf["configured"]:
-            try:
-                jf["version"] = (self.jellyfin("GET", "/System/Info/Public") or {}).get("Version")
-                jf["ok"] = True
-            except MediaError as exc:
-                jf["error"] = str(exc)
-        out["jellyfin"] = jf
-        out["vpn"] = self.vpn()
-        return out
+            services[KINDS[kind]] = self._check(label, self.configured(kind),
+                                                lambda kind=kind: self.arr(kind).get("system/status").get("version"))
+        services["bazarr"] = self._check("Subtitles (Bazarr)", bool(self.config.bazarr_url), lambda: (
+            (self.bazarr("GET", "system/status") or {}).get("data") or {}).get("bazarr_version"))
+        services["jellyfin"] = self._check("Watching (Jellyfin)", bool(self.config.jellyfin_url), lambda: (
+            self.jellyfin("GET", "/System/Info/Public") or {}).get("Version"))
+        services["vpn"] = self.vpn()
+        return services
 
     # ------------------------------------------------------------ library
 
     def poster(self, item, kind):
-        img = next((i for i in item.get("images") or [] if i.get("coverType") == "poster"), None)
+        img = next((image for image in item.get("images") or [] if image.get("coverType") == "poster"), None)
         if item.get("id") and img:
             return "/api/media/poster/%s/%s" % (kind, item["id"])
         if img and img.get("remoteUrl"):
@@ -312,7 +315,7 @@ class Media:
 
     def summary(self, item, kind, requested=None, coming=None):
         stats = item.get("statistics") or {}
-        out = {
+        summary = {
             "kind": kind, "id": item.get("id"), "title": item.get("title") or "", "year": item.get("year"),
             "overview": item.get("overview") or "", "runtime": item.get("runtime"),
             "tmdb": item.get("tmdbId"), "tvdb": item.get("tvdbId"), "poster": self.poster(item, kind),
@@ -320,23 +323,24 @@ class Media:
             "genres": (item.get("genres") or [])[:3], "network": item.get("network") or item.get("studio") or "",
             "requested_by": (requested or {}).get(item.get("id")),
         }
-        d = (coming or {}).get(item.get("id"))
-        out["downloading"] = {"progress": d["progress"], "episodes": d["episodes"], "stuck": d.get("stuck", False)} if d else None
+        incoming = (coming or {}).get(item.get("id"))
+        summary["downloading"] = ({"progress": incoming["progress"], "episodes": incoming["episodes"], "stuck": incoming.get("stuck", False)}
+                                  if incoming else None)
         if kind == "film":
-            out["downloaded"] = bool(item.get("hasFile"))
-            out["size"] = item.get("sizeOnDisk") or (item.get("movieFile") or {}).get("size") or 0
-            out["quality"] = (((item.get("movieFile") or {}).get("quality") or {}).get("quality") or {}).get("name", "")
+            summary["downloaded"] = bool(item.get("hasFile"))
+            summary["size"] = item.get("sizeOnDisk") or (item.get("movieFile") or {}).get("size") or 0
+            summary["quality"] = (((item.get("movieFile") or {}).get("quality") or {}).get("quality") or {}).get("name", "")
         else:
             have, want = stats.get("episodeFileCount", 0), stats.get("episodeCount", 0)
-            out["downloaded"] = bool(want) and have >= want
-            out["episodes"] = {"have": have, "want": want, "total": stats.get("totalEpisodeCount", 0)}
-            out["size"] = stats.get("sizeOnDisk", 0)
-            out["seasons"] = [{"number": s["seasonNumber"], "monitored": s.get("monitored", False),
-                               "have": (s.get("statistics") or {}).get("episodeFileCount", 0),
-                               "want": (s.get("statistics") or {}).get("episodeCount", 0)}
-                              for s in item.get("seasons") or [] if s.get("seasonNumber", 0) > 0]
-            out["ended"] = item.get("status") == "ended"
-        return out
+            summary["downloaded"] = bool(want) and have >= want
+            summary["episodes"] = {"have": have, "want": want, "total": stats.get("totalEpisodeCount", 0)}
+            summary["size"] = stats.get("sizeOnDisk", 0)
+            summary["seasons"] = [{"number": season["seasonNumber"], "monitored": season.get("monitored", False),
+                                   "have": (season.get("statistics") or {}).get("episodeFileCount", 0),
+                                   "want": (season.get("statistics") or {}).get("episodeCount", 0)}
+                                  for season in item.get("seasons") or [] if season.get("seasonNumber", 0) > 0]  # 0 = specials
+            summary["ended"] = item.get("status") == "ended"
+        return summary
 
     def requested_by(self, kind):
         rows = self.hub.con().execute(
@@ -350,32 +354,32 @@ class Media:
             records = (self.arr(kind).get("queue", pageSize=500) or {}).get("records", [])
         except MediaError:
             return {}
-        out = {}
-        for r in records:
-            owner = r.get("movieId") if kind == "film" else r.get("seriesId")
+        incoming = {}
+        for record in records:
+            owner = record.get("movieId") if kind == "film" else record.get("seriesId")
             if owner is None:
                 continue
-            d = out.setdefault(owner, {"size": 0, "left": 0, "episodes": 0, "ids": {}, "stuck": False})
-            d["size"] += r.get("size") or 0
-            d["left"] += r.get("sizeleft") or 0
-            d["episodes"] += 1
+            totals = incoming.setdefault(owner, {"size": 0, "left": 0, "episodes": 0, "ids": {}, "stuck": False})
+            totals["size"] += record.get("size") or 0
+            totals["left"] += record.get("sizeleft") or 0
+            totals["episodes"] += 1
             # Downloaded, but Radarr or Sonarr report a problem filing it: it will not arrive by itself.
-            if not r.get("sizeleft") and (r.get("trackedDownloadStatus") or "").lower() in ("warning", "error"):
-                d["stuck"] = True
-            if r.get("episodeId"):
-                size = r.get("size") or 0
-                d["ids"][r["episodeId"]] = int(100 * (size - (r.get("sizeleft") or 0)) / size) if size else 0
-        for d in out.values():
-            d["progress"] = int(100 * (d["size"] - d["left"]) / d["size"]) if d["size"] else 0
-        return out
+            if not record.get("sizeleft") and (record.get("trackedDownloadStatus") or "").lower() in ("warning", "error"):
+                totals["stuck"] = True
+            if record.get("episodeId"):
+                size = record.get("size") or 0
+                totals["ids"][record["episodeId"]] = int(100 * (size - (record.get("sizeleft") or 0)) / size) if size else 0
+        for totals in incoming.values():
+            totals["progress"] = int(100 * (totals["size"] - totals["left"]) / totals["size"]) if totals["size"] else 0
+        return incoming
 
     def library(self, kind):
         arr = self.arr(kind)
         items = arr.get("movie" if kind == "film" else "series")
         requested, coming = self.requested_by(kind), self.downloading(kind)
-        out = [self.summary(i, kind, requested, coming) for i in items]
-        out.sort(key=lambda x: x["added"], reverse=True)
-        return out
+        summaries = [self.summary(item, kind, requested, coming) for item in items]
+        summaries.sort(key=lambda summary: summary["added"], reverse=True)
+        return summaries
 
     def item(self, kind, arr_id):
         arr = self.arr(kind)
@@ -389,168 +393,197 @@ class Media:
         film = kind == "film"
         item = arr.get(("movie/%d" if film else "series/%d") % arr_id)
         title = item.get("title") or ""
-        steps = []
+        whose = {"movieId": arr_id} if film else {"seriesId": arr_id}
 
-        con = self.hub.con()
-        row = con.execute("SELECT p.name, r.created FROM media_requests r LEFT JOIN profiles p ON p.id = r.profile_id "
-                          "WHERE r.kind=? AND r.arr_id=? ORDER BY r.id DESC LIMIT 1", (kind, arr_id)).fetchone()
-        since = (row[1] if row else "") or item.get("added") or ""
-        steps.append({"at": since, "state": "done", "stage": 5,
-                      "text": "Requested by %s" % row[0] if row and row[0] else "Added to the list"})
+        since, steps = self._request_step(kind, arr_id, item)
+        steps += self._search_steps(arr, arr_id, film)
+        lines, grabbed_titles = self._indexer_lines(item, title, film, since)
+        steps += [self._indexer_step(line) for line in lines]
+        history = arr.get("history/movie" if film else "history/series", **whose) or []
+        took = [entry for entry in history if entry.get("eventType") == "grabbed"]
+        steps += self._history_steps(history, took, grabbed_titles, film)
+        queue = arr.get("queue/details", **(whose if film else dict(whose, includeEpisode="true"))) or []
+        steps += self._queue_steps(arr, queue, film)
 
-        # The searches Radarr or Sonarr ran for it.
-        for c in arr.get("command") or []:
-            body = c.get("body") or {}
-            mine = arr_id in (body.get("movieIds") or []) if film else body.get("seriesId") == arr_id
-            if not mine or not c.get("name", "").endswith("Search"):
-                continue
-            running = c.get("status") in ("queued", "started")
-            steps.append({"at": c.get("started") or c.get("queued") or "", "state": "active" if running else "done",
-                          "stage": 20 if running else 25,
-                          "text": ("Searching every indexer…" if running else
-                                   "Search finished: %s" % (c.get("message") or "done"))})
-
-        # Each indexer Prowlarr asked on its behalf.
-        grabbed_titles, lines = [], []
-        if self.config.prowlarr_url and self._key("prowlarr"):
-            pkey = {"X-Api-Key": self._key("prowlarr")}
-            try:
-                names = {i["id"]: i["name"] for i in _call("GET", self.config.prowlarr_url + "/api/v1/indexer", pkey) or []}
-                records = (_call("GET", self.config.prowlarr_url + "/api/v1/history", pkey,
-                                 params={"pageSize": 200, "sortKey": "date", "sortDirection": "descending"}) or {}).get("records") or []
-            except MediaError:
-                names, records = {}, []
-            words = _plain(title)
-            ext = str((item.get("tmdbId") if film else item.get("tvdbId")) or "")
-            looked = {}
-            for r in reversed(records):
-                data = r.get("data") or {}
-                if data.get("source") not in ("Radarr", "Sonarr") or (since and r.get("date", "") < since[:19]):
-                    continue
-                query = _plain(data.get("query"))
-                if r.get("eventType") == "indexerQuery" and (words and words in query or ext and ext in json.dumps(data)):
-                    where = names.get(r.get("indexerId"), "an indexer")
-                    n = int(data.get("queryResults") or 0) if r.get("successful") else -1
-                    # An indexer asked for several pages in one search shows as one line, with the results added up.
-                    last = looked.get(where)
-                    if last and _seconds_between(last["seen"], r.get("date", "")) < 15:
-                        last["n"] = max(last["n"], 0) + max(n, 0) if n >= 0 or last["n"] >= 0 else -1
-                        last["seen"] = r.get("date", "")
-                        continue
-                    looked[where] = {"at": r.get("date", ""), "seen": r.get("date", ""), "n": n, "where": where}
-                    lines.append(looked[where])
-                elif r.get("eventType") == "releaseGrabbed" and words and words in _plain(data.get("grabTitle")):
-                    grabbed_titles.append((r.get("date", ""), data.get("grabTitle"), names.get(r.get("indexerId"), "an indexer")))
-            for x in lines:
-                n = x["n"]
-                steps.append({"at": x["at"], "state": "bad" if n < 0 else "done", "stage": 30,
-                              "text": "%s did not answer" % x["where"] if n < 0 else
-                              "Looked at %s · %s" % (x["where"], "%d result%s" % (n, "" if n == 1 else "s") if n else "nothing there")})
-
-        # What it picked, and whether the download client took it.
-        history = arr.get("history/movie" if film else "history/series", **({"movieId": arr_id} if film else {"seriesId": arr_id})) or []
-        took = [h for h in history if h.get("eventType") == "grabbed"]
-        for h in took:
-            q = ((h.get("quality") or {}).get("quality") or {}).get("name", "")
-            steps.append({"at": h.get("date", ""), "state": "done", "stage": 50,
-                          "text": "Best version found: %s%s · from %s" % (h.get("sourceTitle", ""), " (%s)" % q if q else "",
-                                                                          (h.get("data") or {}).get("indexer") or "an indexer")})
-        if grabbed_titles and not took:
-            at, name, where = grabbed_titles[-1]
-            steps.append({"at": at, "state": "bad",
-                          "text": "Picked %s from %s, but qBittorrent refused it. Check its user name and password under "
-                                  "Admin, Hub, Connections, then press Connect everything." % (name, where)})
-        for h in history:
-            if h.get("eventType") in ("downloadFailed", "importFailed"):
-                steps.append({"at": h.get("date", ""), "state": "bad",
-                              "text": "%s: %s" % ("Download failed" if h["eventType"] == "downloadFailed" else "Could not file it",
-                                                  (h.get("data") or {}).get("message") or h.get("sourceTitle", ""))})
-            elif h.get("eventType") in ("downloadFolderImported", "episodeFileImported" if not film else "movieFileImported"):
-                steps.append({"at": h.get("date", ""), "state": "done", "stage": 98, "text": "Filed on the server: %s" % h.get("sourceTitle", "")})
-
-        # Downloading now. Sonarr lists a whole season in one download once per episode: it is one line here.
-        queue = arr.get("queue/details", **({"movieId": arr_id} if film else {"seriesId": arr_id, "includeEpisode": "true"})) or []
-        parked = {h.lower() for h in self.parked()}
-        shared = {}
-        for q in queue:
-            shared.setdefault(q.get("downloadId") or id(q), []).append(q.get("episode") or {})
-        for key, eps in shared.items():
-            q = next(x for x in queue if (x.get("downloadId") or id(x)) == key)
-            size, left = q.get("size") or 0, q.get("sizeleft") or 0
-            pct = int(100 * (size - left) / size) if size else 0
-            status = (q.get("status") or "").lower()
-            which = ""
-            if not film and eps[0].get("seasonNumber") is not None:
-                which = ("S%02dE%02d: " % (eps[0]["seasonNumber"], eps[0].get("episodeNumber") or 0) if len(eps) == 1
-                         else "Season %d: " % eps[0]["seasonNumber"])
-            problem = next((m for s in q.get("statusMessages") or [] for m in s.get("messages") or []), "")
-            if (q.get("downloadId") or "").lower() in parked:
-                steps.append({"at": q.get("added", "") or "", "state": "wait", "progress": pct, "stage": 50,
-                              "text": which + "Waiting for seed · nobody is sharing it right now, so it is paused at the back "
-                                      "of the line and checked every half hour · %d%%" % pct})
-            elif status == "downloading":
-                left_words = q.get("timeleft") if q.get("timeleft") and q.get("timeleft") != "00:00:00" else ""
-                steps.append({"at": q.get("added", "") or "", "state": "active", "progress": pct, "stage": 50 + pct * 45 // 100,
-                              "text": which + "Downloading through the VPN · %d%%%s" % (pct, " · %s left" % left_words if left_words else "")})
-            elif status == "completed" and problem and (q.get("trackedDownloadStatus") or "").lower() in ("warning", "error"):
-                # Downloaded, but it cannot be filed. The usual cause is qBittorrent saving into a folder Radarr and
-                # Sonarr cannot see, which Connect everything puts right.
-                hint = (" An admin can press Connect everything under Admin, Hub, Films and TV, which moves it where it can be filed."
-                        if "eligible for import" in problem else "")
-                steps.append({"at": q.get("added", "") or "", "state": "bad",
-                              "text": which + "Downloaded, but %s could not file it: %s.%s" % (arr.name.title(), problem.rstrip("."), hint)})
-            else:
-                steps.append({"at": q.get("added", "") or "", "state": "bad" if status in QUEUE_TROUBLE else "active", "stage": 50,
-                              "text": which + QUEUE_WORDS.get(status, "Waiting in qBittorrent (%s)" % (q.get("status") or "queued"))})
-
-        steps.sort(key=lambda s: s["at"] or "")
+        steps.sort(key=lambda step: step["at"] or "")
         done = item.get("hasFile") if film else (item.get("statistics") or {}).get("percentOfEpisodes", 0) >= 100
-        searching = any(s["state"] == "active" for s in steps)
+        searching = any(step["state"] == "active" for step in steps)
         if done:
             steps.append({"at": "", "state": "done", "stage": 100, "text": "On the server, ready to watch"})
         elif not item.get("monitored") and not searching:
             steps.append({"at": "", "state": "wait", "text": "Stopped looking. Press Start looking again to carry on."})
-        elif not searching and not took and not any(s["state"] == "bad" for s in steps):
+        elif not searching and not took and not any(step["state"] == "bad" for step in steps):
             steps.append({"at": "", "state": "wait",
                           "text": "No watchable version found yet. %s keeps watching for new releases." % arr.name.title()})
-        # One line for the top of the panel: what is happening now, and how far along it is.
-        # Nothing under way but something wrong (a download that cannot be filed, say): that is the news.
-        current = (next((x for x in reversed(steps) if x["state"] == "active"), None)
-                   or (None if done else next((x for x in reversed(steps) if x["state"] == "bad"), None)) or steps[-1])
+        # the headline for the top of the panel. pecking order: something happening now > something broken > the last step
+        current = (next((step for step in reversed(steps) if step["state"] == "active"), None)
+                   or (None if done else next((step for step in reversed(steps) if step["state"] == "bad"), None)) or steps[-1])
         now = {"text": current["text"], "state": current["state"],
-               "progress": max((x.get("stage", 0) for x in steps if x["state"] != "bad"), default=0)}
+               "progress": max((step.get("stage", 0) for step in steps if step["state"] != "bad"), default=0)}
         if lines:
-            asked = sorted({x["where"] for x in lines})
-            had = sorted({x["where"] for x in lines if x["n"] > 0})
+            asked = sorted({line["where"] for line in lines})
+            had = sorted({line["where"] for line in lines if line["n"] > 0})
             now["sites"] = "Asked %d site%s · %s" % (len(asked), "" if len(asked) == 1 else "s",
                                                     "%d had something (%s)" % (len(had), ", ".join(had)) if had else "none had it")
         # Downloaded but not filed yet: every download for it has finished, and Radarr or Sonarr still has to move
         # it into the library. The corner pop-up shows this as done, with a note, so nothing looks still under way.
-        fetched = [q for q in queue if (q.get("status") or "").lower() == "completed" or ((q.get("size") or 0) and not q.get("sizeleft"))]
-        pending = [q for q in queue if q not in fetched]
+        fetched = [entry for entry in queue
+                   if (entry.get("status") or "").lower() == "completed" or ((entry.get("size") or 0) and not entry.get("sizeleft"))]
+        pending = [entry for entry in queue if entry not in fetched]
         downloaded = bool(not done and fetched and not pending)
-        stuck = downloaded and any((q.get("trackedDownloadStatus") or "").lower() in ("warning", "error") for q in fetched)
+        stuck = downloaded and any((entry.get("trackedDownloadStatus") or "").lower() in ("warning", "error") for entry in fetched)
         return {"title": title, "steps": steps, "finished": bool(done), "now": now,
                 "downloaded": downloaded, "filing": ("stuck" if stuck else "filing") if downloaded else None}
+
+    def _request_step(self, kind, arr_id, item):
+        """(when it was asked for, [the "Requested by" step])."""
+        row = self.hub.con().execute("SELECT p.name, r.created FROM media_requests r LEFT JOIN profiles p ON p.id = r.profile_id "
+                                     "WHERE r.kind=? AND r.arr_id=? ORDER BY r.id DESC LIMIT 1", (kind, arr_id)).fetchone()
+        since = (row[1] if row else "") or item.get("added") or ""
+        return since, [{"at": since, "state": "done", "stage": 5,
+                        "text": "Requested by %s" % row[0] if row and row[0] else "Added to the list"}]
+
+    def _search_steps(self, arr, arr_id, film):
+        """The searches Radarr or Sonarr ran for it."""
+        steps = []
+        for command in arr.get("command") or []:
+            body = command.get("body") or {}
+            mine = arr_id in (body.get("movieIds") or []) if film else body.get("seriesId") == arr_id
+            if not mine or not command.get("name", "").endswith("Search"):
+                continue
+            running = command.get("status") in ("queued", "started")
+            steps.append({"at": command.get("started") or command.get("queued") or "", "state": "active" if running else "done",
+                          "stage": 20 if running else 25,
+                          "text": ("Searching every indexer…" if running else
+                                   "Search finished: %s" % (command.get("message") or "done"))})
+        return steps
+
+    def _indexer_lines(self, item, title, film, since):
+        """Each indexer Prowlarr asked on this film's or show's behalf, and the releases it grabbed:
+        ([{"at", "seen", "n", "where"}], [(when, release, indexer)]). n is the number of results, -1 for no answer."""
+        if not (self.config.prowlarr_url and self._key("prowlarr")):
+            return [], []
+        prowlarr_key = {"X-Api-Key": self._key("prowlarr")}
+        try:
+            names = {indexer["id"]: indexer["name"] for indexer in _call("GET", self.config.prowlarr_url + "/api/v1/indexer", prowlarr_key) or []}
+            records = (_call("GET", self.config.prowlarr_url + "/api/v1/history", prowlarr_key,
+                             params={"pageSize": 200, "sortKey": "date", "sortDirection": "descending"}) or {}).get("records") or []
+        except MediaError:
+            names, records = {}, []
+        words = _plain(title)
+        ext = str((item.get("tmdbId") if film else item.get("tvdbId")) or "")
+        looked, lines, grabbed_titles = {}, [], []
+        for record in reversed(records):
+            data = record.get("data") or {}
+            if data.get("source") not in ("Radarr", "Sonarr") or (since and record.get("date", "") < since[:19]):
+                continue
+            query = _plain(data.get("query"))
+            if record.get("eventType") == "indexerQuery" and (words and words in query or ext and ext in json.dumps(data)):
+                where = names.get(record.get("indexerId"), "an indexer")
+                results = int(data.get("queryResults") or 0) if record.get("successful") else -1
+                # Prowlarr logs every PAGE of results as its own query. squish ones within 15s into one line and add
+                # them up (-1 = didn't answer, and it stays -1 only if every page failed)
+                last = looked.get(where)
+                if last and _seconds_between(last["seen"], record.get("date", "")) < 15:
+                    last["n"] = max(last["n"], 0) + max(results, 0) if results >= 0 or last["n"] >= 0 else -1
+                    last["seen"] = record.get("date", "")
+                    continue
+                looked[where] = {"at": record.get("date", ""), "seen": record.get("date", ""), "n": results, "where": where}
+                lines.append(looked[where])
+            elif record.get("eventType") == "releaseGrabbed" and words and words in _plain(data.get("grabTitle")):
+                grabbed_titles.append((record.get("date", ""), data.get("grabTitle"), names.get(record.get("indexerId"), "an indexer")))
+        return lines, grabbed_titles
+
+    @staticmethod
+    def _indexer_step(line):
+        results = line["n"]
+        if results < 0:
+            return {"at": line["at"], "state": "bad", "stage": 30, "text": "%s did not answer" % line["where"]}
+        found = "%d result%s" % (results, "" if results == 1 else "s") if results else "nothing there"
+        return {"at": line["at"], "state": "done", "stage": 30, "text": "Looked at %s · %s" % (line["where"], found)}
+
+    def _history_steps(self, history, took, grabbed_titles, film):
+        """What it picked, whether the download client took it, and what failed or got filed."""
+        steps = []
+        for entry in took:
+            quality = ((entry.get("quality") or {}).get("quality") or {}).get("name", "")
+            steps.append({"at": entry.get("date", ""), "state": "done", "stage": 50,
+                          "text": "Best version found: %s%s · from %s" % (entry.get("sourceTitle", ""), " (%s)" % quality if quality else "",
+                                                                          (entry.get("data") or {}).get("indexer") or "an indexer")})
+        if grabbed_titles and not took:
+            # Prowlarr says it grabbed something, Radarr/Sonarr never heard back: nine times out of ten that's
+            # qBittorrent refusing the login
+            at, name, where = grabbed_titles[-1]
+            steps.append({"at": at, "state": "bad",
+                          "text": "Picked %s from %s, but qBittorrent refused it. Check its user name and password under "
+                                  "Admin, Hub, Connections, then press Connect everything." % (name, where)})
+        imported = ("downloadFolderImported", "movieFileImported" if film else "episodeFileImported")
+        for entry in history:
+            event = entry.get("eventType")
+            if event in ("downloadFailed", "importFailed"):
+                steps.append({"at": entry.get("date", ""), "state": "bad",
+                              "text": "%s: %s" % ("Download failed" if event == "downloadFailed" else "Could not file it",
+                                                  (entry.get("data") or {}).get("message") or entry.get("sourceTitle", ""))})
+            elif event in imported:
+                steps.append({"at": entry.get("date", ""), "state": "done", "stage": 98, "text": "Filed on the server: %s" % entry.get("sourceTitle", "")})
+        return steps
+
+    def _queue_steps(self, arr, queue, film):
+        """Downloading now. Sonarr lists a whole season in one download once per episode: it is one line here."""
+        parked = {torrent_hash.lower() for torrent_hash in self.parked()}
+        shared = {}
+        for entry in queue:
+            shared.setdefault(entry.get("downloadId") or id(entry), []).append(entry.get("episode") or {})
+        steps = []
+        for key, episodes in shared.items():
+            entry = next(queued for queued in queue if (queued.get("downloadId") or id(queued)) == key)
+            size, left = entry.get("size") or 0, entry.get("sizeleft") or 0
+            percent = int(100 * (size - left) / size) if size else 0
+            status = (entry.get("status") or "").lower()
+            added = entry.get("added", "") or ""
+            which = ""
+            if not film and episodes[0].get("seasonNumber") is not None:
+                which = ("S%02dE%02d: " % (episodes[0]["seasonNumber"], episodes[0].get("episodeNumber") or 0) if len(episodes) == 1
+                         else "Season %d: " % episodes[0]["seasonNumber"])
+            problem = next((message for status_message in entry.get("statusMessages") or [] for message in status_message.get("messages") or []), "")
+            if (entry.get("downloadId") or "").lower() in parked:
+                steps.append({"at": added, "state": "wait", "progress": percent, "stage": 50,
+                              "text": which + "Waiting for seed · nobody is sharing it right now, so it is paused at the back "
+                                      "of the line and checked every half hour · %d%%" % percent})
+            elif status == "downloading":
+                time_left = entry.get("timeleft") if entry.get("timeleft") and entry.get("timeleft") != "00:00:00" else ""
+                steps.append({"at": added, "state": "active", "progress": percent, "stage": 50 + percent * 45 // 100,
+                              "text": which + "Downloading through the VPN · %d%%%s" % (percent, " · %s left" % time_left if time_left else "")})
+            elif status == "completed" and problem and (entry.get("trackedDownloadStatus") or "").lower() in ("warning", "error"):
+                # downloaded but can't be filed. usual culprit: qBittorrent saved it somewhere Radarr/Sonarr can't
+                # see. Connect everything fixes that, so say so
+                hint = (" An admin can press Connect everything under Admin, Hub, Films and TV, which moves it where it can be filed."
+                        if "eligible for import" in problem else "")
+                steps.append({"at": added, "state": "bad",
+                              "text": which + "Downloaded, but %s could not file it: %s.%s" % (arr.name.title(), problem.rstrip("."), hint)})
+            else:
+                steps.append({"at": added, "state": "bad" if status in QUEUE_TROUBLE else "active", "stage": 50,
+                              "text": which + QUEUE_WORDS.get(status, "Waiting in qBittorrent (%s)" % (entry.get("status") or "queued"))})
+        return steps
 
     def lookup(self, kind, term):
         arr = self.arr(kind)
         found = arr.get("movie/lookup" if kind == "film" else "series/lookup", term=term) or []
-        have = {(i.get("tmdbId") if kind == "film" else i.get("tvdbId")) for i in arr.get("movie" if kind == "film" else "series")}
-        out = []
+        external_id = lambda item: item.get("tmdbId") if kind == "film" else item.get("tvdbId")  # noqa: E731
+        have = {external_id(owned) for owned in arr.get("movie" if kind == "film" else "series")}
+        results = []
         for item in found[:20]:
-            s = self.summary(dict(item, id=None), kind)
-            ext = item.get("tmdbId") if kind == "film" else item.get("tvdbId")
-            s["in_library"] = ext in have
-            s["seasons"] = [{"number": x["seasonNumber"]} for x in item.get("seasons") or [] if x.get("seasonNumber", 0) > 0]
-            out.append(s)
-        return out
+            summary = self.summary(dict(item, id=None), kind)
+            summary["in_library"] = external_id(item) in have
+            summary["seasons"] = [{"number": season["seasonNumber"]} for season in item.get("seasons") or [] if season.get("seasonNumber", 0) > 0]
+            results.append(summary)
+        return results
 
     # ----------------------------------------------------------- requests
 
     def _profile_id(self, arr):
         profiles = arr.get("qualityprofile")
-        mine = next((p for p in profiles if p["name"] == PROFILE_NAME), None)
+        mine = next((profile for profile in profiles if profile["name"] == PROFILE_NAME), None)
         if mine:
             return mine["id"]
         if not profiles:
@@ -561,7 +594,7 @@ class Media:
         roots = arr.get("rootfolder")
         if not roots:
             raise MediaError("%s has no media folder yet. An admin can press Connect everything under Admin, Hub, Films and TV." % arr.name.title())
-        return next((r["path"] for r in roots if r["path"].rstrip("/") == wanted), roots[0]["path"])
+        return next((root["path"] for root in roots if root["path"].rstrip("/") == wanted), roots[0]["path"])
 
     def request(self, kind, external_id, who, seasons="all", picked=()):
         """Add a film or show and start looking for it. seasons: 'all', 'latest' or 'pick' (with picked numbers)."""
@@ -581,17 +614,17 @@ class Media:
             if not found:
                 raise MediaError("That show could not be found any more.")
             show = found[0]
-            numbers = sorted(s["seasonNumber"] for s in show.get("seasons") or [] if s.get("seasonNumber", 0) > 0)
+            numbers = sorted(season["seasonNumber"] for season in show.get("seasons") or [] if season.get("seasonNumber", 0) > 0)
             if seasons == "latest":
                 keep = set(numbers[-1:])
             elif seasons == "pick":
-                keep = {int(n) for n in picked} & set(numbers)
+                keep = {int(number) for number in picked} & set(numbers)
                 if not keep:
                     raise MediaError("Choose at least one season.")
             else:
                 keep = set(numbers)
-            for s in show.get("seasons") or []:
-                s["monitored"] = s.get("seasonNumber") in keep
+            for season in show.get("seasons") or []:
+                season["monitored"] = season.get("seasonNumber") in keep
             options = {"searchForMissingEpisodes": True}
             if seasons in ("all", "latest"):
                 options["monitor"] = "all" if seasons == "all" else "lastSeason"
@@ -619,7 +652,7 @@ class Media:
             if "already" not in str(exc).lower():
                 raise
             field = "tmdbId" if kind == "film" else "tvdbId"
-            have = next((i for i in arr.get(path) or [] if str(i.get(field)) == str(external_id)), None)
+            have = next((listed for listed in arr.get(path) or [] if str(listed.get(field)) == str(external_id)), None)
             if not have:
                 raise
         return dict(self.summary(have, kind, self.requested_by(kind)), already=True)
@@ -665,12 +698,12 @@ class Media:
             arr("POST", "command", json={"name": "MoviesSearch", "movieIds": [arr_id]} if film else
                 {"name": "SeriesSearch", "seriesId": arr_id})
             return "Looking for %s again." % title
-        for c in arr.get("command") or []:
-            body = c.get("body") or {}
+        for command in arr.get("command") or []:
+            body = command.get("body") or {}
             mine = arr_id in (body.get("movieIds") or []) if film else body.get("seriesId") == arr_id
-            if mine and c.get("status") == "queued":
+            if mine and command.get("status") == "queued":
                 try:
-                    arr("DELETE", "command/%d" % c["id"])
+                    arr("DELETE", "command/%d" % command["id"])
                 except MediaError:
                     pass  # it started in the meantime; it finishes on its own
         return "Stopped looking for %s. Anything already downloading still finishes." % title
@@ -683,18 +716,18 @@ class Media:
             query = {"movieId": arr_id}
         else:
             if season is None:
-                numbers = [s["seasonNumber"] for s in (arr.get("series/%d" % arr_id).get("seasons") or []) if s.get("seasonNumber")]
+                numbers = [found["seasonNumber"] for found in (arr.get("series/%d" % arr_id).get("seasons") or []) if found.get("seasonNumber")]
                 season = max(numbers) if numbers else 1
             query = {"seriesId": arr_id, "seasonNumber": season}
         found = arr("GET", "release", params=query, timeout=SEARCH_TIMEOUT) or []
-        out = [{
-            "guid": r.get("guid"), "indexer_id": r.get("indexerId"), "title": r.get("title"),
-            "quality": ((r.get("quality") or {}).get("quality") or {}).get("name", ""), "size": r.get("size") or 0,
-            "indexer": r.get("indexer"), "seeders": r.get("seeders"), "rejected": bool(r.get("rejected")),
-            "why": (r.get("rejections") or [""])[0],
-        } for r in found]
-        out.sort(key=lambda r: (r["rejected"], -(r["seeders"] or 0)))
-        return out[:60]
+        offered = [{
+            "guid": release.get("guid"), "indexer_id": release.get("indexerId"), "title": release.get("title"),
+            "quality": ((release.get("quality") or {}).get("quality") or {}).get("name", ""), "size": release.get("size") or 0,
+            "indexer": release.get("indexer"), "seeders": release.get("seeders"), "rejected": bool(release.get("rejected")),
+            "why": (release.get("rejections") or [""])[0],
+        } for release in found]
+        offered.sort(key=lambda release: (release["rejected"], -(release["seeders"] or 0)))
+        return offered[:60]
 
     def grab(self, kind, guid, indexer_id):
         self.arr(kind)("POST", "release", json={"guid": guid, "indexerId": indexer_id})
@@ -713,14 +746,15 @@ class Media:
         film = kind == "film"
         item = arr.get(("movie/%d" if film else "series/%d") % arr_id)
         if not film and season is None:
-            numbers = [s["seasonNumber"] for s in item.get("seasons") or [] if s.get("seasonNumber")]
+            numbers = [found["seasonNumber"] for found in item.get("seasons") or [] if found.get("seasonNumber")]
             season = max(numbers) if numbers else 1
         query = "%s %s" % (item.get("title") or "", item.get("year") or "") if film else "%s S%02d" % (item.get("title") or "", season)
-        pkey = {"X-Api-Key": self._key("prowlarr")} if self.config.prowlarr_url and self._key("prowlarr") else None
+        prowlarr_key = {"X-Api-Key": self._key("prowlarr")} if self.config.prowlarr_url and self._key("prowlarr") else None
         sites = []
-        if pkey:
+        if prowlarr_key:
             try:
-                sites = [(i["id"], i["name"]) for i in _call("GET", self.config.prowlarr_url + "/api/v1/indexer", pkey) or [] if i.get("enable")]
+                sites = [(indexer["id"], indexer["name"]) for indexer in _call("GET", self.config.prowlarr_url + "/api/v1/indexer", prowlarr_key) or []
+                         if indexer.get("enable")]
             except MediaError:
                 sites = []
         job = {"id": uuid.uuid4().hex, "kind": kind, "arr_id": arr_id, "season": season, "started": _time.time(),
@@ -729,20 +763,22 @@ class Media:
         _JOBS[job["id"]] = job
 
         def ask(site):
+            # one thread per site, all writing into the same job dict, hence the lock. 2000 = movies, 5000 = TV (newznab)
             try:
-                rows = _call("GET", self.config.prowlarr_url + "/api/v1/search", pkey, timeout=SEARCH_TIMEOUT, params={
+                rows = _call("GET", self.config.prowlarr_url + "/api/v1/search", prowlarr_key, timeout=SEARCH_TIMEOUT, params={
                     "query": query.strip(), "type": "search", "indexerIds": site[0], "categories": 2000 if film else 5000, "limit": 100}) or []
             except MediaError:
                 rows = []
             with job["lock"]:
                 job["answered"] += 1
-                for r in rows:
-                    link = r.get("magnetUrl") or r.get("downloadUrl")
-                    if link and r.get("guid") not in job["found"]:
-                        job["found"][r["guid"]] = {
-                            "guid": r["guid"], "title": r.get("title") or "", "size": r.get("size") or 0, "seeders": r.get("seeders"),
-                            "indexer": r.get("indexer") or site[1], "quality": _quality_from_name(r.get("title") or ""),
-                            "link": link, "published": r.get("publishDate") or ""}
+                for release in rows:
+                    link = release.get("magnetUrl") or release.get("downloadUrl")
+                    if link and release.get("guid") not in job["found"]:
+                        job["found"][release["guid"]] = {
+                            "guid": release["guid"], "title": release.get("title") or "", "size": release.get("size") or 0,
+                            "seeders": release.get("seeders"), "indexer": release.get("indexer") or site[1],
+                            "quality": _quality_from_name(release.get("title") or ""),
+                            "link": link, "published": release.get("publishDate") or ""}
 
         def checked():
             try:
@@ -767,12 +803,13 @@ class Media:
         if not job:
             raise MediaError("That search has finished or expired. Press Show versions again.")
         with job["lock"]:
-            found = sorted(job["found"].values(), key=lambda r: (-QUALITY_RANK.get(r["quality"], 0), -(r["seeders"] or 0)))
-            out = {"sites": job["sites"], "answered": job["answered"], "seconds": int(_time.time() - job["started"]),
-                   "found": [{k: v for k, v in r.items() if k != "link"} for r in found[:150]],
-                   "checked": job["checked"], "checked_error": job["checked_error"]}
-        out["done"] = job["checked"] is not None and job["answered"] >= job["sites"]
-        return out
+            found = sorted(job["found"].values(), key=lambda release: (-QUALITY_RANK.get(release["quality"], 0), -(release["seeders"] or 0)))
+            progress = {"sites": job["sites"], "answered": job["answered"], "seconds": int(_time.time() - job["started"]),
+                        # the download link stays on the server: the page only ever gets a guid to point at
+                        "found": [{field: value for field, value in release.items() if field != "link"} for release in found[:150]],
+                        "checked": job["checked"], "checked_error": job["checked_error"]}
+        progress["done"] = job["checked"] is not None and job["answered"] >= job["sites"]
+        return progress
 
     def grab_found(self, job_id, guid, force=False):
         """Download a version found before the full search finished. It is handed to Radarr or Sonarr, which check it
@@ -794,30 +831,32 @@ class Media:
                 return {"ok": False, "why": "; ".join(first.get("rejections") or []) or "it does not fit the household rule"}
             return {"ok": True}
         from . import integrations
-        s = integrations.qbit_session(self.config)
+        session = integrations.qbit_session(self.config)
         category = "movies" if kind == "film" else "tv"
         link = found["link"]
+        add = self.config.qbit_url + "/api/v2/torrents/add"
         try:
             if link.startswith("magnet:"):
-                r = s.post(self.config.qbit_url + "/api/v2/torrents/add", data={"urls": link, "category": category}, timeout=30)
+                reply = session.post(add, data={"urls": link, "category": category}, timeout=30)
             else:
-                # Family Hub fetches the .torrent itself: qBittorrent only reaches the internet through the VPN.
+                # we fetch the .torrent ourselves: qBittorrent lives inside the VPN box and can't reach the indexer's
+                # link directly. some indexers "download" by redirecting to a magnet, so catch that too
                 body = requests.get(link, timeout=60, allow_redirects=False)
                 if body.is_redirect and (body.headers.get("Location") or "").startswith("magnet:"):
-                    r = s.post(self.config.qbit_url + "/api/v2/torrents/add", data={"urls": body.headers["Location"], "category": category}, timeout=30)
+                    reply = session.post(add, data={"urls": body.headers["Location"], "category": category}, timeout=30)
                 else:
                     body.raise_for_status()
-                    r = s.post(self.config.qbit_url + "/api/v2/torrents/add", data={"category": category},
-                               files={"torrents": ("release.torrent", body.content, "application/x-bittorrent")}, timeout=30)
+                    reply = session.post(add, data={"category": category},
+                                         files={"torrents": ("release.torrent", body.content, "application/x-bittorrent")}, timeout=30)
         except (integrations.IntegrationError, requests.RequestException) as exc:
             raise MediaError("Could not send it to qBittorrent: %s" % exc)
-        if r.status_code >= 400 or "fail" in (r.text or "").lower():
-            raise MediaError("qBittorrent would not take it (%s)." % r.status_code)
+        if reply.status_code >= 400 or "fail" in (reply.text or "").lower():
+            raise MediaError("qBittorrent would not take it (%s)." % reply.status_code)
         return {"ok": True, "direct": True}
 
     def queue(self):
         """What is downloading now for films and TV, with who asked for it."""
-        out, problems = [], []
+        items, problems = [], []
         for kind in ("film", "show"):
             if not self.configured(kind):
                 continue
@@ -830,28 +869,29 @@ class Media:
                 continue
             requested = self.requested_by(kind)
             groups = {}
-            for r in records:
+            for record in records:
+                # a film is one line; a show gets one line per season (Sonarr lists every episode separately)
                 if kind == "film":
-                    gkey, title = ("film", r.get("movieId")), (r.get("movie") or {}).get("title") or r.get("title")
-                    owner = r.get("movieId")
+                    group_key, title = ("film", record.get("movieId")), (record.get("movie") or {}).get("title") or record.get("title")
+                    owner = record.get("movieId")
                 else:
-                    season = (r.get("episode") or {}).get("seasonNumber")
-                    gkey = ("show", r.get("seriesId"), season)
-                    title = "%s · Season %s" % ((r.get("series") or {}).get("title") or r.get("title"), season)
-                    owner = r.get("seriesId")
-                g = groups.setdefault(gkey, {"kind": kind, "title": title, "size": 0, "left": 0, "items": 0,
-                                             "status": r.get("trackedDownloadState") or r.get("status") or "",
-                                             "requested_by": requested.get(owner), "eta": r.get("estimatedCompletionTime")})
-                g["size"] += r.get("size") or 0
-                g["left"] += r.get("sizeleft") or 0
-                g["items"] += 1
-                msgs = [m for s in r.get("statusMessages") or [] for m in s.get("messages") or []]
-                if msgs:
-                    g["problem"] = msgs[0]
-            for g in groups.values():
-                g["progress"] = round(100 * (1 - g["left"] / g["size"])) if g["size"] else 0
-                out.append(g)
-        return {"items": out, "problems": problems}
+                    season = (record.get("episode") or {}).get("seasonNumber")
+                    group_key = ("show", record.get("seriesId"), season)
+                    title = "%s · Season %s" % ((record.get("series") or {}).get("title") or record.get("title"), season)
+                    owner = record.get("seriesId")
+                group = groups.setdefault(group_key, {"kind": kind, "title": title, "size": 0, "left": 0, "items": 0,
+                                                      "status": record.get("trackedDownloadState") or record.get("status") or "",
+                                                      "requested_by": requested.get(owner), "eta": record.get("estimatedCompletionTime")})
+                group["size"] += record.get("size") or 0
+                group["left"] += record.get("sizeleft") or 0
+                group["items"] += 1
+                messages = [message for status in record.get("statusMessages") or [] for message in status.get("messages") or []]
+                if messages:
+                    group["problem"] = messages[0]
+            for group in groups.values():
+                group["progress"] = round(100 * (1 - group["left"] / group["size"])) if group["size"] else 0
+                items.append(group)
+        return {"items": items, "problems": problems}
 
     def _need_qbit(self):
         if not self.config.qbit_url:
@@ -862,8 +902,8 @@ class Media:
         from . import integrations
         self._need_qbit()
         try:
-            s = integrations.qbit_session(self.config)
-            found = s.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []
+            session = integrations.qbit_session(self.config)
+            found = session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []
         except (integrations.IntegrationError, requests.RequestException, ValueError) as exc:
             raise MediaError("Could not reach qBittorrent: %s" % exc)
         # Radarr and Sonarr know which film or show each download is for, and who asked for it.
@@ -878,76 +918,82 @@ class Media:
                 continue
             requested = self.requested_by(kind)
             episodes = {}
-            for r in records:
-                episodes.setdefault((r.get("downloadId") or "").lower(), []).append(r.get("episode") or {})
-            for r in records:
-                key = (r.get("downloadId") or "").lower()
-                owner = r.get("movieId") if kind == "film" else r.get("seriesId")
-                title = ((r.get("movie") if kind == "film" else r.get("series")) or {}).get("title")
-                eps = episodes[key]
-                if kind == "show" and title and eps[0].get("seasonNumber") is not None:
+            for record in records:
+                episodes.setdefault((record.get("downloadId") or "").lower(), []).append(record.get("episode") or {})
+            for record in records:
+                key = (record.get("downloadId") or "").lower()  # the downloadId IS qBittorrent's hash, in caps
+                owner = record.get("movieId") if kind == "film" else record.get("seriesId")
+                title = ((record.get("movie") if kind == "film" else record.get("series")) or {}).get("title")
+                in_download = episodes[key]
+                if kind == "show" and title and in_download[0].get("seasonNumber") is not None:
                     # One episode, or a whole season in one download.
-                    title += (" · S%02dE%02d" % (eps[0]["seasonNumber"], eps[0].get("episodeNumber") or 0) if len(eps) == 1
-                              else " · Season %d" % eps[0]["seasonNumber"])
+                    title += (" · S%02dE%02d" % (in_download[0]["seasonNumber"], in_download[0].get("episodeNumber") or 0) if len(in_download) == 1
+                              else " · Season %d" % in_download[0]["seasonNumber"])
                 names[key] = {"title": title, "kind": kind, "id": owner, "requested_by": requested.get(owner)}
         books = self.config.qbit_category or "books"
         asked = {}
         for row in self.hub.con().execute("SELECT r.title, p.name FROM requests r LEFT JOIN profiles p ON p.id = r.profile_id ORDER BY r.id"):
             asked[_plain(row[0])] = row[1]
-        parked = self.parked()
-        out = []
-        for t in found:
-            h = t.get("hash") or ""
-            known = names.get(h.lower(), {})
-            if t.get("category") == books:
-                known = {"requested_by": asked.get(_plain(t.get("name")))}
-            state = t.get("state") or ""
-            done = (t.get("progress") or 0) >= 1
-            waiting = parked.get(h) if not done else None
+        from . import bookswap
+        parked, given_up = self.parked(), bookswap.given_up(self.hub)
+        listed = []
+        for torrent in found:
+            torrent_hash = torrent.get("hash") or ""
+            known = names.get(torrent_hash.lower(), {})
+            if torrent.get("category") == books:
+                known = {"requested_by": asked.get(_plain(torrent.get("name")))}
+            state = torrent.get("state") or ""
+            done = (torrent.get("progress") or 0) >= 1
+            waiting = parked.get(torrent_hash) if not done else None
             words = TORRENT_WORDS.get(state, state)
             if waiting:
                 words = "Waiting for seed · checking for someone sharing it" if waiting.get("checking") else "Waiting for seed"
-            out.append({
-                "hash": h, "name": t.get("name") or "", "title": known.get("title") or t.get("name") or "",
+            if torrent_hash in given_up and not done:
+                words = "Paused · no shared copy found"
+            listed.append({
+                "hash": torrent_hash, "name": torrent.get("name") or "", "title": known.get("title") or torrent.get("name") or "",
                 "kind": known.get("kind"), "id": known.get("id"), "requested_by": known.get("requested_by"),
-                "type": "Book" if t.get("category") == books else TORRENT_KINDS.get(t.get("category") or "", "Other"),
-                "progress": int((t.get("progress") or 0) * 100), "done": done, "state": words,
+                "type": "Book" if torrent.get("category") == books else TORRENT_KINDS.get(torrent.get("category") or "", "Other"),
+                "progress": int((torrent.get("progress") or 0) * 100), "done": done, "state": words,
                 "paused": state.startswith(("paused", "stopped")), "trouble": state in ("error", "missingFiles"),
-                "size": t.get("size") or 0, "speed": t.get("dlspeed") or 0, "up_speed": t.get("upspeed") or 0,
-                "eta": t.get("eta") if 0 < (t.get("eta") or 0) < 8640000 else None,
-                "seeds": t.get("num_seeds") or 0, "position": t.get("priority") if (t.get("priority") or 0) > 0 else None,
+                "missing": state == "missingFiles", "gave_up": torrent_hash in given_up and not done,
+                "size": torrent.get("size") or 0, "speed": torrent.get("dlspeed") or 0, "up_speed": torrent.get("upspeed") or 0,
+                # qBittorrent's "no idea" ETA is 8640000 (100 days). we'd rather say nothing
+                "eta": torrent.get("eta") if 0 < (torrent.get("eta") or 0) < 8640000 else None,
+                "seeds": torrent.get("num_seeds") or 0, "position": torrent.get("priority") if (torrent.get("priority") or 0) > 0 else None,
                 # Waiting for seed: when it was last checked, and when the next check is.
                 "waiting_seed": bool(waiting), "checked": waiting and waiting.get("checked"),
                 "next_check": waiting and not waiting.get("checking") and waiting.get("checked", 0) + CHECK_EVERY_MINUTES * 60,
             })
         # Waiting for seed goes after everything else still to download, as it is in qBittorrent's line.
-        out.sort(key=lambda x: (x["done"], x["waiting_seed"], x["position"] is None, x["position"] or 0))
-        return out
+        listed.sort(key=lambda entry: (entry["done"], entry["waiting_seed"], entry["position"] is None, entry["position"] or 0))
+        return listed
 
     def parked(self):
         """The downloads waiting for seed: {hash: {"since", "checked", "checking", "progress"}}."""
         return json.loads(db.kv_get(self.hub.con(), "media:parked") or "{}")
 
-    def _start_stop(self, s, hashes, start):
+    def _start_stop(self, session, hashes, start):
         """qBittorrent 5 calls these start and stop; older versions resume and pause."""
         base, form = self.config.qbit_url + "/api/v2/torrents/", {"hashes": "|".join(hashes)}
-        r = s.post(base + ("start" if start else "stop"), data=form, timeout=8)
-        if r.status_code == 404:
-            r = s.post(base + ("resume" if start else "pause"), data=form, timeout=8)
-        return r
+        reply = session.post(base + ("start" if start else "stop"), data=form, timeout=8)
+        if reply.status_code == 404:  # old qBittorrent, old words
+            reply = session.post(base + ("resume" if start else "pause"), data=form, timeout=8)
+        return reply
 
-    def _queue_move(self, s, hashes, where):
+    def _queue_move(self, session, hashes, where):
         """Move downloads in qBittorrent's line: where is topPrio, increasePrio, decreasePrio or bottomPrio."""
         path, form = self.config.qbit_url + "/api/v2/torrents/" + where, {"hashes": "|".join(hashes)}
-        r = s.post(path, data=form, timeout=8)
-        if r.status_code == 409:  # the queue is switched off: switch it on, then try again
-            s.post(self.config.qbit_url + "/api/v2/app/setPreferences", data={"json": json.dumps(QUEUE_PREFS)}, timeout=8)
-            r = s.post(path, data=form, timeout=8)
-        return r
+        reply = session.post(path, data=form, timeout=8)
+        if reply.status_code == 409:  # the queue is switched off: switch it on, then try again
+            session.post(self.config.qbit_url + "/api/v2/app/setPreferences", data={"json": json.dumps(QUEUE_PREFS)}, timeout=8)
+            reply = session.post(path, data=form, timeout=8)
+        return reply
 
     def park_stalled(self, now=None):
-        """Run every minute by the background jobs. A download nobody has shared for STALL_MINUTES goes to the
-        back of the line and is paused, so it does not hold up the rest. Every CHECK_EVERY_MINUTES it is started
+        """Run every minute by the background jobs. Books and graphic novels only: films and TV are left to Radarr
+        and Sonarr, which give up on a stuck download and look for another copy themselves. A book download nobody
+        has shared for STALL_MINUTES goes to the back of the line and is paused, so it does not hold up the rest. Every CHECK_EVERY_MINUTES it is started
         for CHECK_FOR_MINUTES to look for someone sharing it: if it finds someone it carries on from the back of
         the line, otherwise it is paused again. Pressing Continue on one takes it out of this."""
         from . import integrations
@@ -958,54 +1004,69 @@ class Media:
         stalled = json.loads(db.kv_get(con, "media:stalled") or "{}")  # hash -> when it was first seen with nobody sharing
         parked = self.parked()
         try:
-            s = integrations.qbit_session(self.config)
-            found = {t.get("hash"): t for t in s.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []}
+            session = integrations.qbit_session(self.config)
+            found = {torrent.get("hash"): torrent for torrent in session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []}
         except (integrations.IntegrationError, requests.RequestException, ValueError):
             return
-        park, wake, sleep, free = [], [], [], []
-        for h in list(parked):
-            t = found.get(h)
-            if not t or (t.get("progress") or 0) >= 1:
-                parked.pop(h)
+        from . import bookswap
+        books = self.config.qbit_category or "books"
+        given_up = bookswap.given_up(self.hub)  # paused for good after no other copy was found: not woken
+        # five to-do lists, filled first and acted on at the end, so a qBittorrent hiccup half way changes nothing
+        park, wake, sleep, free, handed_back = [], [], [], [], []
+        # part 1: the ones already parked. still nobody? time for their half-hourly peek?
+        for torrent_hash in list(parked):
+            torrent = found.get(torrent_hash)
+            if not torrent or (torrent.get("progress") or 0) >= 1 or torrent_hash in given_up:
+                parked.pop(torrent_hash)
                 continue
-            p, state = parked[h], t.get("state") or ""
-            if p.get("checking"):
-                if (t.get("num_seeds") or 0) > 0 or (t.get("dlspeed") or 0) > 0 or (t.get("progress") or 0) > p.get("progress", 0):
-                    free.append(h)  # someone is sharing it again
-                elif now - p["checking"] >= CHECK_FOR_MINUTES * 60:
-                    sleep.append(h)
-                    p.update(checking=None, checked=now)
+            if torrent.get("category") != books:  # parked before films and TV were left to Radarr and Sonarr
+                parked.pop(torrent_hash)
+                handed_back.append(torrent_hash)
+                continue
+            watch, state = parked[torrent_hash], torrent.get("state") or ""
+            if watch.get("checking"):
+                found_someone = ((torrent.get("num_seeds") or 0) > 0 or (torrent.get("dlspeed") or 0) > 0
+                                 or (torrent.get("progress") or 0) > watch.get("progress", 0))
+                if found_someone:
+                    free.append(torrent_hash)  # someone is sharing it again
+                elif now - watch["checking"] >= CHECK_FOR_MINUTES * 60:
+                    sleep.append(torrent_hash)
+                    watch.update(checking=None, checked=now)
             elif not state.startswith(("paused", "stopped")):
-                parked.pop(h)  # started again by hand, or by qBittorrent: it is back to normal
-                stalled[h] = now
-            elif now - p.get("checked", 0) >= CHECK_EVERY_MINUTES * 60:
-                wake.append(h)
-                p.update(checking=now, progress=t.get("progress") or 0)
-        for h in free:
-            parked.pop(h)
-        for h, t in found.items():
-            if h in parked or (t.get("progress") or 0) >= 1:
-                stalled.pop(h, None)
+                parked.pop(torrent_hash)  # started again by hand, or by qBittorrent: it is back to normal
+                stalled[torrent_hash] = now
+            elif now - watch.get("checked", 0) >= CHECK_EVERY_MINUTES * 60:
+                wake.append(torrent_hash)
+                watch.update(checking=now, progress=torrent.get("progress") or 0)
+        for torrent_hash in free:
+            parked.pop(torrent_hash)
+        # part 2: everyone else. been stuck with nobody sharing for STALL_MINUTES? off to the back of the line
+        for torrent_hash, torrent in found.items():
+            if torrent_hash in parked or (torrent.get("progress") or 0) >= 1 or torrent.get("category") != books or torrent_hash in given_up:
+                stalled.pop(torrent_hash, None)
                 continue
-            state = t.get("state") or ""
-            nobody = state == "stalledDL" or (state == "metaDL" and not (t.get("num_seeds") or 0) and not (t.get("num_leechs") or 0))
+            state = torrent.get("state") or ""
+            nobody = state == "stalledDL" or (state == "metaDL" and not (torrent.get("num_seeds") or 0) and not (torrent.get("num_leechs") or 0))
             if not nobody:
-                stalled.pop(h, None)
-            elif now - stalled.setdefault(h, now) >= STALL_MINUTES * 60:
-                park.append(h)
-                parked[h] = {"since": now, "checked": now, "checking": None, "progress": t.get("progress") or 0}
-                stalled.pop(h)
-        stalled = {h: at for h, at in stalled.items() if h in found}
+                stalled.pop(torrent_hash, None)
+            elif now - stalled.setdefault(torrent_hash, now) >= STALL_MINUTES * 60:
+                park.append(torrent_hash)
+                parked[torrent_hash] = {"since": now, "checked": now, "checking": None, "progress": torrent.get("progress") or 0}
+                stalled.pop(torrent_hash)
+        stalled = {torrent_hash: at for torrent_hash, at in stalled.items() if torrent_hash in found}
+        force_start = self.config.qbit_url + "/api/v2/torrents/setForceStart"
         try:
             if park:
-                self._queue_move(s, park, "bottomPrio")
-                self._start_stop(s, park, False)
-            if wake:  # forced, so it looks for people sharing it even though it is at the back of the line
-                s.post(self.config.qbit_url + "/api/v2/torrents/setForceStart", data={"hashes": "|".join(wake), "value": "true"}, timeout=8)
-            if sleep or free:
-                s.post(self.config.qbit_url + "/api/v2/torrents/setForceStart", data={"hashes": "|".join(sleep + free), "value": "false"}, timeout=8)
+                self._queue_move(session, park, "bottomPrio")
+                self._start_stop(session, park, False)
+            if wake:  # FORCE started, otherwise qBittorrent's queue leaves it sitting at the back doing nothing
+                session.post(force_start, data={"hashes": "|".join(wake), "value": "true"}, timeout=8)
+            if sleep or free or handed_back:
+                session.post(force_start, data={"hashes": "|".join(sleep + free + handed_back), "value": "false"}, timeout=8)
+            if handed_back:
+                self._start_stop(session, handed_back, True)
             if sleep:
-                self._start_stop(s, sleep, False)
+                self._start_stop(session, sleep, False)
         except requests.RequestException:
             return  # nothing is saved, so the same is tried next minute
         db.kv_set(con, "media:stalled", json.dumps(stalled))
@@ -1013,6 +1074,8 @@ class Media:
 
     def unpark(self, torrent_hash):
         """Someone pressed Continue or moved a download waiting for seed: it is theirs to manage again."""
+        from . import bookswap
+        bookswap.start_over(self.hub, torrent_hash)
         con = self.hub.con()
         parked = self.parked()
         if parked.pop(torrent_hash, None) is not None:
@@ -1021,27 +1084,45 @@ class Media:
             stalled[torrent_hash] = _time.time()  # the ten minutes start again
             db.kv_set(con, "media:stalled", json.dumps(stalled))
 
+    def forget(self, hashes):
+        """Take downloads off qBittorrent's list, leaving their files where they are: for downloads whose files were
+        moved by hand (qBittorrent says "Files are missing"). Returns how many went."""
+        from . import integrations
+        self._need_qbit()
+        # a torrent hash is 40 hex chars (v1) or 64 (v2). anything else is someone poking at us
+        hashes = [torrent_hash for torrent_hash in hashes if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", torrent_hash or "")]
+        if not hashes:
+            return 0
+        try:
+            session = integrations.qbit_session(self.config)
+            reply = session.post(self.config.qbit_url + "/api/v2/torrents/delete", data={"hashes": "|".join(hashes), "deleteFiles": "false"}, timeout=8)
+        except (integrations.IntegrationError, requests.RequestException) as exc:
+            raise MediaError("Could not reach qBittorrent: %s" % exc)
+        if reply.status_code >= 400:
+            raise MediaError("qBittorrent said no (%s)." % reply.status_code)
+        return len(hashes)
+
     def speed(self):
         """qBittorrent's speeds now and its limits, all in bytes per second (0 means no limit). "Slow mode" is
         qBittorrent's second set of limits, switched on and off with one press."""
         from . import integrations
         self._need_qbit()
         try:
-            s = integrations.qbit_session(self.config)
-            prefs = s.get(self.config.qbit_url + "/api/v2/app/preferences", timeout=8).json()
-            info = s.get(self.config.qbit_url + "/api/v2/transfer/info", timeout=8).json()
-            slow = s.get(self.config.qbit_url + "/api/v2/transfer/speedLimitsMode", timeout=8).text.strip() == "1"
-            found = s.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []
+            session = integrations.qbit_session(self.config)
+            prefs = session.get(self.config.qbit_url + "/api/v2/app/preferences", timeout=8).json()
+            info = session.get(self.config.qbit_url + "/api/v2/transfer/info", timeout=8).json()
+            slow = session.get(self.config.qbit_url + "/api/v2/transfer/speedLimitsMode", timeout=8).text.strip() == "1"
+            found = session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []
         except (integrations.IntegrationError, requests.RequestException, ValueError) as exc:
             raise MediaError("Could not reach qBittorrent: %s" % exc)
         # How many downloads are doing what, so the Speed panel can say why the speed is what it is.
         counts = {"downloading": 0, "waiting_turn": 0, "waiting_seed": 0, "paused": 0, "done": 0}
         parked = self.parked()
-        for t in found:
-            state = t.get("state") or ""
-            if (t.get("progress") or 0) >= 1:
+        for torrent in found:
+            state = torrent.get("state") or ""
+            if (torrent.get("progress") or 0) >= 1:
                 counts["done"] += 1
-            elif t.get("hash") in parked or state == "stalledDL":
+            elif torrent.get("hash") in parked or state == "stalledDL":
                 counts["waiting_seed"] += 1
             elif state.startswith(("paused", "stopped")):
                 counts["paused"] += 1
@@ -1067,13 +1148,14 @@ class Media:
                 except (TypeError, ValueError):
                     raise MediaError("Speeds must be numbers.")
         try:
-            s = integrations.qbit_session(self.config)
+            session = integrations.qbit_session(self.config)
             if prefs:
-                s.post(self.config.qbit_url + "/api/v2/app/setPreferences", data={"json": json.dumps(prefs)}, timeout=8)
+                session.post(self.config.qbit_url + "/api/v2/app/setPreferences", data={"json": json.dumps(prefs)}, timeout=8)
             if "slow_mode" in values:
-                now = s.get(self.config.qbit_url + "/api/v2/transfer/speedLimitsMode", timeout=8).text.strip() == "1"
+                # qBittorrent only has "toggle", no "set". so look first, and only flip it if it's the wrong way round
+                now = session.get(self.config.qbit_url + "/api/v2/transfer/speedLimitsMode", timeout=8).text.strip() == "1"
                 if now != bool(values["slow_mode"]):
-                    s.post(self.config.qbit_url + "/api/v2/transfer/toggleSpeedLimitsMode", timeout=8)
+                    session.post(self.config.qbit_url + "/api/v2/transfer/toggleSpeedLimitsMode", timeout=8)
         except (integrations.IntegrationError, requests.RequestException) as exc:
             raise MediaError("Could not reach qBittorrent: %s" % exc)
         return self.speed()
@@ -1085,15 +1167,16 @@ class Media:
         if action not in TORRENT_ACTIONS or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", torrent_hash or ""):
             raise MediaError("That is not something a download can do.")
         try:
-            s = integrations.qbit_session(self.config)
+            session = integrations.qbit_session(self.config)
             if action in ("pause", "resume"):
-                r = self._start_stop(s, [torrent_hash], action == "resume")
+                reply = self._start_stop(session, [torrent_hash], action == "resume")
             else:
-                r = self._queue_move(s, [torrent_hash], {"top": "topPrio", "up": "increasePrio", "down": "decreasePrio", "bottom": "bottomPrio"}[action])
+                moves = {"top": "topPrio", "up": "increasePrio", "down": "decreasePrio", "bottom": "bottomPrio"}
+                reply = self._queue_move(session, [torrent_hash], moves[action])
         except (integrations.IntegrationError, requests.RequestException) as exc:
             raise MediaError("Could not reach qBittorrent: %s" % exc)
-        if r.status_code >= 400:
-            raise MediaError("qBittorrent said no (%s)." % r.status_code)
+        if reply.status_code >= 400:
+            raise MediaError("qBittorrent said no (%s)." % reply.status_code)
         if action == "resume":
             self.unpark(torrent_hash)
         return True
@@ -1103,14 +1186,16 @@ class Media:
         waiting for qBittorrent, downloading, then added to the library by Family Hub's intake."""
         torrents = self.torrents() if torrents is None else torrents
         want = _plain(title)
-        t = next((x for x in torrents if x["type"] == "Book" and want and (_plain(x["name"]) == want or want in _plain(x["name"]))), None)
-        if t and not t["done"]:
-            text = "Downloading through the VPN · %d%%" % t["progress"] if t["state"] == "Downloading" else t["state"]
+        download = next((torrent for torrent in torrents
+                         if torrent["type"] == "Book" and want and (_plain(torrent["name"]) == want or want in _plain(torrent["name"]))), None)
+        if download and not download["done"]:
+            text = "Downloading through the VPN · %d%%" % download["progress"] if download["state"] == "Downloading" else download["state"]
+            # the bar runs 10 -> 90 while downloading; the last 10% is the library filing it
             return {"title": title, "finished": False,
-                    "now": {"text": text, "state": "bad" if t["trouble"] else "active", "progress": 10 + t["progress"] * 80 // 100}}
+                    "now": {"text": text, "state": "bad" if download["trouble"] else "active", "progress": 10 + download["progress"] * 80 // 100}}
         if self._book_filed(title):
             return {"title": title, "finished": True, "now": {"text": "In the library", "state": "done", "progress": 100}}
-        if t:
+        if download:
             return {"title": title, "finished": False, "downloaded": True, "filing": "filing",
                     "now": {"text": "Downloaded · being added to the library", "state": "active", "progress": 95}}
         return {"title": title, "finished": False,
@@ -1123,6 +1208,7 @@ class Media:
             return False
         for row in self.hub.con().execute("SELECT path FROM imported_files ORDER BY at DESC LIMIT 200"):
             name = _plain(Path(str(row[0]).replace("\\", "/")).stem)
+            # integer maths for "at least 60% of the words, rounded up": (n*6 + 9) // 10
             if len(words & set(name.split())) >= max(1, (len(words) * 6 + 9) // 10):
                 return True
         return False
@@ -1133,44 +1219,46 @@ class Media:
         from datetime import datetime, timedelta, timezone
         if not (self.config.prowlarr_url and self._key("prowlarr")):
             return {"sites": 0, "answered": 0, "names": []}
-        pkey = {"X-Api-Key": self._key("prowlarr")}
-        names = {i["id"]: i["name"] for i in _call("GET", self.config.prowlarr_url + "/api/v1/indexer", pkey) or [] if i.get("enable")}
-        records = (_call("GET", self.config.prowlarr_url + "/api/v1/history", pkey,
+        prowlarr_key = {"X-Api-Key": self._key("prowlarr")}
+        names = {indexer["id"]: indexer["name"] for indexer in _call("GET", self.config.prowlarr_url + "/api/v1/indexer", prowlarr_key) or []
+                 if indexer.get("enable")}
+        records = (_call("GET", self.config.prowlarr_url + "/api/v1/history", prowlarr_key,
                          params={"pageSize": 100, "sortKey": "date", "sortDirection": "descending",
                                  "eventType": 2}) or {}).get("records") or []  # 2 = a site was asked
         # A little slack for the two computers' clocks and for the search reaching Prowlarr.
         since = datetime.now(timezone.utc) - timedelta(seconds=max(0, seconds_ago) + 5)
         words = _plain(query)
         answered = []
-        for r in records:
+        for record in records:
             try:
-                at = datetime.fromisoformat(re.sub(r"\.\d+", "", r.get("date", "")).replace("Z", "+00:00"))
+                # strip the fractional seconds first: older pythons choke on 7-digit fractions, which .NET loves
+                at = datetime.fromisoformat(re.sub(r"\.\d+", "", record.get("date", "")).replace("Z", "+00:00"))
             except ValueError:
                 continue
             if at.tzinfo is None:
                 at = at.replace(tzinfo=timezone.utc)
-            if at < since or r.get("eventType") not in ("indexerQuery", None) or r.get("indexerId") not in names:
+            if at < since or record.get("eventType") not in ("indexerQuery", None) or record.get("indexerId") not in names:
                 continue
-            asked = _plain((r.get("data") or {}).get("query"))
-            if words and (words in asked or asked in words) and names[r["indexerId"]] not in answered:
-                answered.append(names[r["indexerId"]])
+            asked = _plain((record.get("data") or {}).get("query"))
+            if words and (words in asked or asked in words) and names[record["indexerId"]] not in answered:
+                answered.append(names[record["indexerId"]])
         return {"sites": len(names), "answered": min(len(answered), len(names)), "names": answered[:3]}
 
     def delete_download(self, torrent_hash):
         """Delete a download everywhere: from qBittorrent with its files and, when it is for a film or show,
         that film or show from the server too (Radarr or Sonarr, its files, and so Jellyfin). Returns what went."""
         from . import integrations
-        found = next((t for t in self.torrents() if t["hash"].lower() == (torrent_hash or "").lower()), None)
+        found = next((torrent for torrent in self.torrents() if torrent["hash"].lower() == (torrent_hash or "").lower()), None)
         if not found:
             raise MediaError("That download is not in qBittorrent any more.")
         try:
-            s = integrations.qbit_session(self.config)
-            r = s.post(self.config.qbit_url + "/api/v2/torrents/delete",
-                       data={"hashes": found["hash"], "deleteFiles": "true"}, timeout=8)
+            session = integrations.qbit_session(self.config)
+            reply = session.post(self.config.qbit_url + "/api/v2/torrents/delete",
+                                 data={"hashes": found["hash"], "deleteFiles": "true"}, timeout=8)
         except (integrations.IntegrationError, requests.RequestException) as exc:
             raise MediaError("Could not reach qBittorrent: %s" % exc)
-        if r.status_code >= 400:
-            raise MediaError("qBittorrent said no (%s)." % r.status_code)
+        if reply.status_code >= 400:
+            raise MediaError("qBittorrent said no (%s)." % reply.status_code)
         if found["kind"] and found["id"]:
             try:
                 self.remove(found["kind"], found["id"])
@@ -1182,27 +1270,30 @@ class Media:
 
     def history(self, limit=8):
         """Recently added to the library: what Radarr and Sonarr filed lately."""
-        out = []
+        filed = []
         for kind in ("film", "show"):
             if not self.configured(kind):
                 continue
+            extra = {"includeMovie": "true"} if kind == "film" else {"includeSeries": "true", "includeEpisode": "true"}
             try:
                 arr = self.arr(kind)
+                # eventType 3 = "downloadFolderImported", i.e. it landed in the library
                 records = (arr.get("history", pageSize=limit, sortKey="date", sortDirection="descending",
-                                   eventType=3, **({"includeMovie": "true"} if kind == "film" else {"includeSeries": "true", "includeEpisode": "true"})) or {}).get("records", [])
+                                   eventType=3, **extra) or {}).get("records", [])
             except MediaError:
                 continue
             requested = self.requested_by(kind)
-            for r in records:
+            for record in records:
                 if kind == "film":
-                    title, owner = (r.get("movie") or {}).get("title") or r.get("sourceTitle"), r.get("movieId")
+                    title, owner = (record.get("movie") or {}).get("title") or record.get("sourceTitle"), record.get("movieId")
                 else:
-                    ep = r.get("episode") or {}
-                    title = "%s · S%02dE%02d" % ((r.get("series") or {}).get("title") or "", ep.get("seasonNumber") or 0, ep.get("episodeNumber") or 0)
-                    owner = r.get("seriesId")
-                out.append({"kind": kind, "title": title, "at": r.get("date"), "requested_by": requested.get(owner)})
-        out.sort(key=lambda x: x["at"] or "", reverse=True)
-        return out[:limit]
+                    episode = record.get("episode") or {}
+                    title = "%s · S%02dE%02d" % ((record.get("series") or {}).get("title") or "", episode.get("seasonNumber") or 0,
+                                                 episode.get("episodeNumber") or 0)
+                    owner = record.get("seriesId")
+                filed.append({"kind": kind, "title": title, "at": record.get("date"), "requested_by": requested.get(owner)})
+        filed.sort(key=lambda entry: entry["at"] or "", reverse=True)
+        return filed[:limit]
 
     # ------------------------------------------------------------ Jellyfin
 
@@ -1213,10 +1304,11 @@ class Media:
             "Limit": limit, "Fields": "ProductionYear,DateCreated,Overview"}) or {}).get("Items", [])
         link = self.config.jellyfin_link
         return [{
-            "id": i["Id"], "title": i.get("Name") or "", "year": i.get("ProductionYear"), "kind": "film" if i.get("Type") == "Movie" else "show",
-            "added": (i.get("DateCreated") or "")[:10], "poster": "/api/media/jellyfin-image/" + i["Id"],
-            "watch": (link + "/web/#/details?id=" + i["Id"]) if link else "",
-        } for i in items]
+            "id": item["Id"], "title": item.get("Name") or "", "year": item.get("ProductionYear"),
+            "kind": "film" if item.get("Type") == "Movie" else "show",
+            "added": (item.get("DateCreated") or "")[:10], "poster": "/api/media/jellyfin-image/" + item["Id"],
+            "watch": (link + "/web/#/details?id=" + item["Id"]) if link else "",
+        } for item in items]
 
     def _jellyfin_match(self, kind, item):
         """Jellyfin's id for a film or show, matched by its TMDB or TVDB number, or None."""
@@ -1224,9 +1316,10 @@ class Media:
         found = (self.jellyfin("GET", "/Items", params={
             "Recursive": "true", "IncludeItemTypes": "Movie" if kind == "film" else "Series",
             "searchTerm": item.get("title") or "", "Fields": "ProviderIds", "Limit": 20}) or {}).get("Items", [])
-        for i in found:
-            if str((i.get("ProviderIds") or {}).get(provider) or "") == str(number or "-"):
-                return i["Id"]
+        for candidate in found:
+            # str(number or "-"): with no number we compare against "-", which no real id ever is
+            if str((candidate.get("ProviderIds") or {}).get(provider) or "") == str(number or "-"):
+                return candidate["Id"]
         # A different spelling of the name: fall back to the only result, if there is just one.
         return found[0]["Id"] if len(found) == 1 else None
 
@@ -1235,33 +1328,34 @@ class Media:
         downloaded yet are listed too. {"jellyfin": {"link", "port"}, "watch_id"} or {..., "seasons": [...]}."""
         arr = self.arr(kind)
         item = arr.get(("movie/%d" if kind == "film" else "series/%d") % arr_id)
-        out = {"jellyfin": {"link": self.config.jellyfin_link, "port": self.config.service_ports["jellyfin"]}}
+        where = {"jellyfin": {"link": self.config.jellyfin_link, "port": self.config.service_ports["jellyfin"]}}
         try:
-            jid = self._jellyfin_match(kind, item)
+            jellyfin_id = self._jellyfin_match(kind, item)
         except MediaError:
-            jid = None  # Jellyfin not set up or not answering: still list the episodes
+            jellyfin_id = None  # Jellyfin not set up or not answering: still list the episodes
         if kind == "film":
-            out["watch_id"] = jid
-            return out
+            where["watch_id"] = jellyfin_id
+            return where
         ids = {}
-        if jid:
+        if jellyfin_id:
             try:
-                for e in (self.jellyfin("GET", "/Shows/%s/Episodes" % jid) or {}).get("Items", []):
-                    ids[(e.get("ParentIndexNumber"), e.get("IndexNumber"))] = e["Id"]
+                for episode in (self.jellyfin("GET", "/Shows/%s/Episodes" % jellyfin_id) or {}).get("Items", []):
+                    ids[(episode.get("ParentIndexNumber"), episode.get("IndexNumber"))] = episode["Id"]
             except MediaError:
                 pass
         seasons = {}
         coming = (self.downloading("show").get(arr_id) or {}).get("ids", {})
-        for e in arr.get("episode", seriesId=arr_id) or []:
-            if not e.get("seasonNumber"):
+        for episode in arr.get("episode", seriesId=arr_id) or []:
+            if not episode.get("seasonNumber"):
                 continue  # specials
-            seasons.setdefault(e["seasonNumber"], []).append({
-                "number": e.get("episodeNumber"), "title": e.get("title") or "", "aired": (e.get("airDate") or "")[:10],
-                "on_server": bool(e.get("hasFile")), "wanted": bool(e.get("monitored")), "downloading": coming.get(e.get("id")),
-                "watch_id": ids.get((e["seasonNumber"], e.get("episodeNumber"))),
+            seasons.setdefault(episode["seasonNumber"], []).append({
+                "number": episode.get("episodeNumber"), "title": episode.get("title") or "", "aired": (episode.get("airDate") or "")[:10],
+                "on_server": bool(episode.get("hasFile")), "wanted": bool(episode.get("monitored")), "downloading": coming.get(episode.get("id")),
+                "watch_id": ids.get((episode["seasonNumber"], episode.get("episodeNumber"))),
             })
-        out["seasons"] = [{"number": n, "episodes": sorted(eps, key=lambda x: x["number"] or 0)} for n, eps in sorted(seasons.items())]
-        return out
+        where["seasons"] = [{"number": number, "episodes": sorted(episodes, key=lambda episode: episode["number"] or 0)}
+                            for number, episodes in sorted(seasons.items())]
+        return where
 
     # ------------------------------------------------------- VPN and ports
 
@@ -1306,7 +1400,7 @@ class Media:
                     found[service + "_api_key"] = key
         if found:
             settings.save(self.hub, found)
-            steps.append(("API keys", True, "Read from the services' own settings: " + ", ".join(k.split("_")[0].title() for k in found)))
+            steps.append(("API keys", True, "Read from the services' own settings: " + ", ".join(name.split("_")[0].title() for name in found)))
 
         # First, so the download-client steps below already use qBittorrent's new sign-in.
         if self.config.services_user and self.config.services_pass:
@@ -1316,10 +1410,11 @@ class Media:
                 steps.append((("Films" if kind == "film" else "TV shows"), False, "Not set up: no address under Connections."))
                 continue
             label = "Radarr" if kind == "film" else "Sonarr"
-            step(label + " → media folder", lambda k=kind: self._ensure_root(k))
-            step(label + " → quality (2160p first)", lambda k=kind: self._ensure_profile(k))
-            step(label + " → qBittorrent", lambda k=kind: self._ensure_client(k))
-            step("Prowlarr → " + label, lambda k=kind: self._ensure_prowlarr_app(k))
+            # kind=kind freezes each lambda's kind; without it all four would see whatever kind the loop ended on
+            step(label + " → media folder", lambda kind=kind: self._ensure_root(kind))
+            step(label + " → quality (2160p first)", lambda kind=kind: self._ensure_profile(kind))
+            step(label + " → qBittorrent", lambda kind=kind: self._ensure_client(kind))
+            step("Prowlarr → " + label, lambda kind=kind: self._ensure_prowlarr_app(kind))
         if self.config.qbit_url:
             step("qBittorrent → download folders", self._ensure_categories)
             if self.config.prowlarr_url and self._key("prowlarr"):
@@ -1356,11 +1451,11 @@ class Media:
                                                          ("settings-auth-password", password)])
             done.append("Bazarr")
         if self.config.qbit_url and (self.config.qbit_user, self.config.qbit_pass) != (user, password):
-            s = integrations.qbit_session(self.config)  # signed in with the old sign-in
-            r = s.post(self.config.qbit_url + "/api/v2/app/setPreferences",
-                       data={"json": json.dumps({"web_ui_username": user, "web_ui_password": password})}, timeout=8)
-            if r.status_code >= 400:
-                raise MediaError("qBittorrent would not change its sign-in (%s)." % r.status_code)
+            session = integrations.qbit_session(self.config)  # signed in with the old sign-in
+            reply = session.post(self.config.qbit_url + "/api/v2/app/setPreferences",
+                                 data={"json": json.dumps({"web_ui_username": user, "web_ui_password": password})}, timeout=8)
+            if reply.status_code >= 400:
+                raise MediaError("qBittorrent would not change its sign-in (%s)." % reply.status_code)
             settings.save(self.hub, {"qbit_user": user, "qbit_pass": password})  # so Family Hub keeps getting in
             done.append("qBittorrent")
         elif self.config.qbit_url:
@@ -1369,7 +1464,7 @@ class Media:
 
     def _ensure_root(self, kind):
         arr, path = self.arr(kind), FILMS_ROOT if kind == "film" else TV_ROOT
-        if any(r["path"].rstrip("/") == path for r in arr.get("rootfolder")):
+        if any(root["path"].rstrip("/") == path for root in arr.get("rootfolder")):
             return "Already set: " + path
         arr("POST", "rootfolder", json={"path": path})
         return "Added " + path
@@ -1380,14 +1475,19 @@ class Media:
         items = schema["items"]
 
         def quality_of(item):
-            q = item.get("quality") or {}
-            return [q] if q else [x["quality"] for x in item.get("items") or [] if x.get("quality")]
+            """An item is either one quality or a group of them; either way, a list."""
+            quality = item.get("quality") or {}
+            return [quality] if quality else [inner["quality"] for inner in item.get("items") or [] if inner.get("quality")]
+
+        def skipped(name):
+            return any(skip in name.lower() for skip in SKIP_QUALITIES)
 
         def wanted(item):
-            qs = quality_of(item)
-            name = (item.get("name") or (qs[0]["name"] if qs else "")).lower()
-            return bool(qs) and not any(s in name for s in SKIP_QUALITIES) and \
-                all((q.get("resolution") in RESOLUTIONS or q["name"] == "DVD") and not any(s in q["name"].lower() for s in SKIP_QUALITIES) for q in qs)
+            qualities = quality_of(item)
+            name = item.get("name") or (qualities[0]["name"] if qualities else "")
+            return bool(qualities) and not skipped(name) and all(
+                (quality.get("resolution") in RESOLUTIONS or quality["name"] == "DVD") and not skipped(quality["name"])
+                for quality in qualities)
 
         best = None
         for item in items:  # the schema lists the lowest quality first
@@ -1401,7 +1501,7 @@ class Media:
             raise MediaError("No playable qualities were offered.")
         body = dict(schema, name=PROFILE_NAME, upgradeAllowed=True, items=items,
                     cutoff=best.get("id") or best["quality"]["id"])
-        existing = next((p for p in arr.get("qualityprofile") if p["name"] == PROFILE_NAME), None)
+        existing = next((profile for profile in arr.get("qualityprofile") if profile["name"] == PROFILE_NAME), None)
         if existing:
             arr("PUT", "qualityprofile/%d" % existing["id"], json=dict(body, id=existing["id"]))
             return "Updated the Family Hub profile"
@@ -1409,8 +1509,8 @@ class Media:
         return "Made the Family Hub profile: 2160p, then 1080p, then 720p, then the best there is, no remux"
 
     def _qbit_address(self):
-        u = urlparse(self.config.qbit_url)
-        return u.hostname, u.port or (443 if u.scheme == "https" else 80), u.scheme == "https"
+        address = urlparse(self.config.qbit_url)
+        return address.hostname, address.port or (443 if address.scheme == "https" else 80), address.scheme == "https"
 
     def _ensure_client(self, kind):
         arr = self.arr(kind)
@@ -1419,18 +1519,14 @@ class Media:
         host, port, ssl = self._qbit_address()
         values = {"host": host, "port": port, "useSsl": ssl, "username": self.config.qbit_user, "password": self.config.qbit_pass,
                   "movieCategory": "movies", "tvCategory": "tv"}
-        existing = next((c for c in arr.get("downloadclient") if c.get("implementation") == "QBittorrent"), None)
+        existing = next((client for client in arr.get("downloadclient") if client.get("implementation") == "QBittorrent"), None)
         if existing:
             # Keep its address and sign-in in step with Connections, so a changed qBittorrent password reaches it too.
-            for f in existing.get("fields") or []:
-                if f.get("name") in ("host", "port", "useSsl", "username", "password"):
-                    f["value"] = values[f["name"]]
+            _fill(existing, values, only=("host", "port", "useSsl", "username", "password"))
             arr("PUT", "downloadclient/%d" % existing["id"], params={"forceSave": "true"}, json=existing)
             return "Already connected · sign-in brought up to date"
-        schema = next(s for s in arr.get("downloadclient/schema") if s.get("implementation") == "QBittorrent")
-        for f in schema.get("fields") or []:
-            if f["name"] in values:
-                f["value"] = values[f["name"]]
+        schema = next(found for found in arr.get("downloadclient/schema") if found.get("implementation") == "QBittorrent")
+        _fill(schema, values)
         body = dict(schema, name="qBittorrent (through the VPN)", enable=True, priority=1)
         # Saved even while the VPN is down; Radarr and Sonarr test it again by themselves later.
         arr("POST", "downloadclient", params={"forceSave": "true"}, json=body)
@@ -1442,14 +1538,12 @@ class Media:
         impl = "Radarr" if kind == "film" else "Sonarr"
         headers = {"X-Api-Key": self.config.prowlarr_api_key}
         apps = _call("GET", self.config.prowlarr_url + "/api/v1/applications", headers) or []
-        if any(a.get("implementation") == impl for a in apps):
+        if any(app.get("implementation") == impl for app in apps):
             return "Already connected"
-        schema = next(s for s in _call("GET", self.config.prowlarr_url + "/api/v1/applications/schema", headers) if s.get("implementation") == impl)
+        schema = next(found for found in _call("GET", self.config.prowlarr_url + "/api/v1/applications/schema", headers)
+                      if found.get("implementation") == impl)
         arr = self.arr(kind)
-        values = {"prowlarrUrl": self.config.prowlarr_url, "baseUrl": arr.url, "apiKey": arr.key}
-        for f in schema.get("fields") or []:
-            if f["name"] in values:
-                f["value"] = values[f["name"]]
+        _fill(schema, {"prowlarrUrl": self.config.prowlarr_url, "baseUrl": arr.url, "apiKey": arr.key})
         _call("POST", self.config.prowlarr_url + "/api/v1/applications", headers, params={"forceSave": "true"},
               json=dict(schema, name=impl, syncLevel="fullSync"))
         return "Prowlarr now shares its indexers with " + impl
@@ -1460,42 +1554,38 @@ class Media:
         host, port, ssl = self._qbit_address()
         values = {"host": host, "port": port, "useSsl": ssl, "username": self.config.qbit_user,
                   "password": self.config.qbit_pass, "category": self.config.qbit_category or "books"}
-        existing = next((c for c in _call("GET", url, headers) or [] if c.get("implementation") == "QBittorrent"), None)
+        existing = next((client for client in _call("GET", url, headers) or [] if client.get("implementation") == "QBittorrent"), None)
         if existing:
-            for f in existing.get("fields") or []:
-                if f.get("name") in ("host", "port", "useSsl", "username", "password"):
-                    f["value"] = values[f["name"]]
+            _fill(existing, values, only=("host", "port", "useSsl", "username", "password"))
             _call("PUT", "%s/%d" % (url, existing["id"]), headers, params={"forceSave": "true"}, json=existing)
             return "Already connected · sign-in brought up to date"
-        schema = next(s for s in _call("GET", url + "/schema", headers) if s.get("implementation") == "QBittorrent")
-        for f in schema.get("fields") or []:
-            if f["name"] in values:
-                f["value"] = values[f["name"]]
+        schema = next(found for found in _call("GET", url + "/schema", headers) if found.get("implementation") == "QBittorrent")
+        _fill(schema, values)
         _call("POST", url, headers, params={"forceSave": "true"}, json=dict(schema, name="qBittorrent", enable=True))
         return "Books from Discover go to qBittorrent, category %s" % values["category"]
 
     def _ensure_categories(self):
         from . import integrations
-        s = integrations.qbit_session(self.config)
+        session = integrations.qbit_session(self.config)
         base = self.config.qbit_url + "/api/v2/torrents/"
         wanted = dict(TORRENTS)
         wanted[self.config.qbit_category or "books"] = "/downloads"
-        have = s.get(base + "categories", timeout=8).json() or {}
+        have = session.get(base + "categories", timeout=8).json() or {}
         for name, path in wanted.items():
-            s.post(base + ("editCategory" if name in have else "createCategory"), data={"category": name, "savePath": path}, timeout=8)
+            session.post(base + ("editCategory" if name in have else "createCategory"), data={"category": name, "savePath": path}, timeout=8)
         # Category folders only count when qBittorrent manages where torrents go. Without that, films and TV land in
         # its default folder (the books one), which Radarr and Sonarr cannot see, so nothing is ever filed.
         prefs = dict(QUEUE_PREFS, auto_tmm_enabled=True, **FINISHED_PREFS)
-        current = s.get(self.config.qbit_url + "/api/v2/app/preferences", timeout=8).json() or {}
-        # qBittorrent's own slow mode is 10 KB/s, which all but stops downloads; give it a gentler start.
+        current = session.get(self.config.qbit_url + "/api/v2/app/preferences", timeout=8).json() or {}
+        # qBittorrent's out-of-the-box slow mode is 10 KB/s, i.e. basically "off". only nudge it if it's still on that default
         if current.get("alt_dl_limit") == 10240 and current.get("alt_up_limit") == 10240:
             prefs.update(alt_dl_limit=2 * 1048576, alt_up_limit=512 * 1024)
-        s.post(self.config.qbit_url + "/api/v2/app/setPreferences", data={"json": json.dumps(prefs)}, timeout=8)
+        session.post(self.config.qbit_url + "/api/v2/app/setPreferences", data={"json": json.dumps(prefs)}, timeout=8)
         # Films and TV that went to the wrong folder before are moved into theirs, so they can be filed after all.
-        stray = [t["hash"] for t in s.get(base + "info", timeout=8).json() or []
-                 if t.get("category") in TORRENTS and not t.get("auto_tmm") and t.get("hash")]
+        stray = [torrent["hash"] for torrent in session.get(base + "info", timeout=8).json() or []
+                 if torrent.get("category") in TORRENTS and not torrent.get("auto_tmm") and torrent.get("hash")]
         if stray:
-            s.post(base + "setAutoManagement", data={"hashes": "|".join(stray), "enable": "true"}, timeout=8)
+            session.post(base + "setAutoManagement", data={"hashes": "|".join(stray), "enable": "true"}, timeout=8)
         return "Films → torrents/movies, TV → torrents/tv, books → the finished-downloads folder" + \
             (" · moved %d earlier download%s into %s folder" % (len(stray), "" if len(stray) == 1 else "s", "its" if len(stray) == 1 else "their")
              if stray else "")
@@ -1504,21 +1594,19 @@ class Media:
         """Point Bazarr at Radarr and Sonarr and ask for English subtitles, forced ones too. Untested against a live Bazarr."""
         form = [("settings-general-use_radarr", "true"), ("settings-general-use_sonarr", "true")]
         for service, port in (("radarr", 7878), ("sonarr", 8989)):
-            u = urlparse(getattr(self.config, service + "_url"))
-            form += [("settings-%s-ip" % service, u.hostname or service), ("settings-%s-port" % service, str(u.port or port)),
-                     ("settings-%s-base_url" % service, u.path or ""), ("settings-%s-ssl" % service, "false"),
+            address = urlparse(getattr(self.config, service + "_url"))
+            form += [("settings-%s-ip" % service, address.hostname or service), ("settings-%s-port" % service, str(address.port or port)),
+                     ("settings-%s-base_url" % service, address.path or ""), ("settings-%s-ssl" % service, "false"),
                      ("settings-%s-apikey" % service, self._key(service))]
-        langs = [x.strip() for x in (self.config.subtitle_langs or "en").split(",") if x.strip()]
-        items, n = [], 0
-        for code in langs:
-            # Normal subtitles (hearing-impaired ones are accepted when nothing else exists) and the
-            # "forced" ones that only cover foreign-language lines.
-            for forced in ("False", "True"):
-                n += 1
-                items.append({"id": n, "language": code, "audio_exclude": "False", "hi": "False", "forced": forced})
-        # Bazarr replaces its whole list of language profiles with what is sent, so keep the admin's own.
-        others = [p for p in (self.bazarr("GET", "system/languages/profiles") or []) if p.get("name") != PROFILE_NAME]
-        ours = max([p.get("profileId") or 0 for p in others] + [0]) + 1
+        langs = [lang.strip() for lang in (self.config.subtitle_langs or "en").split(",") if lang.strip()]
+        # Normal subtitles (hearing-impaired ones are accepted when nothing else exists) and the
+        # "forced" ones that only cover foreign-language lines.
+        pairs = [(code, forced) for code in langs for forced in ("False", "True")]
+        items = [{"id": number, "language": code, "audio_exclude": "False", "hi": "False", "forced": forced}
+                 for number, (code, forced) in enumerate(pairs, 1)]
+        # heads up: Bazarr REPLACES the whole profile list with whatever we send, so the admin's own go back in too
+        others = [profile for profile in (self.bazarr("GET", "system/languages/profiles") or []) if profile.get("name") != PROFILE_NAME]
+        ours = max([profile.get("profileId") or 0 for profile in others] + [0]) + 1
         profile = others + [{"profileId": ours, "name": PROFILE_NAME, "items": items, "cutoff": None,
                              "mustContain": [], "mustNotContain": [], "originalFormat": False}]
         form += [("languages-enabled", code) for code in langs]
@@ -1530,7 +1618,7 @@ class Media:
             sources.append("opensubtitlescom")
             form += [("settings-opensubtitlescom-username", self.config.opensubtitles_user),
                      ("settings-opensubtitlescom-password", self.config.opensubtitles_pass)]
-        form += [("settings-general-enabled_providers", p) for p in sources]
+        form += [("settings-general-enabled_providers", source) for source in sources]
         self.bazarr("POST", "system/settings", data=form)
         return "Languages: %s · sources: %s" % (", ".join(langs), ", ".join(sources))
 
@@ -1541,7 +1629,7 @@ class Media:
         folders = self.jellyfin("GET", "/Library/VirtualFolders") or []
         made = []
         for name, kind, path in (("Films", "movies", "/media/movies"), ("TV shows", "tvshows", "/media/tv")):
-            if any(f.get("CollectionType") == kind for f in folders):
+            if any(folder.get("CollectionType") == kind for folder in folders):
                 continue
             self.jellyfin("POST", "/Library/VirtualFolders", params={"name": name, "collectionType": kind, "paths": path, "refreshLibrary": "true"},
                           json={"LibraryOptions": {}})

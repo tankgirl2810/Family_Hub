@@ -37,10 +37,10 @@ def save(con, book_key, rating, count=0, source=OPEN_LIBRARY):
 
 def index(hub):
     """{book_key: {"rating": 4.1, "count": 230, "source": "Open Library"}} for books that have one."""
-    return {r["book_key"]: {"rating": r["rating"], "count": r["count"], "source": LABEL.get(r["source"], r["source"])}
-            for r in hub.con().execute("SELECT * FROM public_ratings WHERE rating IS NOT NULL")
-            # Goodreads' feeds give no count, but its averages rest on far more than ten people.
-            if r["source"] == GOODREADS or r["count"] >= MIN_RATINGS}
+    return {row["book_key"]: {"rating": row["rating"], "count": row["count"], "source": LABEL.get(row["source"], row["source"])}
+            for row in hub.con().execute("SELECT * FROM public_ratings WHERE rating IS NOT NULL")
+            # goodreads never tells us the count, but trust me, it's way more than ten people
+            if row["source"] == GOODREADS or row["count"] >= MIN_RATINGS}
 
 
 def _age(row):
@@ -49,7 +49,7 @@ def _age(row):
 
 def pending(hub):
     """Library books whose rating has never been asked for, or was asked long ago."""
-    rows = {r["book_key"]: r for r in hub.con().execute("SELECT * FROM public_ratings")}
+    rows = {row["book_key"]: row for row in hub.con().execute("SELECT * FROM public_ratings")}
 
     def due(book):
         row = rows.get(book["key"])
@@ -59,7 +59,7 @@ def pending(hub):
             return False  # kept fresh by the shelf feeds
         return _age(row) > timedelta(days=REFRESH_DAYS if row["rating"] else RETRY_DAYS)
 
-    return [b for b in hub.library.books() if calibre.real_name(b) and due(b)]
+    return [book for book in hub.library.books() if calibre.real_name(book) and due(book)]
 
 
 def _answers(config, book):
@@ -81,8 +81,9 @@ def _answers(config, book):
 
 def look_up(hub, book):
     """Ask the catalogues about one book and keep the average that the most people stand behind."""
-    found = [a for a in _answers(hub.config, book) if a[0]]
-    rating, count, source = max(found, key=lambda a: a[1]) if found else (None, 0, OPEN_LIBRARY)
+    found = [answer for answer in _answers(hub.config, book) if answer[0]]
+    # whichever answer has the most people behind it wins
+    rating, count, source = max(found, key=lambda answer: answer[1]) if found else (None, 0, OPEN_LIBRARY)
     con = hub.con()
     save(con, book["key"], rating, count, source)
     con.commit()

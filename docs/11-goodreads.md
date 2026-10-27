@@ -22,8 +22,8 @@ Family Hub only reads from Goodreads. It never changes anything there.
 
 1. On Goodreads, open your profile and copy the address. It looks like
    `https://www.goodreads.com/user/show/12345678-your-name`.
-2. In Family Hub open **Profiles**, and under **Settings for** your name find
-   **Goodreads**.
+2. In Family Hub press your name at the top right, and under **Settings
+   for** your name find **Goodreads**.
 3. Paste the address and press **Save link**.
 
 The shelves are read straight away (a long list takes a minute) and then
@@ -67,7 +67,8 @@ shown in the Library with:
   not get this link;
 - **View on Goodreads**.
 
-"On Kindle only" means *someone in the family has this on Goodreads*.
+"On Kindle only" (the Goodreads settings call them "Available on Kindle")
+means *someone in the family has this on Goodreads*.
 Goodreads' feeds do not say whether that was a Kindle book or a paperback, so
 a few will be paper copies.
 

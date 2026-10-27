@@ -23,11 +23,13 @@ sample reading history. Delete that folder to start again from scratch.
 
 Things worth trying:
 
-- Library → choose **− Must not have**, click the tag `slow`, then press **Search**.
+- Library → press **Refine**, under **Add tags as** choose **− Must not have**, click the tag
+  `Slow burn` (under **All tags** if it is not shown), then press **Search**.
 - Open a book → add a family tag, add a personal tag, give it stars.
 - Dashboard → click a filter chip, then switch between Books and Pages.
 - Admin → Books → **Back up now**, then **Download book data**.
-- Profiles → sign out → open **Nan** using **Admin override**.
+- Press your name at the top right, then **Sign out of You**, then open
+  **Nan** using **Admin override**.
 
 Stop it with `Ctrl+C` in the window that is running it.
 
@@ -38,8 +40,9 @@ This runs the same containers the server will run.
 **You need:** [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 (Windows or macOS) or Docker Engine (Linux).
 
-> This setup has not been run yet (see the README). If a container fails to
-> start, `docker compose logs <name>` shows why.
+> This setup has run on a Windows PC with Docker Desktop, but not yet on a
+> Linux server (see the README). If a container fails to start,
+> `docker compose logs <name>` shows why.
 
 1. In the project folder, copy `.env.example` to `.env`.
 2. Open `.env` in a text editor and check `TZ`. If you already have a Calibre

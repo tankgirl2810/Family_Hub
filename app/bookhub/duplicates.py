@@ -42,11 +42,12 @@ def _digest(path):
     stamp = path.stat()
     key = (str(path), stamp.st_size, int(stamp.st_mtime))
     if key not in _hashes:
-        h = hashlib.sha1()
-        with open(path, "rb") as f:
-            for block in iter(lambda: f.read(1 << 20), b""):
-                h.update(block)
-        _hashes[key] = h.hexdigest()
+        digest = hashlib.sha1()
+        with open(path, "rb") as file:
+            # iter() with a sentinel: keep calling read() until it hands back b"" (end of file). 1 MB bites
+            for block in iter(lambda: file.read(1 << 20), b""):
+                digest.update(block)
+        _hashes[key] = digest.hexdigest()
     return _hashes[key]
 
 
@@ -62,10 +63,11 @@ def details(book):
 def made_by_calibre(path):
     """Was this EPUB produced by Calibre's converter (as the library manager does with a MOBI)?"""
     try:
-        with zipfile.ZipFile(path) as z:
-            names = {n.rsplit("/", 1)[-1] for n in z.namelist()}
+        with zipfile.ZipFile(path) as epub:
+            names = {name.rsplit("/", 1)[-1] for name in epub.namelist()}
     except (OSError, zipfile.BadZipFile):
         return False
+    # Calibre's converter always leaves these two stylesheets behind. its fingerprint, basically
     return "page_styles.css" in names and "stylesheet.css" in names
 
 
@@ -94,10 +96,11 @@ class Duplicates:
         return True
 
     def _similar(self, keep, spare):
-        shared = [f for f in spare["own_formats"] if f in keep["own_formats"]]
+        shared = [fmt for fmt in spare["own_formats"] if fmt in keep["own_formats"]]
         for fmt in shared:
-            a, b = keep["sizes"].get(fmt, 0), spare["sizes"].get(fmt, 0)
-            if not max(a, b) or abs(a - b) / max(a, b) > SIMILAR:
+            kept_size, spare_size = keep["sizes"].get(fmt, 0), spare["sizes"].get(fmt, 0)
+            bigger = max(kept_size, spare_size)
+            if not bigger or abs(kept_size - spare_size) / bigger > SIMILAR:
                 return False
         return bool(spare["own_formats"]) and bool(keep["own_formats"])
 
@@ -107,57 +110,63 @@ class Duplicates:
         converted = bool(epub) and made_by_calibre(Path(self.hub.config.library_dir) / epub)
         return (converted,) + calibre._best_first(book)
 
-    def plan(self, s):
+    def plan(self, group):
         """What to do with one set, and why."""
-        books = list(s["books"])
-        out = {"key": s["key"], "title": books[0]["title"], "author": books[0]["author"], "copy": [], "lost": [], "why": ""}
-        if s["choice"] == calibre.APART:
+        if group["choice"] == calibre.APART:
             return None  # an admin has said these are different books
-        doubtful = len(s["shown"]) > 1 and s["choice"] != calibre.TOGETHER
+        books = list(group["books"])
+        doubtful = len(group["shown"]) > 1 and group["choice"] != calibre.TOGETHER
         keep = min(books, key=self._original_first)
-        spares = [b for b in books if b is not keep]
-        cls = IDENTICAL
-        if doubtful and not all(self._same_files(keep, b) for b in spares):
-            cls, out["why"] = REVIEW, "The title looks like a file name or the author like a user name, so these may be different documents."
-        elif not all(self._same_files(keep, b) for b in spares):
-            if not all(self._similar(keep, b) for b in spares):
-                cls = REVIEW
-                out["why"] = ("One entry has no book file." if any(not b["own_formats"] for b in books)
-                              else "The files differ in size by more than %d%%." % round(SIMILAR * 100))
-            else:
-                have = [details(b) for b in books]
-                if all(h == have[0] for h in have):
-                    cls = DUPLICATE
-                else:
-                    # The entry with the better file is kept and the other's details are brought across to it.
-                    # The library manager cannot copy an ISBN, a date or a cover, so losing one needs a person.
-                    mine = details(keep)
-                    lost = sorted({LABEL[f] for b in spares for f in FIXED if details(b)[f] and not mine[f]})
-                    if lost:
-                        cls, out["lost"] = REVIEW, lost
-                        out["why"] = ("The entry with the better file lacks the %s, which the library manager cannot copy across."
-                                      % " and ".join(lost))
-                    else:
-                        cls = MERGE
-                        for field in COPYABLE:
-                            giver = next((b for b in spares if details(b)[field] and not mine[field]), None)
-                            if giver:
-                                out["copy"].append({"field": field, "label": LABEL[field], "from": giver["id"]})
-        out.update(cls=cls, keep=keep["id"], remove=[b["id"] for b in spares],
-                   spare_bytes=sum(sum(b["sizes"].values()) for b in spares),
-                   books=[self._entry(b, b is keep) for b in books])
-        return out
+        spares = [book for book in books if book is not keep]
+        cls, why, lost, copy = self._judge(keep, spares, books, doubtful)
+        return {"key": group["key"], "title": books[0]["title"], "author": books[0]["author"],
+                "cls": cls, "why": why, "lost": lost, "copy": copy,
+                "keep": keep["id"], "remove": [spare["id"] for spare in spares],
+                "spare_bytes": sum(sum(spare["sizes"].values()) for spare in spares),
+                "books": [self._entry(book, book is keep) for book in books]}
 
-    def _entry(self, b, kept):
-        have = details(b)
-        return {"id": b["id"], "kept": kept, "added": b["added"][:10],
-                "files": [{"format": f, "size": b["sizes"].get(f, 0)} for f in sorted(b["own_formats"])],
-                "details": [LABEL[f] for f in COPYABLE + FIXED if have[f]], "tags": len(b["raw_tags"]),
-                "converted": bool(b["own_formats"].get("EPUB")) and made_by_calibre(Path(self.hub.config.library_dir) / b["own_formats"]["EPUB"])}
+    def _judge(self, keep, spares, books, doubtful):
+        """(class, why, details that would be lost, details to copy across) for a set with this keeper."""
+        if all(self._same_files(keep, spare) for spare in spares):
+            return IDENTICAL, "", [], []
+        if doubtful:
+            return REVIEW, "The title looks like a file name or the author like a user name, so these may be different documents.", [], []
+        if not all(self._similar(keep, spare) for spare in spares):
+            why = ("One entry has no book file." if any(not book["own_formats"] for book in books)
+                   else "The files differ in size by more than %d%%." % round(SIMILAR * 100))
+            return REVIEW, why, [], []
+        have = [details(book) for book in books]
+        if all(entry == have[0] for entry in have):
+            return DUPLICATE, "", [], []
+        # keep the better file, haul the other's details across. BUT the library manager can't copy an ISBN,
+        # a date or a cover, so if we'd lose one of those a human gets to decide
+        mine = details(keep)
+        lost = sorted({LABEL[field] for spare in spares for field in FIXED if details(spare)[field] and not mine[field]})
+        if lost:
+            why = "The entry with the better file lacks the %s, which the library manager cannot copy across." % " and ".join(lost)
+            return REVIEW, why, lost, []
+        return MERGE, "", [], self._copies(mine, spares)
+
+    def _copies(self, mine, givers):
+        """The details the kept entry lacks and one of the others has: [{"field", "label", "from"}]."""
+        copies = []
+        for field in COPYABLE:
+            giver = next((book for book in givers if details(book)[field] and not mine[field]), None)
+            if giver:
+                copies.append({"field": field, "label": LABEL[field], "from": giver["id"]})
+        return copies
+
+    def _entry(self, book, kept):
+        have = details(book)
+        epub = book["own_formats"].get("EPUB")
+        return {"id": book["id"], "kept": kept, "added": book["added"][:10],
+                "files": [{"format": fmt, "size": book["sizes"].get(fmt, 0)} for fmt in sorted(book["own_formats"])],
+                "details": [LABEL[field] for field in COPYABLE + FIXED if have[field]], "tags": len(book["raw_tags"]),
+                "converted": bool(epub) and made_by_calibre(Path(self.hub.config.library_dir) / epub)}
 
     def plans(self):
-        found = [p for p in (self.plan(s) for s in self.hub.library.sets()) if p]
-        found.sort(key=lambda p: p["title"].lower())
+        found = [plan for plan in (self.plan(group) for group in self.hub.library.sets()) if plan]
+        found.sort(key=lambda plan: plan["title"].lower())
         return found
 
     # ------------------------------------------------------------- doing
@@ -212,7 +221,7 @@ class Duplicates:
                 row = con.execute("SELECT text FROM comments WHERE book=?", (book_id,)).fetchone()
                 return row[0] if row else ""
             if field == "tags":
-                return ", ".join(r[0] for r in con.execute(
+                return ", ".join(row[0] for row in con.execute(
                     "SELECT t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag WHERE l.book=? ORDER BY t.name", (book_id,)))
             table, link, col = {"series": ("series", "books_series_link", "series"),
                                 "publisher": ("publishers", "books_publishers_link", "publisher")}[field]
@@ -225,20 +234,18 @@ class Duplicates:
         """Do one set. ``wanted`` is the plan the admin saw; it is worked out afresh and must still match."""
         hub = self.hub
         hub.library.refresh()
-        s = next((x for x in hub.library.sets() if x["key"] == wanted["key"]), None)
-        now = self.plan(s) if s else None
+        group = next((found for found in hub.library.sets() if found["key"] == wanted["key"]), None)
+        now = self.plan(group) if group else None
         if now is None:
             raise ValueError("These entries are no longer in the library as a set.")
-        by_id = {b["id"]: b for b in s["books"]}
+        by_id = {book["id"]: book for book in group["books"]}
         if keep is not None:  # a person's decision on a set that needed review
             if keep not in by_id:
                 raise ValueError("That entry is no longer in the library.")
-            now.update(cls=REVIEW, keep=keep, remove=[i for i in by_id if i != keep], copy=[])
-            mine = details(by_id[keep])
-            for field in COPYABLE:
-                giver = next((b for b in s["books"] if b["id"] != keep and details(b)[field] and not mine[field]), None)
-                if giver:
-                    now["copy"].append({"field": field, "label": LABEL[field], "from": giver["id"]})
+            givers = [book for book in group["books"] if book["id"] != keep]
+            now.update(cls=REVIEW, keep=keep, remove=[book_id for book_id in by_id if book_id != keep],
+                       copy=self._copies(details(by_id[keep]), givers))
+        # the library could have shifted since the admin looked. if the plan isn't the same now, bail
         elif (now["cls"], now["keep"], sorted(now["remove"])) != (wanted["cls"], wanted["keep"], sorted(wanted["remove"])) \
                 or now["cls"] not in AUTOMATIC:
             raise ValueError("The library has changed since this list was made. Reload the page and look again.")
@@ -250,22 +257,22 @@ class Duplicates:
         if now["copy"]:
             hub.library.refresh(force=True)
             kept = details(hub.library.get(now["keep"]) or by_id[now["keep"]])
-            missed = [c["label"] for c in now["copy"] if not kept[c["field"]]]
+            missed = [step["label"] for step in now["copy"] if not kept[step["field"]]]
             if missed:
                 raise ValueError("The library manager did not take the %s, so nothing was removed." % " and ".join(missed))
         aside = ""
         if now["cls"] != IDENTICAL:
-            for i in now["remove"]:
-                aside = str(self._set_aside(by_id[i]).parent)
+            for book_id in now["remove"]:
+                aside = str(self._set_aside(by_id[book_id]).parent)
         manager.merge(now["keep"], now["remove"])
         hub.library.refresh(force=True)
-        left = [i for i in now["remove"] if hub.library.get(i)]
+        left = [book_id for book_id in now["remove"] if hub.library.get(book_id)]  # trust, but verify
         if left:
             raise ValueError("The library manager reported success but %d spare entries are still there." % len(left))
         con = hub.con()
         con.execute("INSERT INTO duplicate_log(at, book_key, title, action, kept, removed, note) VALUES(?,?,?,?,?,?,?)",
-                    (db.now(), now["key"], now["title"], now["cls"], now["keep"], ",".join(str(i) for i in now["remove"]),
-                     ", ".join(c["label"] for c in now["copy"])))
+                    (db.now(), now["key"], now["title"], now["cls"], now["keep"], ",".join(str(book_id) for book_id in now["remove"]),
+                     ", ".join(step["label"] for step in now["copy"])))
         con.commit()
         hub.touch()
         return {"cls": now["cls"], "set_aside": aside}
@@ -302,4 +309,4 @@ class Duplicates:
         return True
 
     def log(self, limit=30):
-        return [dict(r) for r in self.hub.con().execute("SELECT * FROM duplicate_log ORDER BY id DESC LIMIT ?", (limit,))]
+        return [dict(row) for row in self.hub.con().execute("SELECT * FROM duplicate_log ORDER BY id DESC LIMIT ?", (limit,))]

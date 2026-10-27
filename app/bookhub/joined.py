@@ -22,11 +22,11 @@ NAV_ENTRY = re.compile(r'<a href="pages/p(\d+)\.xhtml">([^<]*)</a>')
 
 def describe(path):
     """(title, [(contents entry, first page)], pages) of a joined EPUB, read from the file itself."""
-    with zipfile.ZipFile(path) as z:
-        nav = z.read("OEBPS/nav.xhtml").decode("utf-8", "replace")
-        opf = z.read("OEBPS/content.opf").decode("utf-8", "replace")
+    with zipfile.ZipFile(path) as epub:
+        nav = epub.read("OEBPS/nav.xhtml").decode("utf-8", "replace")
+        opf = epub.read("OEBPS/content.opf").decode("utf-8", "replace")
     title = re.search(r"<dc:title>(.*?)</dc:title>", opf, re.S)
-    toc = [(html.unescape(label), int(n)) for n, label in NAV_ENTRY.findall(nav)]
+    toc = [(html.unescape(label), int(page_no)) for page_no, label in NAV_ENTRY.findall(nav)]
     return html.unescape(title.group(1)) if title else "", toc, opf.count("<itemref")
 
 
@@ -46,25 +46,26 @@ def find(hub, digest):
     row = hub.con().execute("SELECT * FROM joined_books WHERE hash=?", (digest,)).fetchone()
     if not row:
         return None
-    out = dict(row)
-    out["parts"] = json.loads(out["parts"] or "[]")
-    return out
+    joined = dict(row)
+    joined["parts"] = json.loads(joined["parts"] or "[]")
+    return joined
 
 
 def where(joined, percent):
     """For each volume or chapter: (key, "finished" | "reading" | None, percent within it)."""
     pages, parts = max(1, joined["pages"]), joined["parts"]
     page = max(1, math.ceil(percent / 100.0 * pages))
-    out = []
-    for i, part in enumerate(parts):
-        end = parts[i + 1]["first"] if i + 1 < len(parts) else pages + 1
+    # each part ends where the next one starts; the last one runs off the end of the book
+    ends = [following["first"] for following in parts[1:]] + [pages + 1]
+    states = []
+    for part, end in zip(parts, ends):
         if percent >= 99.5 or page >= end:
-            out.append((part["key"], "finished", 100.0))
+            states.append((part["key"], "finished", 100.0))
         elif page >= part["first"]:
-            out.append((part["key"], "reading", round(100.0 * (page - part["first"] + 1) / max(1, end - part["first"]), 2)))
+            states.append((part["key"], "reading", round(100.0 * (page - part["first"] + 1) / max(1, end - part["first"]), 2)))
         else:
-            out.append((part["key"], None, 0.0))
-    return out
+            states.append((part["key"], None, 0.0))
+    return states
 
 
 def apply(hub, profile_id, joined, percent, device="", progress="", finished=None):
@@ -75,7 +76,7 @@ def apply(hub, profile_id, joined, percent, device="", progress="", finished=Non
                 continue
             old = hub.con().execute("SELECT status FROM reading WHERE book_key=? AND profile_id=?", (key, profile_id)).fetchone()
             if old and old["status"] == "finished":
-                continue  # read already; going back over it does not un-finish it
+                continue  # flicking back through a finished volume shouldn't un-finish it
             if state == "finished":
                 hub.save_reading(profile_id, key, status="finished", source="device", device=device or None, finished=finished)
             else:
@@ -122,7 +123,7 @@ def record_existing(hub):
     folder = Path(hub.config.data_dir) / "series-files"
     if not folder.is_dir():
         return 0
-    known = {r["path"] for r in hub.con().execute("SELECT path FROM joined_books")}
+    known = {row["path"] for row in hub.con().execute("SELECT path FROM joined_books")}
     books = hub.library.books()
     count = 0
     for path in folder.glob("*-series.epub"):
@@ -132,8 +133,8 @@ def record_existing(hub):
             title, _, _ = describe(path)
         except (OSError, KeyError, zipfile.BadZipFile):
             continue
-        vols = opds._volumes(title, books)
-        if vols:
-            record(hub, path, "series", title, {opds._part(v): v["key"] for v in vols})
+        volumes = opds._volumes(title, books)
+        if volumes:
+            record(hub, path, "series", title, {opds._part(volume): volume["key"] for volume in volumes})
             count += 1
     return count

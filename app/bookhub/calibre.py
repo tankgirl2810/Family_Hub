@@ -15,9 +15,8 @@ import threading
 import zipfile
 from pathlib import Path
 
-from . import catalogues, db, tags
+from . import catalogues, db, kinds, tags
 
-EBOOK_EXTENSIONS = {".epub", ".pdf", ".mobi", ".azw3", ".azw", ".kepub", ".fb2", ".cbz", ".cbr"}
 FILE_NAME_RE = re.compile(r"_|\.(pdf|epub|mobi|azw3?|docx?|cb[zr]|txt)$", re.I)
 TOGETHER, APART = "together", "apart"
 
@@ -36,17 +35,20 @@ def real_name(book):
 
 def _best_first(book):
     files = book["own_formats"]
+    # sort key trick: False sorts before True, so "has files", "has a cover", "has an EPUB" all float to the top,
+    # then more formats, then the bigger file, then the oldest id as the tie-breaker
     return (not files, not book["has_cover"], "EPUB" not in files, -len(files), -max(book["sizes"].values(), default=0), book["id"])
 
 
 def unmangle(text):
     """Undo UTF-8 read as Windows-1252, for showing: "The Birdâ€™s Nest" is "The Bird’s Nest"."""
+    # the classic mojibake: UTF-8 bytes read as Windows-1252. encode them back to bytes the wrong way, decode the right way
     if not text or not re.search("[âÃ][\u0080-™]", text):
         return text
     try:
         return text.encode("cp1252").decode("utf-8")
     except (UnicodeEncodeError, UnicodeDecodeError):
-        return text  # a real "â" or "Ã", or only partly mangled
+        return text  # a real "â" or "Ã" (or only half-mangled). leave it alone
 
 
 def strip_html(text):
@@ -81,29 +83,30 @@ def volume_from_title(title, comic=False):
     for word, pattern in PART_NAMES:
         if word == "Issue" and not comic:
             continue  # "Fahrenheit 451" is not issue 451
-        m = pattern.match(title or "")
-        if not m:
+        match = pattern.match(title or "")
+        if not match:
             continue
-        if word == "Volume" and m["v"] == "V" and not comic and not m["n"].startswith("0"):
-            continue  # "Vampire The Masquerade V5" is the fifth edition; volumes are "v01" or "Vol. 5"
+        if word == "Volume" and match["v"] == "V" and not comic and not match["n"].startswith("0"):
+            continue  # "Vampire The Masquerade V5" is the fifth EDITION, not volume 5. volumes look like "v01" or "Vol. 5"
         # A leading "[Group]" is a release detail; brackets before the number belong to the name: "(Marvel)", "(2016)".
-        name = LEADING_BRACKETS.sub("", m["name"]).strip(" -_.,:")
+        name = LEADING_BRACKETS.sub("", match["name"]).strip(" -_.,:")
         if len(name) < 2 or name.count("(") != name.count(")") or name.count("[") != name.count("]"):
             continue  # "Star Trek (Joe 90 - Top Secret)": the 90 is inside the brackets, not an issue number
-        n = float(m["n"]) if m["n"] else 0.0
+        number = float(match["n"]) if match["n"] else 0.0
         if word:
-            label, index = "%s %g" % (word, n), n
+            label, index = "%s %g" % (word, number), number
         else:
-            extra = m["label"].lower()
-            label = m["label"].title() + (" %g" % n if m["n"] else "")
-            index = 10000 * (EXTRAS.index(extra) + 1) + n
-        subtitle = EDGE_BRACKETS.sub("", m["rest"] or "").strip(" -_.,:")
+            extra = match["label"].lower()
+            label = match["label"].title() + (" %g" % number if match["n"] else "")
+            # annuals and specials go after every numbered issue: 10000 is just "way past the end"
+            index = 10000 * (EXTRAS.index(extra) + 1) + number
+        subtitle = EDGE_BRACKETS.sub("", match["rest"] or "").strip(" -_.,:")
         return {"series": name, "index": index, "label": label, "subtitle": subtitle}
     return None
 
 
 
-COMIC_FORMATS = {"CBZ", "CBR", "CB7", "CBC"}
+COMIC_FORMATS = kinds.COMIC_FORMATS
 
 
 def collection_of(name):
@@ -116,15 +119,15 @@ def collection_of(name):
 def _same_title_runs(books):
     """Comics that share a title but no number ("Star Trek (Book & Record Set)" three times) are parts of one run."""
     same = {}
-    for b in books:
-        if not b["series"] and set(b["own_formats"]) & COMIC_FORMATS:
-            same.setdefault(b["title"].lower(), []).append(b)
+    for book in books:
+        if not book["series"] and set(book["own_formats"]) & COMIC_FORMATS:
+            same.setdefault(book["title"].lower(), []).append(book)
     for parts in same.values():
         if len(parts) < 2:
             continue
-        for n, b in enumerate(sorted(parts, key=lambda x: x["id"]), 1):
-            b["series"], b["series_index"], b["part"] = b["title"], n, "Part %d" % n
-            b["shown_title"] = "%s · Part %d" % (b["title"], n)
+        for part_no, book in enumerate(sorted(parts, key=lambda book: book["id"]), 1):
+            book["series"], book["series_index"], book["part"] = book["title"], part_no, "Part %d" % part_no
+            book["shown_title"] = "%s · Part %d" % (book["title"], part_no)
 
 
 # File names cannot hold every apostrophe, so "Child's Play" often arrives as "Child s Play".
@@ -135,18 +138,20 @@ def _issue_titles_as_authors(books):
     """Comic files named "Series 05 - Story Title" come out of the library manager with the story as the author.
     When nearly every issue of a series has a different "author", those are the issues' titles: show them so."""
     series = {}
-    for b in books:
-        if b["part"] and set(b["own_formats"]) & COMIC_FORMATS:
-            series.setdefault(b["series"].lower(), []).append(b)
+    for book in books:
+        if book["part"] and set(book["own_formats"]) & COMIC_FORMATS:
+            series.setdefault(book["series"].lower(), []).append(book)
     for parts in series.values():
-        authors = [b["author"] for b in parts if b["author"]]
+        authors = [book["author"] for book in parts if book["author"]]
+        # 60%+ different "authors" in one series? those aren't authors, they're episode titles in a trench coat
         if len(parts) < 2 or len(set(authors)) < 0.6 * len(parts):
             continue
-        for b in parts:
-            if b["author"] and b["author"].lower() != "unknown":
-                story = SPLIT_APOSTROPHE.sub(r"'\1", b["author"])
-                b["subtitle"] = "%s · %s" % (b["subtitle"], story) if b["subtitle"] else story
-            b["shown_author"] = ""
+        for book in parts:
+            if book["author"] and book["author"].lower() != "unknown":
+                story = SPLIT_APOSTROPHE.sub(r"'\1", book["author"])
+                book["subtitle"] = "%s · %s" % (book["subtitle"], story) if book["subtitle"] else story
+            book["shown_author"] = ""
+
 
 class Library:
     def __init__(self, library_dir):
@@ -169,85 +174,87 @@ class Library:
         con.row_factory = sqlite3.Row
         try:
             books = {}
-            for r in con.execute("SELECT id, title, path, has_cover, timestamp, pubdate, series_index FROM books"):
-                books[r["id"]] = {
-                    "id": r["id"], "title": r["title"], "path": r["path"], "has_cover": bool(r["has_cover"]),
-                    "added": (r["timestamp"] or "")[:19].replace(" ", "T"), "pubdate": (r["pubdate"] or "")[:10],
-                    "series_index": r["series_index"], "authors": [], "tags": [], "formats": {},
+            for row in con.execute("SELECT id, title, path, has_cover, timestamp, pubdate, series_index FROM books"):
+                books[row["id"]] = {
+                    "id": row["id"], "title": row["title"], "path": row["path"], "has_cover": bool(row["has_cover"]),
+                    "added": (row["timestamp"] or "")[:19].replace(" ", "T"), "pubdate": (row["pubdate"] or "")[:10],
+                    "series_index": row["series_index"], "authors": [], "tags": [], "formats": {},
                     "synopsis": "", "series": "", "isbn": "", "publisher": "", "raw_tags": [],
                     "own_formats": {}, "sizes": {}, "copies": [], "copy_of": None,
                 }
 
             def link(sql):
-                for r in con.execute(sql):
-                    if r[0] in books:
-                        yield books[r[0]], r
+                """Each row of a link table with the book it belongs to (column 0 is the book id)."""
+                for row in con.execute(sql):
+                    if row[0] in books:
+                        yield books[row[0]], row
 
-            for b, r in link("SELECT l.book, a.name FROM books_authors_link l JOIN authors a ON a.id=l.author ORDER BY l.id"):
-                b["authors"].append(r[1].replace("|", ","))
-            for b, r in link("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag ORDER BY t.name"):
-                b["raw_tags"].append(r[1])
+            for book, row in link("SELECT l.book, a.name FROM books_authors_link l JOIN authors a ON a.id=l.author ORDER BY l.id"):
+                book["authors"].append(row[1].replace("|", ","))  # Calibre stores commas in names as "|", don't ask
+            for book, row in link("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag ORDER BY t.name"):
+                book["raw_tags"].append(row[1])
             try:
-                for b, r in link("SELECT l.book, p.name FROM books_publishers_link l JOIN publishers p ON p.id=l.publisher"):
-                    b["publisher"] = r[1]
+                for book, row in link("SELECT l.book, p.name FROM books_publishers_link l JOIN publishers p ON p.id=l.publisher"):
+                    book["publisher"] = row[1]
             except sqlite3.OperationalError:
                 pass  # a cut-down library without publishers
-            for b, r in link("SELECT l.book, s.name FROM books_series_link l JOIN series s ON s.id=l.series"):
-                b["series"] = r[1]
-            for b, r in link("SELECT book, text FROM comments"):
-                b["synopsis"] = strip_html(r[1])
-            for b, r in link("SELECT book, format, name, uncompressed_size FROM data"):
-                b["own_formats"][r[1].upper()] = "%s/%s.%s" % (b["path"], r[2], r[1].lower())
-                b["sizes"][r[1].upper()] = r[3] or 0
-            for b, r in link("SELECT book, type, val FROM identifiers"):
-                if r[1].lower() == "isbn":
-                    b["isbn"] = db.clean_isbn(r[2])
+            for book, row in link("SELECT l.book, s.name FROM books_series_link l JOIN series s ON s.id=l.series"):
+                book["series"] = row[1]
+            for book, row in link("SELECT book, text FROM comments"):
+                book["synopsis"] = strip_html(row[1])
+            for book, row in link("SELECT book, format, name, uncompressed_size FROM data"):
+                fmt, file_name, size = row[1], row[2], row[3]
+                book["own_formats"][fmt.upper()] = "%s/%s.%s" % (book["path"], file_name, fmt.lower())
+                book["sizes"][fmt.upper()] = size or 0
+            for book, row in link("SELECT book, type, val FROM identifiers"):
+                if row[1].lower() == "isbn":
+                    book["isbn"] = db.clean_isbn(row[2])
         finally:
             con.close()
 
-        by_key = {}
-        for b in books.values():
-            b["author"] = " & ".join(b["authors"])
+        for book in books.values():
+            book["author"] = " & ".join(book["authors"])
             # A volume whose file name says so ("Cherry Magic! v01 (2020) (Digital)") but has no series set
             # is shown as part of that series. Only how Family Hub shows it: the library is not changed.
-            b["shown_title"], b["shown_author"], b["part"], b["subtitle"] = unmangle(b["title"]), unmangle(b["author"]), "", ""
-            if not b["series"]:
-                part = volume_from_title(b["shown_title"], comic=bool(set(b["own_formats"]) & COMIC_FORMATS))
+            book["shown_title"], book["shown_author"], book["part"], book["subtitle"] = unmangle(book["title"]), unmangle(book["author"]), "", ""
+            if not book["series"]:
+                part = volume_from_title(book["shown_title"], comic=bool(set(book["own_formats"]) & COMIC_FORMATS))
                 if part:
-                    b["series"], b["series_index"] = part["series"], part["index"]
-                    b["part"], b["subtitle"] = part["label"], part["subtitle"]
-                    b["shown_title"] = "%s · %s" % (part["series"], part["label"])
+                    book["series"], book["series_index"] = part["series"], part["index"]
+                    book["part"], book["subtitle"] = part["label"], part["subtitle"]
+                    book["shown_title"] = "%s · %s" % (part["series"], part["label"])
             # What the file says about itself, minus ISBNs, publishers and other clutter.
-            b["tags"] = tags.tidy(b["raw_tags"], skip=[b["title"], b["author"], b["publisher"]] + b["authors"])
-            b["key"] = db.make_key(b["title"], b["author"], b["isbn"])
+            book["tags"] = tags.tidy(book["raw_tags"], skip=[book["title"], book["author"], book["publisher"]] + book["authors"])
+            book["key"] = db.make_key(book["title"], book["author"], book["isbn"])
         _same_title_runs(books.values())
         _issue_titles_as_authors(books.values())
-        for b in books.values():
+        for book in books.values():
             # Comics are gathered by franchise: every Star Trek run on one card, each run its own part of the page.
-            comic = bool(set(b["own_formats"]) & COMIC_FORMATS)
-            b["collection"] = collection_of(b["series"] or b["title"]) if comic else b["series"]
+            comic = bool(set(book["own_formats"]) & COMIC_FORMATS)
+            book["collection"] = collection_of(book["series"] or book["title"]) if comic else book["series"]
         self._by_id = books
         self._group()
 
     def _group(self):
         """Work out which entries are shown, and which are copies of a shown one."""
         groups = {}
-        for b in self._by_id.values():
-            b["formats"], b["copies"], b["copy_of"] = dict(b["own_formats"]), [], None
-            groups.setdefault(b["key"], []).append(b)
+        for book in self._by_id.values():
+            book["formats"], book["copies"], book["copy_of"] = dict(book["own_formats"]), [], None
+            groups.setdefault(book["key"], []).append(book)
         shown, by_key, sets = [], {}, []
         for key, members in groups.items():
             members.sort(key=_best_first)
             choice = self._choices.get(key)
-            if len(members) == 1 or choice == TOGETHER or (choice != APART and all(real_name(m) for m in members)):
+            if len(members) == 1 or choice == TOGETHER or (choice != APART and all(real_name(member) for member in members)):
                 clusters = [members]
             elif choice == APART:
-                clusters = [[m] for m in members]
+                clusters = [[member] for member in members]
             else:
-                # The name proves nothing, so only entries holding the very same files go together.
+                # "chapter_01 by admin" proves nothing, so only entries with byte-for-byte the same sizes go together.
+                # (no files at all? then the id is the key, so each stands alone)
                 same = {}
-                for m in members:
-                    same.setdefault(tuple(sorted(m["sizes"].items())) or m["id"], []).append(m)
+                for member in members:
+                    same.setdefault(tuple(sorted(member["sizes"].items())) or member["id"], []).append(member)
                 clusters = list(same.values())
             for cluster in clusters:
                 first = cluster[0]
@@ -259,8 +266,8 @@ class Library:
                 shown.append(first)
             by_key[key] = clusters[0][0]
             if len(members) > 1:
-                sets.append({"key": key, "choice": choice, "shown": [c[0] for c in clusters], "books": members})
-        shown.sort(key=lambda b: b["title"].lower())
+                sets.append({"key": key, "choice": choice, "shown": [cluster[0] for cluster in clusters], "books": members})
+        shown.sort(key=lambda book: book["title"].lower())
         self._books, self._by_key, self._sets = shown, by_key, sets
 
     def set_choices(self, choices):
@@ -282,8 +289,7 @@ class Library:
                     self._load()
                     self._mtime = mtime
                 except sqlite3.Error:
-                    # The library manager may be mid-write; keep the last good copy.
-                    pass
+                    pass  # the library manager's probably mid-write. keep showing the last good copy
 
     def books(self):
         """One entry per book. Copies of a book are under its "copies"."""
@@ -331,8 +337,8 @@ class Library:
 def count_pictures(path):
     """Pages in a comic kept as a zip (CBZ): one picture each."""
     try:
-        with zipfile.ZipFile(path) as z:
-            return sum(1 for n in z.namelist() if n.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))) or None
+        with zipfile.ZipFile(path) as cbz:
+            return sum(1 for name in cbz.namelist() if name.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))) or None
     except (zipfile.BadZipFile, OSError):
         return None
 
@@ -341,10 +347,10 @@ def estimate_pages(path):
     """Rough page count for an EPUB: about 1,800 characters of text per page."""
     try:
         total = 0
-        with zipfile.ZipFile(path) as z:
-            for info in z.infolist():
+        with zipfile.ZipFile(path) as epub:
+            for info in epub.infolist():
                 if info.filename.lower().endswith((".xhtml", ".html", ".htm")):
-                    total += len(strip_html(z.read(info).decode("utf-8", "ignore")))
+                    total += len(strip_html(epub.read(info).decode("utf-8", "ignore")))
         return max(1, round(total / 1800)) if total else None
     except (zipfile.BadZipFile, OSError, KeyError):
         return None

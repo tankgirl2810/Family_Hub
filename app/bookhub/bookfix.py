@@ -43,22 +43,25 @@ class FixError(Exception):
 def valid_isbn(text):
     """The ISBN in text with its check digit right, or ""."""
     digits = re.sub(r"[^0-9Xx]", "", text or "").upper()
+    # ISBN check digit maths, straight from the spec: https://en.wikipedia.org/wiki/ISBN#Check_digits
     if len(digits) == 10 and digits[:9].isdigit():
-        total = sum((10 - i) * (10 if c == "X" else int(c)) for i, c in enumerate(digits))
+        # ISBN-10: weights 10 down to 1, "X" is 10, total must divide by 11
+        total = sum((10 - position) * (10 if digit == "X" else int(digit)) for position, digit in enumerate(digits))
         return digits if total % 11 == 0 else ""
     if len(digits) == 13 and digits.isdigit() and digits[:3] in ("978", "979"):
-        total = sum(int(c) * (1 if i % 2 == 0 else 3) for i, c in enumerate(digits))
+        # ISBN-13: weights alternate 1, 3, 1, 3... and the total must divide by 10
+        total = sum(int(digit) * (1 if position % 2 == 0 else 3) for position, digit in enumerate(digits))
         return digits if total % 10 == 0 else ""
     return ""
 
 
 def isbns_in(text):
-    out = []
-    for m in ISBN_RE.finditer(text or ""):
-        isbn = valid_isbn(m.group(1))
-        if isbn and isbn not in out:
-            out.append(isbn)
-    return out
+    found = []
+    for match in ISBN_RE.finditer(text or ""):
+        isbn = valid_isbn(match.group(1))
+        if isbn and isbn not in found:
+            found.append(isbn)
+    return found
 
 
 def username_like(author):
@@ -69,15 +72,15 @@ def username_like(author):
 
 def problems(book):
     """What is wrong with an entry's title and author, in words, or [] when they look real."""
-    out = []
+    wrong = []
     title = book["title"].strip()
     if FILE_LIKE.search(title) or valid_isbn(title):
-        out.append("The title looks like a file name")
+        wrong.append("The title looks like a file name")
     comic = set(book["own_formats"]) <= kinds.COMIC_FORMATS and bool(book["own_formats"])
-    # Comics mostly have no author in their files and are found by series instead: only a bad title counts.
+    # comics basically never have an author in the file and get found by series anyway, so let them off
     if not comic and (not catalogues.author_known(book["author"]) or username_like(book["author"])):
-        out.append("No real author" if not catalogues.author_known(book["author"]) else "The author looks like a user name")
-    return out
+        wrong.append("No real author" if not catalogues.author_known(book["author"]) else "The author looks like a user name")
+    return wrong
 
 
 def tidy_title(title):
@@ -91,23 +94,26 @@ def tidy_title(title):
 def _epub_clues(path):
     """(isbns, title, author) from an EPUB's own details and its first pages."""
     isbns, title, author = [], "", ""
-    with zipfile.ZipFile(path) as z:
-        names = z.namelist()
-        opf = next((n for n in names if n.lower().endswith(".opf")), None)
+    def first(pattern, text):
+        match = re.search(pattern, text, re.I)
+        return match.group(1).strip() if match else ""
+
+    with zipfile.ZipFile(path) as epub:
+        names = epub.namelist()
+        opf = next((name for name in names if name.lower().endswith(".opf")), None)
         if opf:
-            text = z.read(opf)[:200000].decode("utf-8", "replace")
+            text = epub.read(opf)[:200000].decode("utf-8", "replace")
             for ident in re.findall(r"<dc:identifier[^>]*>([^<]+)</dc:identifier>", text, re.I):
-                isbns += [i for i in isbns_in(ident) if i not in isbns]
-            m = re.search(r"<dc:title[^>]*>([^<]+)</dc:title>", text, re.I)
-            title = m.group(1).strip() if m else ""
-            m = re.search(r"<dc:creator[^>]*>([^<]+)</dc:creator>", text, re.I)
-            author = m.group(1).strip() if m else ""
-        pages = [n for n in names if n.lower().endswith((".xhtml", ".html", ".htm"))]
-        front = [n for n in pages if re.search(r"copy|right|legal|imprint|title", n, re.I)] + pages[:6]
-        for n in front[:10]:
-            text = re.sub(r"<[^>]+>", " ", z.read(n)[:100000].decode("utf-8", "replace"))
+                isbns += [isbn for isbn in isbns_in(ident) if isbn not in isbns]
+            title = first(r"<dc:title[^>]*>([^<]+)</dc:title>", text)
+            author = first(r"<dc:creator[^>]*>([^<]+)</dc:creator>", text)
+        pages = [name for name in names if name.lower().endswith((".xhtml", ".html", ".htm"))]
+        # the copyright page is where ISBNs hide, so pages named like one get read first
+        front = [name for name in pages if re.search(r"copy|right|legal|imprint|title", name, re.I)] + pages[:6]
+        for name in front[:10]:
+            text = re.sub(r"<[^>]+>", " ", epub.read(name)[:100000].decode("utf-8", "replace"))
             if "isbn" in text.lower():
-                isbns += [i for i in isbns_in(text) if i not in isbns]
+                isbns += [isbn for isbn in isbns_in(text) if isbn not in isbns]
     return isbns, title, author
 
 
@@ -124,7 +130,7 @@ def _pdf_clues(path):
         except Exception:  # a damaged page; the others may still say
             continue
         if "isbn" in text.lower():
-            isbns += [i for i in isbns_in(text) if i not in isbns]
+            isbns += [isbn for isbn in isbns_in(text) if isbn not in isbns]
     return isbns, title, author
 
 
@@ -139,14 +145,14 @@ class BookFix:
     def needing(self):
         """Every entry whose title or author does not look real, newest first."""
         ok = self._ok()
-        out = []
-        for b in self.hub.library.all_books():
-            found = problems(b)
-            if found and str(b["id"]) not in ok:
-                out.append({"id": b["id"], "key": b["key"], "title": b["shown_title"], "author": b["shown_author"],
-                            "problems": found, "formats": sorted(b["own_formats"]), "added": b["added"]})
-        out.sort(key=lambda x: x["added"], reverse=True)
-        return out
+        needing = []
+        for book in self.hub.library.all_books():
+            found = problems(book)
+            if found and str(book["id"]) not in ok:
+                needing.append({"id": book["id"], "key": book["key"], "title": book["shown_title"], "author": book["shown_author"],
+                                "problems": found, "formats": sorted(book["own_formats"]), "added": book["added"]})
+        needing.sort(key=lambda entry: entry["added"], reverse=True)
+        return needing
 
     def leave(self, book_id):
         """Say an entry is right as it is, so it is not shown again."""
@@ -159,31 +165,28 @@ class BookFix:
         isbns, titles = [], []
 
         def isbn(value, where):
-            if value and value not in [i for i, _ in isbns]:
+            if value and value not in [known for known, _ in isbns]:
                 isbns.append((value, where))
 
         isbn(valid_isbn(book["isbn"]), "in the library entry")
-        for i in isbns_in(book["title"]):
-            isbn(i, "in the title")
-        for fmt, rel in sorted(book["own_formats"].items(), key=lambda x: x[0] != "EPUB"):
-            for i in isbns_in(Path(rel).stem):
-                isbn(i, "in the file name")
+        for found in isbns_in(book["title"]):
+            isbn(found, "in the title")
+        readers = {"EPUB": _epub_clues, "PDF": _pdf_clues}
+        for fmt, rel in sorted(book["own_formats"].items(), key=lambda pair: pair[0] != "EPUB"):  # EPUB first
+            for found in isbns_in(Path(rel).stem):
+                isbn(found, "in the file name")
             path = Path(self.hub.config.library_dir) / rel
-            if not path.is_file():
+            if fmt not in readers or not path.is_file():
                 continue
             try:
-                if fmt == "EPUB":
-                    found, t, a = _epub_clues(path)
-                elif fmt == "PDF":
-                    found, t, a = _pdf_clues(path)
-                else:
-                    continue
-            except Exception:  # an unreadable file says nothing; the other clues still count
+                found_isbns, own_title, own_author = readers[fmt](path)
+            except Exception:  # a busted file tells us nothing, but the other clues still count
                 continue
-            for i in found:
-                isbn(i, "inside the %s" % fmt)
-            if t and not FILE_LIKE.search(t) and tidy_title(t).lower() != tidy_title(book["title"]).lower():
-                titles.append((t, a if catalogues.author_known(a) and not username_like(a) else "", "the %s's own details" % fmt))
+            for found in found_isbns:
+                isbn(found, "inside the %s" % fmt)
+            if own_title and not FILE_LIKE.search(own_title) and tidy_title(own_title).lower() != tidy_title(book["title"]).lower():
+                real_author = own_author if catalogues.author_known(own_author) and not username_like(own_author) else ""
+                titles.append((own_title, real_author, "the %s's own details" % fmt))
         guess = tidy_title(book["title"])
         if guess and not valid_isbn(guess):
             author = book["author"] if catalogues.author_known(book["author"]) and not username_like(book["author"]) else ""
@@ -196,7 +199,7 @@ class BookFix:
         if not book:
             raise FixError("That book is not in the library any more.")
         clues = self.clues(book)
-        out, seen = [], set()
+        found, seen = [], set()
 
         def add(doc, why):
             title, authors = (doc.get("title") or "").strip(), doc.get("author_name") or []
@@ -206,7 +209,7 @@ class BookFix:
             if mark in seen:
                 return
             seen.add(mark)
-            out.append({"title": title, "authors": authors[:4], "year": doc.get("first_publish_year"),
+            found.append({"title": title, "authors": authors[:4], "year": doc.get("first_publish_year"),
                         "publisher": (doc.get("publisher") or [""])[0], "isbn": next(iter(doc.get("isbn") or []), ""),
                         "cover": "https://covers.openlibrary.org/b/id/%s-M.jpg" % doc["cover_i"] if doc.get("cover_i") else "",
                         "synopsis": doc.get("description") or "", "why": why})
@@ -226,22 +229,26 @@ class BookFix:
             except catalogues.LookupError_ as exc:
                 errors.append(str(exc))
         key = self.hub.config.google_books_key
-        if key and len(out) < MAX_CANDIDATES:
-            q = "isbn:" + clues["isbns"][0][0] if clues["isbns"] else ('intitle:"%s"' % clues["titles"][0][0] if clues["titles"] else "")
-            if q:
-                try:
-                    for item in catalogues._get(catalogues.GOOGLE, {"q": q, "maxResults": 4, "key": key}).get("items") or []:
-                        info = item.get("volumeInfo") or {}
-                        ids = [i.get("identifier") for i in info.get("industryIdentifiers") or []]
-                        add({"title": info.get("title"), "author_name": info.get("authors"), "first_publish_year": (info.get("publishedDate") or "")[:4] or None,
-                             "publisher": [info.get("publisher") or ""], "isbn": ids, "description": info.get("description") or ""},
-                            "Google Books: " + q.replace("intitle:", "title "))
-                except catalogues.LookupError_ as exc:
-                    errors.append(str(exc))
+        query = ""
+        if clues["isbns"]:
+            query = "isbn:" + clues["isbns"][0][0]
+        elif clues["titles"]:
+            query = 'intitle:"%s"' % clues["titles"][0][0]
+        if key and query and len(found) < MAX_CANDIDATES:
+            try:
+                for item in catalogues._get(catalogues.GOOGLE, {"q": query, "maxResults": 4, "key": key}).get("items") or []:
+                    info = item.get("volumeInfo") or {}
+                    ids = [ident.get("identifier") for ident in info.get("industryIdentifiers") or []]
+                    # dress Google's answer up like an Open Library one so add() can take it
+                    add({"title": info.get("title"), "author_name": info.get("authors"), "first_publish_year": (info.get("publishedDate") or "")[:4] or None,
+                         "publisher": [info.get("publisher") or ""], "isbn": ids, "description": info.get("description") or ""},
+                        "Google Books: " + query.replace("intitle:", "title "))
+            except catalogues.LookupError_ as exc:
+                errors.append(str(exc))
         return {"book": {"id": book["id"], "title": book["shown_title"], "author": book["shown_author"], "synopsis": bool(book["synopsis"].strip())},
-                "clues": {"isbns": [{"isbn": i, "where": w} for i, w in clues["isbns"]],
-                          "titles": [{"title": t, "author": a, "where": w} for t, a, w in clues["titles"]]},
-                "candidates": out[:MAX_CANDIDATES], "errors": errors[:2]}
+                "clues": {"isbns": [{"isbn": isbn, "where": where} for isbn, where in clues["isbns"]],
+                          "titles": [{"title": title, "author": author, "where": where} for title, author, where in clues["titles"]]},
+                "candidates": found[:MAX_CANDIDATES], "errors": errors[:2]}
 
     def ready(self):
         if not librarymanager.configured(self.hub.config):
@@ -257,7 +264,7 @@ class BookFix:
         if not book:
             raise FixError("That book is not in the library any more.")
         title = re.sub(r"\s+", " ", title or "").strip()
-        authors = [re.sub(r"\s+", " ", a).strip() for a in authors or [] if a and a.strip()]
+        authors = [re.sub(r"\s+", " ", name).strip() for name in authors or [] if name and name.strip()]
         if not title or not authors:
             raise FixError("Give both a title and at least one author.")
         old_key = book["key"]
@@ -265,7 +272,8 @@ class BookFix:
         manager = self.hub.manager
         try:
             manager.set_field(book_id, "title", title)
-            manager.set_field(book_id, "authors", " & ".join(a.replace("&", "and") for a in authors))
+            # Calibre splits authors on "&", so an "&" inside a name would make two people out of one
+            manager.set_field(book_id, "authors", " & ".join(name.replace("&", "and") for name in authors))
             if synopsis and not book["synopsis"].strip():
                 manager.set_field(book_id, "synopsis", synopsis)
             if publisher and not book["publisher"]:
@@ -293,6 +301,8 @@ class BookFix:
         con = self.hub.con()
         if old != new:
             for table in KEYED:
+                # UPDATE OR IGNORE skips rows that would clash with one already under the new key; the DELETE
+                # then sweeps up those leftovers. two steps, zero unique-constraint explosions
                 con.execute("UPDATE OR IGNORE %s SET book_key=? WHERE book_key=?" % table, (new, old))
                 con.execute("DELETE FROM %s WHERE book_key=?" % table, (old,))
             for table in ASK_AGAIN:

@@ -5,6 +5,7 @@ here, in one SQLite file, separate from the Calibre library. Rows are keyed by
 a stable ``book_key`` (ISBN when the book has one, otherwise title + author)
 so the data survives the library being rebuilt or moved.
 """
+import functools
 import re
 import sqlite3
 import threading
@@ -168,22 +169,24 @@ def now():
 
 def connect(path):
     """One connection per thread; SQLite handles the locking between them."""
-    conns = getattr(_local, "conns", None)
-    if conns is None:
-        conns = _local.conns = {}
+    connections = getattr(_local, "conns", None)
+    if connections is None:
+        connections = _local.conns = {}
     key = str(path)
-    if key not in conns:
+    if key not in connections:
         con = sqlite3.connect(key, timeout=30)
         con.row_factory = sqlite3.Row
-        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA journal_mode=WAL")  # readers don't block the writer and vice versa. huge for a web app
         con.execute("PRAGMA foreign_keys=ON")
-        conns[key] = con
-    return conns[key]
+        connections[key] = con
+    return connections[key]
 
 
 def finish(path, failed=False):
-    """End whatever this thread's connection left open. A write that failed part-way (a name already taken,
-    say) still holds SQLite's write lock, and every other thread would wait on it until this one wrote again."""
+    """End whatever this thread's connection left open.
+
+    sneaky one: a write that blew up half way (a name already taken, say) keeps SQLite's write lock,
+    and then EVERY other thread just sits there waiting until this one happens to write again. so always tidy up."""
     con = (getattr(_local, "conns", None) or {}).get(str(path))
     if con is not None and con.in_transaction:
         try:
@@ -210,7 +213,8 @@ def init(path):
     con = connect(path)
     con.executescript(SCHEMA)
     for table, column, definition in ADDED_COLUMNS:
-        if column not in [r[1] for r in con.execute("PRAGMA table_info(%s)" % table)]:
+        existing = [info[1] for info in con.execute("PRAGMA table_info(%s)" % table)]  # [1] is the column name
+        if column not in existing:
             con.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, definition))
     con.commit()
     return con
@@ -246,6 +250,13 @@ def make_key(title, author, isbn=None):
         return "isbn:" + isbn
     first_author = re.split(r"\s*(?:&|;|,| and )\s*", author or "")[0]
     return "ta:%s|%s" % (slug(title), slug(first_author))
+
+
+@functools.lru_cache(maxsize=4096)
+def series_key(name):
+    """A series (or set of runs) is tagged and rated as a whole under this key, beside its volumes' own.
+    Kept, because the library page asks for the same few hundred series names for every book."""
+    return "series:" + slug(name)
 
 
 def clean_tag(tag):

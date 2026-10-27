@@ -69,7 +69,7 @@ or Kindle addresses.
 
 - **Back up now** writes today's file immediately.
 - **Download book data** saves the same file to your computer.
-- **Import** merges a file back in. It only adds: existing tags, ratings
+- **Import**, under **Restore from a book data file**, merges a file back in. It only adds: existing tags, ratings
   and history are never overwritten or removed, so importing twice is safe.
 
 ## The nightly copy to a second disk
@@ -97,15 +97,15 @@ files it has already imported, several GB).
 
    On Linux: `BACKUP_PATH=/mnt/disk2/bookhub`.
 3. Run `docker compose up -d`.
-4. Open **Admin → Books**. The **Book data backup** card now has a
-   **Copy to a second disk** part. Press **Copy now** for the first one; a
-   large library takes a while the first time.
+4. Open **Admin → Hub**. The **Copies to a second disk** card, beside
+   **Server** at the bottom, now has a **Copy now** button. Press it for the
+   first copy; a large library takes a while the first time.
 
 After that it runs once a day, at the first chance after 2 in the morning.
 The same card shows when it last ran, how many files it copied and how much
-room the disk has left. **Connections → Nightly copy to a second disk** has
-the on/off switch and a **Test connection** button that checks the folder
-can be written to.
+room the disk has left. **Admin → Hub → Connections → Nightly copy to a
+second disk** has the on/off switch (**Copy every night**) and a **Test
+connection** button that checks the folder can be written to.
 
 The folder has to be named in `.env` rather than on the Admin page because
 Docker must be told about it before Family Hub starts.
@@ -133,7 +133,7 @@ for the rest of the server.
 
 | Situation | What to do |
 |---|---|
-| Lost a few tags or ratings | Admin → Import an older `bookdata-*.json` |
+| Lost a few tags or ratings | Admin → Books → Import an older `bookdata-*.json` |
 | Moving to a new machine | Guide 2 |
 | The database is damaged | Stop Family Hub, replace `stack/bookhub` with your latest copy, start it |
 | Starting clean but keeping history | Fresh install, create the admin, Import the latest `bookdata-*.json` |

@@ -25,7 +25,8 @@ they start exactly where you are without redoing any of it.
 
 **Admin → Hub → Setup file** packs your `.env`, the profiles and reading
 history, and each program's own setup into one zip locked with a passphrase
-(AES-256). No books or films, so it is small (a few MB). Keep it off GitHub:
+of 10 or more characters (AES-256): type it twice and press **Make the setup
+file**. No books or films, so it is small (a few MB). Keep it off GitHub:
 it holds every password even though it is locked. Hand it over by USB stick,
 email or a shared drive, and tell the passphrase separately (in person or by
 another app).

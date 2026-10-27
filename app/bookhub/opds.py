@@ -21,6 +21,8 @@ Every joined book is recorded (joined.py) so the reading app's progress in it re
 """
 import functools
 import hashlib
+import hmac
+import json
 import logging
 import shutil
 import threading
@@ -32,7 +34,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, current_app, request, send_file
 
-from . import db, kosync
+from . import chapterfile, db, kosync
 
 bp = Blueprint("opds", __name__, url_prefix="/opds")
 
@@ -45,7 +47,8 @@ MIME = {
     "CBR": "application/vnd.comicbook-rar", "TXT": "text/plain",
 }
 MAX_TRIES, LOCK_SECONDS = 10, 60
-_CONTROL = dict.fromkeys(c for c in range(32) if c not in (9, 10, 13))  # not allowed in XML
+# control characters are illegal in XML (tab, newline and return excepted). str.translate() with this deletes them
+_CONTROL = dict.fromkeys(code for code in range(32) if code not in (9, 10, 13))
 _misses = {}  # wrong-password counters, per name
 
 
@@ -54,14 +57,15 @@ def _profile():
     if not auth or not auth.username or auth.password is None:
         return None
     name = auth.username.strip()
-    entry = _misses.get(name.lower(), [0, 0])
-    if entry[0] >= MAX_TRIES and time.time() - entry[1] < LOCK_SECONDS:
-        return None
+    misses, last_miss = _misses.get(name.lower(), [0, 0])
+    if misses >= MAX_TRIES and time.time() - last_miss < LOCK_SECONDS:
+        return None  # ten wrong guesses in a minute? take a breather
     row = current_app.hub.con().execute("SELECT * FROM profiles WHERE name=?", (name,)).fetchone()
-    if row and row["sync_key"] and kosync.hmac.compare_digest(row["sync_key"], kosync.sync_key_for(auth.password)):
+    # compare_digest takes the same time right or wrong, so nobody can guess the key one letter at a time
+    if row and row["sync_key"] and hmac.compare_digest(row["sync_key"], kosync.sync_key_for(auth.password)):
         _misses.pop(name.lower(), None)
         return row
-    _misses[name.lower()] = [entry[0] + 1 if time.time() - entry[1] < LOCK_SECONDS else 1, time.time()]
+    _misses[name.lower()] = [misses + 1 if time.time() - last_miss < LOCK_SECONDS else 1, time.time()]
     return None
 
 
@@ -104,7 +108,8 @@ def _book_entry(feed, book, hub):
     ET.SubElement(entry, "title").text = title.translate(_CONTROL)
     ET.SubElement(entry, "id").text = "urn:bookhub:book:" + book["key"]
     ET.SubElement(entry, "updated").text = (book["added"] or db.now()[:19]) + "Z"
-    for name in (book["authors"] if book.get("shown_author", book["author"]) else []):  # a comic's "author" may be its story
+    # a comic's "author" is sometimes really its story title (calibre.py hides those), so no author then
+    for name in (book["authors"] if book.get("shown_author", book["author"]) else []):
         ET.SubElement(ET.SubElement(entry, "author"), "name").text = name
     if book["synopsis"]:
         ET.SubElement(entry, "summary", {"type": "text"}).text = book["synopsis"][:2000].translate(_CONTROL)
@@ -114,7 +119,7 @@ def _book_entry(feed, book, hub):
         href = "/opds/cover/%d" % book["id"]
         ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/image", "href": href, "type": "image/jpeg"})
         ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/image/thumbnail", "href": href, "type": "image/jpeg"})
-    formats = sorted(book["formats"], key=lambda f: (f != "EPUB", f))
+    formats = sorted(book["formats"], key=lambda fmt: (fmt != "EPUB", fmt))  # EPUB first, reading apps grab the first link
     for fmt in formats:
         ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/acquisition", "type": MIME.get(fmt, "application/octet-stream"),
                                       "href": "/opds/book/%d/%s" % (book["id"], fmt.lower())})
@@ -129,10 +134,29 @@ _building = threading.Lock()  # the joined CBZ, made while the app waits
 _jobs_lock = threading.Lock()
 _jobs, _failed, _progress = {}, {}, {}  # books being made: the jobs, (when, why) one last failed, (pages done, pages)
 PART_BYTES = 1_000_000_000  # a joined book is split into parts of about this size
-CHAPTERS_PER_PART = 50      # chapters are not measured before they are fetched; 50 is usually well under 1 GB
+CHAPTERS_PER_PART = chapterfile.CHAPTERS_PER_PART  # chapters are not measured before they are fetched; 50 is usually well under 1 GB
 RETRY_FAILED = 600  # seconds before a book that could not be made is tried again
 FEED_WAIT, FILE_WAIT = 3, 20  # seconds a list or a download waits for a book still being made
 log = logging.getLogger("bookhub")
+
+
+def fetched(hub, who, item, version):
+    """Note that this person's reading app downloaded an item (a book, or one part of a joined series) in this
+    version. My books compares it with the version now offered."""
+    if who and who != "guest":
+        db.kv_set(hub.con(), "fetched:%d:%s" % (who["id"], item), json.dumps({"version": str(version), "at": db.now()}))
+
+
+def fetched_version(hub, profile_id, item):
+    kept = db.kv_get(hub.con(), "fetched:%d:%s" % (profile_id, item))
+    try:
+        return json.loads(kept)["version"] if kept else None
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def series_item(series, k):
+    return "series:%s:%d" % (db.slug(series), k)
 
 
 def _comic(book):
@@ -143,56 +167,62 @@ def _volumes(name, everything):
     """Every comic volume of a series, in reading order, each volume once: a second copy of volume 2 (a file
     the library took in twice) would otherwise put volume 2 in the joined book twice. The earliest copy wins."""
     low = name.lower()
-    found = sorted((b for b in everything if (b.get("series") or "").strip().lower() == low),
-                   key=lambda b: (b.get("series_index") or 0, b["id"]))
-    out, numbers = [], set()
-    for b in found:
-        n = b.get("series_index")
-        if n and n in numbers:
+    found = sorted((book for book in everything if (book.get("series") or "").strip().lower() == low),
+                   key=lambda book: (book.get("series_index") or 0, book["id"]))
+    volumes, numbers = [], set()
+    for book in found:
+        number = book.get("series_index")
+        if number and number in numbers:
             continue
-        numbers.add(n)
-        out.append(b)
-    return out
+        numbers.add(number)
+        volumes.append(book)
+    return volumes
 
 
 def _gather(books, everything):
     """The volumes of a comic series become one item, placed where the first of them came in the list."""
-    out, done = [], set()
-    for b in books:
-        name = (b.get("series") or "").strip()
-        if name and _comic(b):
+    # The library sorted by series once, rather than searched again for every comic in the list.
+    by_series = {}
+    for book in everything:
+        by_series.setdefault((book.get("series") or "").strip().lower(), []).append(book)
+    items, done, single = [], set(), set()
+    for book in books:
+        name = (book.get("series") or "").strip()
+        if name and _comic(book) and name.lower() not in single:
             if name.lower() in done:
                 continue
-            vols = _volumes(name, everything)
-            if len(vols) > 1 and all(_comic(v) for v in vols):
+            volumes = _volumes(name, by_series.get(name.lower(), []))
+            if len(volumes) > 1 and all(_comic(volume) for volume in volumes):
                 done.add(name.lower())
-                out.append({"series": vols[0]["series"], "volumes": vols})
+                items.append({"series": volumes[0]["series"], "volumes": volumes})
                 continue
-        out.append(b)
-    return out
+            single.add(name.lower())  # not a joined series: its books are listed one by one
+        items.append(book)
+    return items
 
 
-def _part(v):
-    return v.get("part") or ("Volume %g" % v["series_index"] if v.get("series_index") else v.get("shown_title") or v["title"])
+def _part(volume):
+    return volume.get("part") or ("Volume %g" % volume["series_index"] if volume.get("series_index") else volume.get("shown_title") or volume["title"])
 
 
-def _file_size(v):
-    return next((v["sizes"].get(f) or 0 for f in ("CBZ", "CBR") if f in v["formats"]), 0)
+def _file_size(volume):
+    return next((volume["sizes"].get(fmt) or 0 for fmt in ("CBZ", "CBR") if fmt in volume["formats"]), 0)
 
 
-def _shrink_ratio(hub, v):
+def _shrink_ratio(hub, volume):
     """How much of a volume's size is left once its pages are made tablet-sized, from a few of its pages.
     Kept, so the same series always splits in the same places."""
-    key = "shrink:%d:%d" % (v["id"], _file_size(v))
+    key = "shrink:%d:%d" % (volume["id"], _file_size(volume))
     kept = db.kv_get(hub.con(), key)
     if kept:
         return float(kept)
     from . import comicbook, seriesfile
     ratio = 1.0
     try:
-        path = hub.library.file_path(v, next(f for f in ("CBZ", "CBR") if f in v["formats"]))
+        path = hub.library.file_path(volume, next(fmt for fmt in ("CBZ", "CBR") if fmt in volume["formats"]))
         if path and zipfile.is_zipfile(path):
             pages = seriesfile._pages(Path(path), None)
+            # three pages from a third of the way in: skips the cover and the credits, which shrink weirdly
             sample = pages[len(pages) // 3:len(pages) // 3 + 3]
             before = after = 0
             for name, read in sample:
@@ -208,76 +238,78 @@ def _shrink_ratio(hub, v):
     return ratio
 
 
-def _split(hub, vols):
+def _split(hub, volumes):
     """The volumes in parts of about PART_BYTES once made tablet-sized, each volume whole. Earlier parts stay
     the same when volumes are added, so a reading app only fetches the last part again."""
-    ratio = _shrink_ratio(hub, vols[0])
+    ratio = _shrink_ratio(hub, volumes[0])
     parts, size = [[]], 0
-    for v in vols:
-        guess = _file_size(v) * ratio
+    for volume in volumes:
+        guess = _file_size(volume) * ratio
         if parts[-1] and size + guess > PART_BYTES:
             parts.append([])
             size = 0
-        parts[-1].append(v)
+        parts[-1].append(volume)
         size += guess
     return parts
 
 
-def _part_title(series, part, k, count):
+def _part_title(series, part, part_no, count):
     """"Series · Part 2 (Volumes 5–9)", or the series alone when it comes as one book."""
     if count == 1:
         return series
     first, last = _part(part[0]), _part(part[-1])
-    word, _, n = first.partition(" ")
+    word, _, number = first.partition(" ")
     if len(part) == 1:
         span = first
-    elif n and last.startswith(word + " "):
-        span = "%ss %s–%s" % (word, n, last[len(word) + 1:])  # "Volumes 5–9", "Issues 1–12"
+    elif number and last.startswith(word + " "):
+        span = "%ss %s–%s" % (word, number, last[len(word) + 1:])  # "Volumes 5–9", "Issues 1–12"
     else:
         span = "%s – %s" % (first, last)
-    return "%s · Part %d (%s)" % (series, k, span)
+    return "%s · Part %d (%s)" % (series, part_no, span)
 
 
 def _parts_of(hub, name):
     """(volumes, parts) of a comic series asked for by name, or ([], [])."""
-    vols = _volumes(name, hub.library.books()) if name else []
-    if len(vols) < 2 or not all(_comic(v) for v in vols):
+    volumes = _volumes(name, hub.library.books()) if name else []
+    if len(volumes) < 2 or not all(_comic(volume) for volume in volumes):
         return [], []
-    return vols, _split(hub, vols)
+    return volumes, _split(hub, volumes)
 
 
 def _series_entry(feed, item, hub, prepare=False):
     """One entry per part (most series have one). prepare: start making the books not ready yet (My books)."""
     parts = _split(hub, item["volumes"])
-    for k, vols in enumerate(parts, 1):
-        _series_part_entry(feed, item["series"], vols, k, len(parts), hub, prepare)
+    for part_no, volumes in enumerate(parts, 1):
+        _series_part_entry(feed, item["series"], volumes, part_no, len(parts), hub, prepare)
 
 
-def _series_part_entry(feed, series, vols, k, count, hub, prepare):
+def _series_part_entry(feed, series, volumes, part_no, count, hub, prepare):
     """Until the book is ready the entry has no download and its own id, so an app that downloads new entries
     by itself fetches it once it is ready."""
-    ready = _series_book_job(hub, vols, wait=FEED_WAIT) if prepare else True
+    ready = _series_book_job(hub, volumes, wait=FEED_WAIT) if prepare else True
     entry = ET.SubElement(feed, "entry")
-    ET.SubElement(entry, "title").text = _part_title(series, vols, k, count).translate(_CONTROL)
+    ET.SubElement(entry, "title").text = _part_title(series, volumes, part_no, count).translate(_CONTROL)
     # The volume count is part of the id, so when a new volume arrives the app sees a new, longer book.
     ET.SubElement(entry, "id").text = "urn:bookhub:series:%s:%s%d%s" % (
-        db.slug(series), "part%d:" % k if count > 1 else "", len(vols), "" if ready else ":making")
-    ET.SubElement(entry, "updated").text = (max(v["added"] for v in vols) or db.now()[:19]) + "Z"
-    first = vols[0]
+        db.slug(series), "part%d:" % part_no if count > 1 else "", len(volumes), "" if ready else ":making")
+    ET.SubElement(entry, "updated").text = (max(volume["added"] for volume in volumes) or db.now()[:19]) + "Z"
+    first = volumes[0]
     for name in (first["authors"] if first.get("shown_author", first["author"]) else []):
         ET.SubElement(ET.SubElement(entry, "author"), "name").text = name
     ET.SubElement(entry, "summary", {"type": "text"}).text = (
         "%d volumes in one book, read straight through: %s to %s.%s" % (
-            len(vols), _part(vols[0]), _part(vols[-1]),
+            len(volumes), _part(volumes[0]), _part(volumes[-1]),
             "" if ready else " Being put together on the server; it arrives by itself in a few minutes.")).translate(_CONTROL)
-    cover = next((v for v in vols if v["has_cover"] or hub.covers.path(v["key"])), None)
+    cover = next((volume for volume in volumes if volume["has_cover"] or hub.covers.path(volume["key"])), None)
     if cover:
         href = "/opds/cover/%d" % cover["id"]
         ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/image", "href": href, "type": "image/jpeg"})
         ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/image/thumbnail", "href": href, "type": "image/jpeg"})
     if not ready:
         return
-    which = "?name=" + quote(series) + ("&part=%d" % k if count > 1 else "")
+    # the volume count goes in the link too. Readest remembers LINKS it has downloaded, not ids, so a grown
+    # series under the same link would just never come. found in readest's services/opds/autoDownload.ts
+    which = "?name=" + quote(series) + ("&part=%d" % part_no if count > 1 else "") + "&v=%d" % len(volumes)
     # The EPUB first: reading apps prefer it, and it has the contents list for moving between volumes.
     ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/acquisition", "type": MIME["EPUB"], "title": "EPUB with a contents list",
                                   "href": "/opds/series-book" + which})
@@ -286,38 +318,40 @@ def _series_part_entry(feed, series, vols, k, count, hub, prepare):
 
 
 def _chapter_parts(info):
-    kept = [c for c in info["chapters_list"] if c["downloaded"]]
-    return [kept[i:i + CHAPTERS_PER_PART] for i in range(0, len(kept), CHAPTERS_PER_PART)] or [[]]
+    """The downloaded chapters in parts, the same parts as the comic files (chapterfile.py); one empty part when none."""
+    return chapterfile.parts(info) or [[]]
 
 
 def _chapters_entry(feed, info):
     """A series followed chapter by chapter, as one book of the chapters kept so far (in parts when long)."""
     parts = _chapter_parts(info)
-    for k, kept in enumerate(parts, 1):
-        _chapters_part_entry(feed, info, kept, k, len(parts))
+    for part_no, kept in enumerate(parts, 1):
+        _chapters_part_entry(feed, info, kept, part_no, len(parts))
 
 
-def _chapters_part_entry(feed, info, kept, k, count):
+def _chapters_part_entry(feed, info, kept, part_no, count):
     entry = ET.SubElement(feed, "entry")
-    title = info["title"] if count == 1 else "%s · Part %d (%s–%s)" % (info["title"], k, kept[0]["name"], kept[-1]["name"])
+    title = chapterfile.part_title(info["title"], kept, part_no, count) if kept else info["title"]
     ET.SubElement(entry, "title").text = title.translate(_CONTROL)
-    # The chapter count is part of the id, so each new chapter makes the app fetch the longer book.
-    ET.SubElement(entry, "id").text = "urn:bookhub:chapters:%d:%s%d" % (info["id"], "part%d:" % k if count > 1 else "", len(kept))
+    # The chapter count (and how the book is made) is part of the id, so each new chapter makes the app fetch the longer book.
+    ET.SubElement(entry, "id").text = "urn:bookhub:chapters:%d:%s%s" % (info["id"], "part%d:" % part_no if count > 1 else "", chapterfile.version(kept))
     ET.SubElement(entry, "updated").text = db.now()
     if info.get("author"):
         ET.SubElement(ET.SubElement(entry, "author"), "name").text = info["author"].translate(_CONTROL)
     ET.SubElement(entry, "summary", {"type": "text"}).text = (
-        "%d chapters in one book, from %s to %s.%s" % (len(kept), kept[0]["name"], kept[-1]["name"],
+        "%d chapters in one book, from %s to %s.%s" % (len(kept), chapterfile.chapter_name(kept[0]), chapterfile.chapter_name(kept[-1]),
                                                        " New chapters come as a longer copy." if info.get("status") != "Finished" else "")
         if kept else "No chapters kept yet.").translate(_CONTROL)
     ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/image", "href": "/opds/chapters-cover/%d" % info["id"], "type": "image/jpeg"})
     if kept:
+        # same trick as the series links: Readest skips a link it has seen before (even with a new id), so the
+        # version rides along in the link or a grown part would never arrive. (the "missing chapters 81-104" bug)
+        version = "v=" + chapterfile.version(kept)
         ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/acquisition", "type": MIME["EPUB"],
-                                      "href": "/opds/chapters-book/%d%s" % (info["id"], "?part=%d" % k if count > 1 else "")})
-        from . import chapterfile
-        if chapterfile.ready_file(current_app.hub, info, k)[0]:  # the comic file the server keeps, once it is made
+                                      "href": "/opds/chapters-book/%d?%s%s" % (info["id"], "part=%d&" % part_no if count > 1 else "", version)})
+        if chapterfile.ready_file(current_app.hub, info, part_no)[0]:  # the comic file the server keeps, once it is made
             ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/acquisition", "type": MIME["CBZ"], "title": "CBZ",
-                                          "href": "/opds/chapters-file/%d/%d" % (info["id"], k)})
+                                          "href": "/opds/chapters-file/%d/%d?%s" % (info["id"], part_no, version)})
 
 
 def _book_feed(title, path, books, extra="", prepare=False):
@@ -325,7 +359,7 @@ def _book_feed(title, path, books, extra="", prepare=False):
         page = max(1, int(request.args.get("page") or 1))
     except ValueError:
         page = 1
-    href = lambda n: "%s?%spage=%d" % (path, extra, n)  # noqa: E731
+    href = lambda page_no: "%s?%spage=%d" % (path, extra, page_no)  # noqa: E731
     feed = _feed(title, href(page), ACQ)
     if page * PAGE < len(books):
         ET.SubElement(feed, "link", {"rel": "next", "href": href(page + 1), "type": ACQ})
@@ -347,11 +381,11 @@ def _book_feed(title, path, books, extra="", prepare=False):
 def root(who):
     hub = current_app.hub
     feed = _feed("Family Hub · " + who["name"], "/opds", NAV)
-    # Apps that download a catalogue's new books by themselves (Readest's automatic download) follow the feed
-    # marked "sort/new". That is My books, so only the books a person chose arrive unasked; the whole library is
-    # browsed and downloaded by hand. Its title avoids words such as "newest", which those apps also take as the mark.
+    # sneaky but important: Readest's auto-download follows whichever feed is marked "sort/new". we point that at
+    # My books, so only books someone actually CHOSE turn up by themselves, not the whole 2000-book library.
+    # the title dodges words like "newest" too, because some apps sniff for those as well
     ET.SubElement(feed, "link", {"rel": "http://opds-spec.org/sort/new", "href": "/opds/mine", "type": ACQ, "title": "My books"})
-    mine = len([k for k in hub.devices.shelf(who["id"]) if hub.library.by_key(k)])
+    mine = len([key for key in hub.devices.shelf(who["id"]) if hub.library.by_key(key)])
     for title, href, text in (
         ("My books", "/opds/mine", "%d chosen for %s" % (mine, who["name"])),
         ("The whole family library", "/opds/all", "%d books, the last added first" % len(hub.library.books())),
@@ -370,7 +404,7 @@ def root(who):
 def mine(who):
     hub = current_app.hub
     shelf = hub.devices.shelf(who["id"])
-    books = [b for b in (hub.library.by_key(k) for k in sorted(shelf, key=shelf.get, reverse=True)) if b]
+    books = [book for book in (hub.library.by_key(key) for key in sorted(shelf, key=shelf.get, reverse=True)) if book]
     # Series followed chapter by chapter that this person put in My books come first.
     return _book_feed("My books", "/opds/mine", _my_chapter_series(hub, who) + _gather(books, hub.library.books()), prepare=True)
 
@@ -379,18 +413,19 @@ def mine(who):
 @signed_in
 def everything(who):
     everything = current_app.hub.library.books()
-    books = sorted(everything, key=lambda b: b["added"], reverse=True)
+    books = sorted(everything, key=lambda book: book["added"], reverse=True)
     return _book_feed("The whole family library", "/opds/all", _gather(books, everything))
 
 
 @bp.get("/search")
 @signed_in
 def search(who):
-    q = (request.args.get("q") or "").strip().lower()
+    query = (request.args.get("q") or "").strip().lower()
     everything = current_app.hub.library.books()
-    books = [b for b in everything
-             if q and q in " ".join([b["title"], b.get("shown_title", ""), b.get("subtitle", ""), b["author"], b["series"]] + b["tags"]).lower()]
-    return _book_feed("Search: " + q, "/opds/search", _gather(books, everything), "q=%s&" % quote(q))
+    haystack = lambda book: " ".join([book["title"], book.get("shown_title", ""), book.get("subtitle", ""),  # noqa: E731
+                                      book["author"], book["series"]] + book["tags"]).lower()
+    books = [book for book in everything if query and query in haystack(book)]
+    return _book_feed("Search: " + query, "/opds/search", _gather(books, everything), "q=%s&" % quote(query))
 
 
 @bp.get("/opensearch.xml")
@@ -430,22 +465,23 @@ def book_file(who, book_id, fmt):
         if not path:
             return "", 404
     from .devices import safe_filename
+    fetched(hub, who, "book:%d" % book_id, "file")
     return send_file(path, as_attachment=True, download_name=safe_filename(book["title"], book["author"], ext),
                      mimetype=MIME.get(ext.upper(), "application/octet-stream"))
 
 
-def _series_file(hub, vols):
+def _series_file(hub, volumes):
     """The joined series, made once and kept: its name changes whenever a volume is added or replaced."""
     from . import seriesfile
-    stamp = hashlib.sha1("|".join("%d:%s" % (v["id"], sorted(v["sizes"].items())) for v in vols).encode()).hexdigest()[:20]
+    stamp = hashlib.sha1("|".join("%d:%s" % (volume["id"], sorted(volume["sizes"].items())) for volume in volumes).encode()).hexdigest()[:20]
     folder = Path(hub.config.data_dir) / "series-files"
     target = folder / (stamp + ".cbz")
     with _building:  # two devices asking at once share one build
         if not target.is_file():
             folder.mkdir(parents=True, exist_ok=True)
-            made, _ = seriesfile.build(hub.library, vols, vols[0]["series"])
+            made, _ = seriesfile.build(hub.library, volumes, volumes[0]["series"])
             shutil.move(str(made), str(target))
-            for old in sorted(folder.glob("*.cbz"), key=lambda f: f.stat().st_mtime)[:-KEEP_SERIES_FILES]:
+            for old in sorted(folder.glob("*.cbz"), key=lambda file: file.stat().st_mtime)[:-KEEP_SERIES_FILES]:
                 if old != target:
                     old.unlink(missing_ok=True)
     return target
@@ -458,14 +494,15 @@ def series_file(who):
     from . import seriesfile
     from .devices import safe_filename
     hub = current_app.hub
-    vols = _asked_part(hub)
-    if not vols:
+    volumes = _asked_part(hub)
+    if not volumes:
         return "", 404
     try:
-        path = _series_file(hub, vols)
+        path = _series_file(hub, volumes)
     except seriesfile.SeriesFileError:
         return "", 404
-    return send_file(path, as_attachment=True, download_name=safe_filename(vols[0]["series"], "", "cbz"), mimetype=MIME["CBZ"])
+    fetched(hub, who, series_item(volumes[0]["series"], _asked_k()), _series_stamp(hub, volumes))
+    return send_file(path, as_attachment=True, download_name=safe_filename(volumes[0]["series"], "", "cbz"), mimetype=MIME["CBZ"])
 
 
 def _my_chapter_series(hub, who):
@@ -473,13 +510,13 @@ def _my_chapter_series(hub, who):
     from . import series
     if not hub.series.configured or (who["role"] != "admin" and who["id"] in series.blocked_ids(hub)):
         return []
-    out = []
-    for sid in series.my_books(hub, who["id"]):
+    found = []
+    for series_id in series.my_books(hub, who["id"]):
         try:
-            out.append(hub.series.detail(sid))
+            found.append(hub.series.detail(series_id))
         except series.SeriesError:
             continue  # the series server is away, or the series was removed; the rest still show
-    return out
+    return found
 
 
 def _target(hub, kind, stamp):
@@ -488,20 +525,23 @@ def _target(hub, kind, stamp):
 
 
 def _make(target, make):
-    part = target.with_name(target.name + ".part")
+    unfinished = target.with_name(target.name + ".part")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
+        chapterfile.room_for(target.parent)  # a full disk takes Docker down with it. check first, always
         _progress[target] = (0, 0)
-        make(part)
-        part.replace(target)
-        kept = sorted((f for f in target.parent.iterdir() if not f.name.endswith(".part")), key=lambda f: f.stat().st_mtime)
+        make(unfinished)
+        unfinished.replace(target)
+        # keep the newest few, bin the rest. they're rebuilt on request anyway
+        kept = sorted((file for file in target.parent.iterdir() if not file.name.endswith(".part")),
+                      key=lambda file: file.stat().st_mtime)
         for old in kept[:-KEEP_SERIES_FILES]:
             if old != target:
                 old.unlink(missing_ok=True)
     except Exception as exc:
         log.exception("Could not put together %s", target.name)
         _failed[target] = (time.time(), str(exc) or exc.__class__.__name__)
-        part.unlink(missing_ok=True)
+        unfinished.unlink(missing_ok=True)
     finally:
         _progress.pop(target, None)
         with _jobs_lock:
@@ -531,96 +571,111 @@ def _cached(hub, kind, stamp, make):
     return target
 
 
-def _series_stamp(hub, vols):
+def _series_stamp(hub, volumes):
     """Every copy of every volume in it counts, so a whole copy arriving for a damaged volume makes it again."""
-    name, numbers = vols[0]["series"].strip().lower(), {v.get("series_index") for v in vols}
-    every = sorted((b for b in hub.library.books() if (b.get("series") or "").strip().lower() == name
-                    and b.get("series_index") in numbers), key=lambda b: b["id"])
-    return hashlib.sha1(("book|" + "|".join("%d:%s" % (v["id"], sorted(v["sizes"].items())) for v in every)).encode()).hexdigest()[:20]
+    name, numbers = volumes[0]["series"].strip().lower(), {volume.get("series_index") for volume in volumes}
+    every = sorted((book for book in hub.library.books() if (book.get("series") or "").strip().lower() == name
+                    and book.get("series_index") in numbers), key=lambda book: book["id"])
+    return hashlib.sha1(("book|" + "|".join("%d:%s" % (copy["id"], sorted(copy["sizes"].items())) for copy in every)).encode()).hexdigest()[:20]
 
 
-def _series_book_job(hub, vols, wait):
-    """Start (or find) the joined EPUB of these volumes. True when it is ready to send."""
-    target = _target(hub, "series.epub", _series_stamp(hub, vols))
-    return _job(target, lambda part: _series_book_make(hub, vols, part, target), wait)
+def _series_book_job(hub, volumes, wait, stamp=None):
+    """Start (or find) the joined EPUB of these volumes. True when it is ready to send.
+    stamp: their _series_stamp, when the caller has worked it out already."""
+    target = _target(hub, "series.epub", stamp or _series_stamp(hub, volumes))
+    return _job(target, lambda unfinished: _series_book_make(hub, volumes, unfinished, target), wait)
+
+
+def _state(target):
+    if target.is_file():
+        return "ready"
+    if target in _jobs:
+        return "making"
+    return "failed" if _failed.get(target) else "waiting"
 
 
 def series_status(hub, vols):
     """Where each part of a comic series stands, for My books: [{title, state, percent, error}].
     state: "ready", "making", "waiting" (not started) or "failed". Starts the parts not started yet."""
     parts = _split(hub, vols)
-    out = []
-    for k, part in enumerate(parts, 1):
-        target = _target(hub, "series.epub", _series_stamp(hub, part))
-        _series_book_job(hub, part, wait=0)
+    statuses = []
+    for part_no, part in enumerate(parts, 1):
+        stamp = _series_stamp(hub, part)
+        target = _target(hub, "series.epub", stamp)
+        _series_book_job(hub, part, wait=0, stamp=stamp)
         done, total = _progress.get(target, (0, 0))
-        failed = _failed.get(target)
-        if target.is_file():
-            state = "ready"
-        elif target in _jobs:
-            state = "making"
-        elif failed:
-            state = "failed"
-        else:
-            state = "waiting"
-        out.append({"title": _part_title(vols[0]["series"], part, k, len(parts)), "state": state,
-                    "percent": round(100.0 * done / total) if total else 0, "error": failed[1] if state == "failed" else ""})
-    return out
+        state = _state(target)
+        statuses.append({"title": _part_title(vols[0]["series"], part, part_no, len(parts)), "state": state,
+                         "item": series_item(vols[0]["series"], part_no), "version": stamp, "path": str(target),
+                         "percent": round(100.0 * done / total) if total else 0,
+                         "error": _failed[target][1] if state == "failed" else ""})
+    return statuses
+
+
+def _asked_k():
+    try:
+        return int(request.args.get("part") or 1)
+    except ValueError:
+        return 1
 
 
 def _asked_part(hub):
     """The volumes a series-book or series-file request is for: the series by name, and the part if split."""
-    vols, parts = _parts_of(hub, (request.args.get("name") or "").strip())
-    if not vols:
+    volumes, parts = _parts_of(hub, (request.args.get("name") or "").strip())
+    if not volumes:
         return []
     try:
-        k = int(request.args.get("part") or 1)
+        part_no = int(request.args.get("part") or 1)
     except ValueError:
         return []
-    return parts[k - 1] if 1 <= k <= len(parts) else []
+    return parts[part_no - 1] if 1 <= part_no <= len(parts) else []
 
 
-def _whole_copy(hub, v, everything):
+def _comic_file(hub, book):
+    return hub.library.file_path(book, next(fmt for fmt in ("CBZ", "CBR") if fmt in book["formats"]))
+
+
+def _whole_copy(hub, volume, everything):
     """The volume's file, or another copy's when this one is damaged (a download taken in before it had
     finished, with a whole copy taken in later). The volume's own file when no copy looks whole."""
     from .intake import looks_whole
-    name, n = (v.get("series") or "").strip().lower(), v.get("series_index")
-    copies = [v] + sorted((b for b in everything if b["id"] != v["id"] and n and b.get("series_index") == n
-                           and (b.get("series") or "").strip().lower() == name and _comic(b)), key=lambda b: b["id"])
-    files = [(hub.library.file_path(b, next(f for f in ("CBZ", "CBR") if f in b["formats"]))) for b in copies]
-    return next((Path(f) for f in files if f and looks_whole(Path(f))), Path(files[0]) if files[0] else None)
+    name, number = (volume.get("series") or "").strip().lower(), volume.get("series_index")
+    others = sorted((book for book in everything if book["id"] != volume["id"] and number and book.get("series_index") == number
+                     and (book.get("series") or "").strip().lower() == name and _comic(book)), key=lambda book: book["id"])
+    files = [_comic_file(hub, copy) for copy in [volume] + others]
+    return next((Path(file) for file in files if file and looks_whole(Path(file))), Path(files[0]) if files[0] else None)
 
 
-def _series_book_make(hub, vols, target, kept_as=None):
+def _series_book_make(hub, volumes, target, kept_as=None):
     import tempfile
     from . import comicbook, joined, seriesfile
     scratch = Path(tempfile.mkdtemp())
     everything = hub.library.books()
     try:
         parts = []
-        for v in vols:
+        for volume in volumes:
             try:
-                path = _whole_copy(hub, v, everything)
+                path = _whole_copy(hub, volume, everything)
                 if not path:
                     raise OSError("its file is missing")
-                parts.append((_part(v), seriesfile._pages(path, scratch)))
+                parts.append((_part(volume), seriesfile._pages(path, scratch)))
             except (zipfile.BadZipFile, seriesfile.SeriesFileError, OSError) as exc:
-                # A damaged volume (a download taken in before it had finished) is left out, not the whole series.
-                log.warning("Left %s out of %s: %s", _part(v), v["series"], exc)
-        comicbook.build(target, _book_title(hub, vols), vols[0].get("shown_author") or vols[0]["author"], parts,
+                # one busted volume gets skipped (and logged); the other 20 still make it into the book
+                log.warning("Left %s out of %s: %s", _part(volume), volume["series"], exc)
+        comicbook.build(target, _book_title(hub, volumes), volumes[0].get("shown_author") or volumes[0]["author"], parts,
                         progress=lambda done, total: _progress.__setitem__(kept_as or target, (done, total)))
-        joined.record(hub, target, "series", vols[0]["series"], {_part(v): v["key"] for v in vols}, kept_as=kept_as)
+        joined.record(hub, target, "series", volumes[0]["series"], {_part(volume): volume["key"] for volume in volumes}, kept_as=kept_as)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _book_title(hub, vols):
+def _book_title(hub, volumes):
     """The joined book's own title: the series, or "Series · Part 2 (Volume 8–14)" when it is one of several."""
-    everything = _volumes(vols[0]["series"], hub.library.books())
-    parts = _split(hub, everything) if len(everything) > 1 else [vols]
-    ids = [v["id"] for v in vols]
-    k = next((i for i, part in enumerate(parts, 1) if [v["id"] for v in part] == ids), 1)
-    return _part_title(vols[0]["series"], vols, k, len(parts))
+    everything = _volumes(volumes[0]["series"], hub.library.books())
+    parts = _split(hub, everything) if len(everything) > 1 else [volumes]
+    ids = [volume["id"] for volume in volumes]
+    part_no = next((number for number, part in enumerate(parts, 1) if [volume["id"] for volume in part] == ids), 1)
+    return _part_title(volumes[0]["series"], volumes, part_no, len(parts))
 
 
 @bp.get("/series-book")
@@ -629,13 +684,16 @@ def series_book(who):
     """A comic series as one EPUB with a contents entry for each volume."""
     from .devices import safe_filename
     hub = current_app.hub
-    vols = _asked_part(hub)
-    if not vols:
+    volumes = _asked_part(hub)
+    if not volumes:
         return "", 404
-    if not _series_book_job(hub, vols, wait=FILE_WAIT):
+    stamp = _series_stamp(hub, volumes)
+    if not _series_book_job(hub, volumes, wait=FILE_WAIT, stamp=stamp):
+        # 503 + Retry-After is the polite "not yet, come back in 5 minutes" that reading apps understand
         return Response("This series is being put together on the server. Try again in a few minutes.", 503, {"Retry-After": "300"})
-    path = _target(hub, "series.epub", _series_stamp(hub, vols))
-    return send_file(path, as_attachment=True, download_name=safe_filename(_book_title(hub, vols), "", "epub"), mimetype=MIME["EPUB"])
+    path = _target(hub, "series.epub", stamp)
+    fetched(hub, who, series_item(volumes[0]["series"], _asked_k()), stamp)
+    return send_file(path, as_attachment=True, download_name=safe_filename(_book_title(hub, volumes), "", "epub"), mimetype=MIME["EPUB"])
 
 
 @bp.get("/chapters-book/<int:series_id>")
@@ -655,37 +713,45 @@ def chapters_book(who, series_id):
         return "", 404
     parts = _chapter_parts(info)
     try:
-        k = int(request.args.get("part") or 1)
+        part_no = int(request.args.get("part") or 1)
     except ValueError:
         return "", 404
-    kept = parts[k - 1] if 1 <= k <= len(parts) else []
+    kept = parts[part_no - 1] if 1 <= part_no <= len(parts) else []
     if not kept:
         return "", 404
-    title = info["title"] if len(parts) == 1 else "%s · Part %d (%s–%s)" % (info["title"], k, kept[0]["name"], kept[-1]["name"])
-    stamp = hashlib.sha1(("chapters|%d|" % series_id + ",".join(str(c["id"]) for c in kept)).encode()).hexdigest()[:20]
+    title = chapterfile.part_title(info["title"], kept, part_no, len(parts))
+    chapter_ids = ",".join(str(chapter["id"]) for chapter in kept)
+    stamp = hashlib.sha1(("chapters|%d|%d|" % (series_id, chapterfile.FORMAT) + chapter_ids).encode()).hexdigest()[:20]
 
     def make(target):
         from . import joined
         scratch = Path(tempfile.mkdtemp())
+        opened = []  # the chapters' zips stay open while pages are read lazily, then all get closed in finally
         try:
-            parts = []
-            for c in kept:
-                file = scratch / ("%d.cbz" % c["id"])
-                with hub.series.raw("/api/v1/chapter/%d/download" % c["id"], stream=True) as r, open(file, "wb") as out:
-                    for block in r.iter_content(1 << 20):
+            pieces, names_of = [], chapterfile.labels(kept)
+            for chapter, label in zip(kept, names_of):
+                file = scratch / ("%d.cbz" % chapter["id"])
+                with hub.series.raw("/api/v1/chapter/%d/download" % chapter["id"], stream=True) as reply, open(file, "wb") as out:
+                    for block in reply.iter_content(1 << 20):
                         out.write(block)
-                z = zipfile.ZipFile(file)
-                names = sorted((n for n in z.namelist() if n.lower().endswith(seriesfile.PICTURES)), key=seriesfile._natural)
-                parts.append((c["name"] or "Chapter %s" % c["number"], [(n, (lambda z=z, n=n: z.read(n))) for n in names]))
-            comicbook.build(target, title, info.get("author") or "", parts)
-            joined.record(hub, target, "chapters", series_id, {(c["name"] or "Chapter %s" % c["number"]): c["id"] for c in kept},
+                chapter_zip = zipfile.ZipFile(file)
+                opened.append(chapter_zip)
+                names = sorted((name for name in chapter_zip.namelist() if name.lower().endswith(seriesfile.PICTURES)),
+                               key=seriesfile._natural)
+                # default args pin each lambda to ITS zip and name (closures in loops are a classic trap)
+                pieces.append((label, [(name, (lambda chapter_zip=chapter_zip, name=name: chapter_zip.read(name))) for name in names]))
+            comicbook.build(target, title, info.get("author") or "", pieces)
+            joined.record(hub, target, "chapters", series_id, dict(zip(names_of, (chapter["id"] for chapter in kept))),
                           kept_as=_target(hub, "chapters.epub", stamp))
         finally:
+            for chapter_zip in opened:
+                chapter_zip.close()
             shutil.rmtree(scratch, ignore_errors=True)
     try:
         path = _cached(hub, "chapters.epub", stamp, make)
     except (series.SeriesError, zipfile.BadZipFile, ValueError, OSError):
         return "", 404
+    fetched(hub, who, "chapters:%d:%d" % (series_id, part_no), chapterfile.version(kept))
     return send_file(path, as_attachment=True, download_name=safe_filename(title, "", "epub"), mimetype=MIME["EPUB"])
 
 
@@ -693,17 +759,19 @@ def chapters_book(who, series_id):
 @signed_in
 def chapters_file(who, series_id, part):
     """A part of a series by chapter, as the comic file the server keeps of it."""
-    from . import chapterfile, series
+    from . import series
     from .devices import safe_filename
     hub = current_app.hub
     if series_id not in series.my_books(hub, who["id"]) or (who["role"] != "admin" and who["id"] in series.blocked_ids(hub)):
         return "", 404
     try:
-        path, title = chapterfile.ready_file(hub, hub.series.detail(series_id), part)
+        info = hub.series.detail(series_id)
     except series.SeriesError:
         return "", 404
+    path, title = chapterfile.ready_file(hub, info, part)
     if not path:
         return "", 404
+    fetched(hub, who, "chapters:%d:%d" % (series_id, part), chapterfile.version(chapterfile.parts(info)[part - 1]))
     return send_file(path, as_attachment=True, download_name=safe_filename(title, "", "cbz"), mimetype=MIME["CBZ"])
 
 
@@ -713,7 +781,8 @@ def chapters_cover(who, series_id):
     from . import series
     hub = current_app.hub
     try:
-        r = hub.series.raw("/api/v1/manga/%d/thumbnail" % series_id, stream=False)
+        reply = hub.series.raw("/api/v1/manga/%d/thumbnail" % series_id, stream=False)
     except series.SeriesError:
         return "", 404
-    return Response(r.content, mimetype=r.headers.get("Content-Type", "image/jpeg").split(";")[0], headers={"Cache-Control": "max-age=3600"})
+    mimetype = reply.headers.get("Content-Type", "image/jpeg").split(";")[0]
+    return Response(reply.content, mimetype=mimetype, headers={"Cache-Control": "max-age=3600"})

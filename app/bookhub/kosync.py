@@ -11,10 +11,9 @@ import hashlib
 import hmac
 import threading
 import time
+from datetime import datetime, timezone
 
 from flask import Blueprint, current_app, jsonify, request
-
-from . import db
 
 bp = Blueprint("kosync", __name__, url_prefix="/kosync")
 
@@ -23,12 +22,14 @@ def partial_md5(path):
     """Same sampling as KOReader's util.partialMD5 (1 KB at 0, 1K, 4K, 16K ... 1G)."""
     md5 = hashlib.md5()
     step = size = 1024
-    with open(path, "rb") as f:
-        for i in range(-1, 11):
-            # LuaJIT's lshift(1024, -2) wraps round to 0, so the first sample is at offset 0.
-            offset = 0 if i < 0 else step << (2 * i)
-            f.seek(offset)
-            sample = f.read(size)
+    with open(path, "rb") as file:
+        for power in range(-1, 11):
+            # copying KOReader's lua bug-for-bug here: lshift(1024, -2) wraps round to 0 in LuaJIT, so the first
+            # sample is at 0. get this wrong and no device ever matches a book.
+            # https://github.com/koreader/koreader/blob/master/frontend/util.lua (partialMD5)
+            offset = 0 if power < 0 else step << (2 * power)  # 1K, 4K, 16K ... each 4x the last
+            file.seek(offset)
+            sample = file.read(size)
             if not sample:
                 break
             md5.update(sample)
@@ -38,7 +39,7 @@ def partial_md5(path):
 def index_library(hub):
     """Record the sync hash of every book file so devices can be matched to books."""
     con = hub.con()
-    known = {r["path"]: r["mtime"] for r in con.execute("SELECT path, mtime FROM doc_hashes")}
+    known = {row["path"]: row["mtime"] for row in con.execute("SELECT path, mtime FROM doc_hashes")}
     changed = False
     for book in hub.library.all_books():  # a device may hold either copy
         for fmt in book["formats"]:
@@ -74,17 +75,17 @@ def _profile():
         return None
     who = name.strip().lower()
     with _misses_lock:
-        entry = _misses.get(who, [0, 0])
-        if entry[0] >= MAX_TRIES and time.time() - entry[1] < LOCK_SECONDS:
-            return None
+        misses, last_miss = _misses.get(who, [0, 0])
+        if misses >= MAX_TRIES and time.time() - last_miss < LOCK_SECONDS:
+            return None  # too many wrong guesses, sit in the naughty corner for a minute
     row = current_app.hub.con().execute("SELECT * FROM profiles WHERE name=?", (name,)).fetchone()
     if row and row["sync_key"] and hmac.compare_digest(row["sync_key"], key.lower()):
         with _misses_lock:
             _misses.pop(who, None)
         return row
     with _misses_lock:
-        entry = _misses.get(who, [0, 0])
-        _misses[who] = [entry[0] + 1 if time.time() - entry[1] < LOCK_SECONDS else 1, time.time()]
+        misses, last_miss = _misses.get(who, [0, 0])
+        _misses[who] = [misses + 1 if time.time() - last_miss < LOCK_SECONDS else 1, time.time()]
     return None
 
 
@@ -128,7 +129,8 @@ def put_progress():
     con = hub.con()
     row = con.execute("SELECT book_key FROM doc_hashes WHERE hash=?", (document,)).fetchone()
     if not row:
-        # A series Family Hub joined into one book: the progress goes to the volumes or chapters in it.
+        # not a library file, but maybe one of our joined series books. then the progress gets shared out
+        # to the volumes or chapters inside it
         from . import joined
         found = joined.find(hub, document)
         if found:
@@ -137,13 +139,13 @@ def put_progress():
             return jsonify({"document": document, "timestamp": int(time.time())})
         index_library(hub)
         row = con.execute("SELECT book_key FROM doc_hashes WHERE hash=?", (document,)).fetchone()
-    # Unknown files are still stored (under their hash) so the device keeps working.
+    # never heard of this file? store it anyway under its hash, devices get grumpy when sync fails
     book_key = row["book_key"] if row else "doc:" + document
     hub.save_reading(
         profile["id"], book_key, percent=round(percentage * 100, 2), source="device",
         device=str(data.get("device") or "")[:80], progress=str(data.get("progress") or "")[:500],
     )
-    return jsonify({"document": document, "timestamp": int(__import__("time").time())})
+    return jsonify({"document": document, "timestamp": int(time.time())})
 
 
 @bp.get("/syncs/progress/<document>")
@@ -157,22 +159,23 @@ def get_progress(document):
         from . import joined
         kept = joined.kept_progress(current_app.hub, profile["id"], document)
         if kept:
-            from datetime import datetime, timezone
-            ts = int(datetime.strptime(kept["updated"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
             return jsonify({"document": document, "percentage": kept["percent"] / 100.0, "progress": kept["progress"],
-                            "device": kept["device"], "device_id": "", "timestamp": ts})
+                            "device": kept["device"], "device_id": "", "timestamp": _timestamp(kept["updated"])})
     book_key = row["book_key"] if row else "doc:" + document
-    r = con.execute(
+    reading = con.execute(
         "SELECT * FROM reading WHERE book_key=? AND profile_id=?", (book_key, profile["id"])
     ).fetchone()
-    if not r or not r["progress"]:
+    if not reading or not reading["progress"]:
         return jsonify({})
-    from datetime import datetime, timezone
-    ts = int(datetime.strptime(r["updated"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
     return jsonify({
-        "document": document, "percentage": (r["percent"] or 0) / 100.0, "progress": r["progress"],
-        "device": r["device"] or "", "device_id": "", "timestamp": ts,
+        "document": document, "percentage": (reading["percent"] or 0) / 100.0, "progress": reading["progress"],
+        "device": reading["device"] or "", "device_id": "", "timestamp": _timestamp(reading["updated"]),
     })
+
+
+def _timestamp(updated):
+    """Seconds since 1970 for one of Family Hub's times ("2026-10-26T09:30:00Z"), as KOReader wants it."""
+    return int(datetime.strptime(updated, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
 
 
 def sync_key_for(password):

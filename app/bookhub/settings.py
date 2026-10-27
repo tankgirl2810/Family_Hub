@@ -147,18 +147,20 @@ class EnvFile:
             end = raw.find("'", 1)
             return raw[1:end] if end > 0 else raw[1:]
         if raw[:1] == '"':
-            out, i = [], 1
-            while i < len(raw) and raw[i] != '"':
-                if raw[i] == "\\" and i + 1 < len(raw):
-                    i += 1
-                    out.append({"n": "\n"}.get(raw[i], raw[i]))
-                elif raw.startswith("$$", i):
-                    out.append("$")
-                    i += 1
+            # a hand-rolled little tokenizer, walking one character at a time because escapes eat the next one.
+            # \n means newline, \x means x, and $$ means a single $ (Docker Compose's rules, not ours)
+            chars, at = [], 1
+            while at < len(raw) and raw[at] != '"':
+                if raw[at] == "\\" and at + 1 < len(raw):
+                    at += 1
+                    chars.append({"n": "\n"}.get(raw[at], raw[at]))
+                elif raw.startswith("$$", at):
+                    chars.append("$")
+                    at += 1
                 else:
-                    out.append(raw[i])
-                i += 1
-            return "".join(out)
+                    chars.append(raw[at])
+                at += 1
+            return "".join(chars)
         return re.split(r"\s+#", raw, maxsplit=1)[0].strip()
 
     @staticmethod
@@ -177,31 +179,32 @@ class EnvFile:
         except OSError:
             return values
         for line in text.splitlines():
-            m = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$", line)
-            if m:
-                values[m.group(1)] = self.parse_value(m.group(2))
+            match = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$", line)
+            if match:
+                values[match.group(1)] = self.parse_value(match.group(2))
         return values
 
     def write(self, changes):
         """Set each NAME to its value: on its own line where the file has one, otherwise added at the end."""
-        with open(self.path, "r+", encoding="utf-8", newline="") as f:
-            text = f.read()
-            newline = "\r\n" if "\r\n" in text else "\n"
+        with open(self.path, "r+", encoding="utf-8", newline="") as file:
+            text = file.read()
+            newline = "\r\n" if "\r\n" in text else "\n"  # keep Windows line endings if that's what it had
             lines = text.splitlines()
             for name, value in changes.items():
                 line = "%s=%s" % (name, self.format_value(value))
-                at = next((i for i, l in enumerate(lines) if re.match(r"\s*(?:export\s+)?%s\s*=" % re.escape(name), l)), None)
+                setting = re.compile(r"\s*(?:export\s+)?%s\s*=" % re.escape(name))
+                at = next((number for number, existing in enumerate(lines) if setting.match(existing)), None)
                 if at is None:
                     if SAVED_HEADER not in lines:
                         lines += ["", SAVED_HEADER]
                     lines.append(line)
                 else:
                     lines[at] = line
-            # Written in place, not replaced: Docker shares this one file with Family Hub, and a new file would
-            # not be the one it shares.
-            f.seek(0)
-            f.write(newline.join(lines) + newline)
-            f.truncate()
+            # rewrite IN PLACE, never swap in a new file. Docker shares this exact file (by inode) with the
+            # container, so a fresh file would quietly stop being the one it sees. sneaky
+            file.seek(0)
+            file.write(newline.join(lines) + newline)
+            file.truncate()
 
 
 def env_file(config):
@@ -223,7 +226,7 @@ def _move_saved_into_file(hub, store):
             moved[ENV_NAMES[name]] = saved
     if moved:
         store.write(moved)
-        con.execute("DELETE FROM kv WHERE key IN (%s)" % ",".join("?" * len(FIELDS)), [_key(n) for n in FIELDS])
+        con.execute("DELETE FROM kv WHERE key IN (%s)" % ",".join("?" * len(FIELDS)), [_key(name) for name in FIELDS])
         con.commit()
 
 
@@ -278,7 +281,7 @@ def clean(name, value):
 def save(hub, values):
     store = env_file(hub.config)
     if store:
-        # Every value is checked before any is written.
+        # clean() everything first (it raises on a bad one), so we never write half a form
         changes = {ENV_NAMES[name]: clean(name, value) for name, value in values.items() if name in FIELDS}
         if changes:
             store.write(changes)
@@ -304,7 +307,7 @@ def describe(hub):
     store = env_file(config)
     in_file = store.read() if store else {}
     groups = []
-    for gid, title, hint, fields in GROUPS:
+    for group_id, title, hint, fields in GROUPS:
         items = []
         for name, label, kind in fields:
             saved = bool(in_file.get(ENV_NAMES[name])) if store else bool(db.kv_get(con, _key(name)))
@@ -316,7 +319,7 @@ def describe(hub):
                 "source": ("file" if store else "here") if saved else ("env" if config.env_values[name] and not store else
                                                                     ("default" if current else "none")),
             })
-        groups.append({"id": gid, "title": title, "hint": hint, "fields": items, "can_test": True})
+        groups.append({"id": group_id, "title": title, "hint": hint, "fields": items, "can_test": True})
     return groups
 
 

@@ -57,7 +57,7 @@ def _is_sqlite(path):
 def _wanted(root):
     """Files under a program's folder worth carrying, as (path, name inside the folder)."""
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
         for name in filenames:
             if name in SKIP_FILES or name.endswith(SKIP_ENDS):
                 continue
@@ -72,66 +72,67 @@ NOTES_NAME = "SETUP-NOTES.txt"
 def notes(hub, env, host="<server address>"):
     """A readable sheet of where everything is and how to sign in, written from the settings as they are now.
     It holds passwords, so it only ever travels inside the locked setup file (and .gitignore keeps it off GitHub)."""
-    c = hub.config
-    v = lambda name, default="(not set)": env.get(name) or default  # noqa: E731
+    config = hub.config
+    setting = lambda name, default="(not set)": env.get(name) or default  # noqa: E731
     at = lambda port: "http://%s:%s" % (host, port)  # noqa: E731
-    ports = c.service_ports
+    ports = config.service_ports
+    hub_port = env.get("BOOKHUB_PORT") or config.port
     profiles = hub.con().execute("SELECT name, role FROM profiles ORDER BY role, name").fetchall()
     lines = [
         "FAMILY HUB: SETUP NOTES (made %s)" % date.today().isoformat(),
         "Keep this private: it holds every password. Addresses use %s; on another machine use that machine's address." % host,
         "",
         "FAMILY HUB",
-        "  Address:             %s" % at(env.get("BOOKHUB_PORT") or c.port),
-        "  Profiles:            %s" % (", ".join("%s (%s)" % (r["name"], r["role"]) for r in profiles) or "none yet"),
+        "  Address:             %s" % at(hub_port),
+        "  Profiles:            %s" % (", ".join("%s (%s)" % (row["name"], row["role"]) for row in profiles) or "none yet"),
         "  Each profile signs in with its own passcode. These came with the setup file unchanged.",
         "",
         "READING APPS (Readest, KOReader)",
-        "  Catalogue (OPDS):    %s/opds" % at(env.get("BOOKHUB_PORT") or c.port),
-        "  Progress sync:       %s/kosync" % at(env.get("BOOKHUB_PORT") or c.port),
+        "  Catalogue (OPDS):    %s/opds" % at(hub_port),
+        "  Progress sync:       %s/kosync" % at(hub_port),
         "  User name:           the profile name, exactly as Family Hub shows it",
         "  Password:            that profile's sync password (Profiles > Settings > Reading app sync), not the passcode",
         "  Use http://, not https://.",
         "",
         "SIGN-IN FOR THE PROGRAMS' OWN PAGES (set by Connect everything)",
-        "  User name:           %s" % v("SERVICES_USER"),
-        "  Password:            %s" % v("SERVICES_PASSWORD"),
+        "  User name:           %s" % setting("SERVICES_USER"),
+        "  Password:            %s" % setting("SERVICES_PASSWORD"),
         "  Radarr (films):      %s" % at(ports["radarr"]),
         "  Sonarr (TV):         %s" % at(ports["sonarr"]),
         "  Prowlarr (search):   %s" % at(ports["prowlarr"]),
         "  Bazarr (subtitles):  %s" % at(ports["bazarr"]),
-        "  qBittorrent:         %s   user %s, password %s" % (at(ports["qbittorrent"]), v("QBITTORRENT_USER"), v("QBITTORRENT_PASS")),
+        "  qBittorrent:         %s   user %s, password %s" % (at(ports["qbittorrent"]), setting("QBITTORRENT_USER"), setting("QBITTORRENT_PASS")),
         "",
         "LIBRARY MANAGER (Calibre-Web Automated)",
         "  Address:             %s" % at(ports["cwa"]),
-        "  Admin account Family Hub uses: %s / %s" % (v("CWA_USER"), v("CWA_PASS")),
+        "  Admin account Family Hub uses: %s / %s" % (setting("CWA_USER"), setting("CWA_PASS")),
         "",
         "SERIES BY CHAPTER",
-        "  Series server:       %s   user %s, password %s" % (at(ports["suwayomi"]), v("SUWAYOMI_USER"), v("SUWAYOMI_PASS")),
+        "  Series server:       %s   user %s, password %s" % (at(ports["suwayomi"]), setting("SUWAYOMI_USER"), setting("SUWAYOMI_PASS")),
         "  Its manga sites and extension list came with the setup file (stack/suwayomi).",
-        "  Komga (Tachimanga):  %s   account %s, password %s" % (at(ports["komga"]), v("KOMGA_USER"), v("KOMGA_PASS")),
+        "  Komga (Tachimanga):  %s   account %s, password %s" % (at(ports["komga"]), setting("KOMGA_USER"), setting("KOMGA_PASS")),
         "",
         "WATCHING",
         "  Jellyfin:            %s" % (env.get("JELLYFIN_LINK") or at(ports["jellyfin"])),
         "  Jellyfin's own accounts are kept in its settings (stack/jellyfin-config) and came with the setup file.",
         "",
         "VPN (torrents only ever use it)",
-        "  Provider:            %s, %s" % (v("VPN_PROVIDER"), v("VPN_TYPE")),
-        "  Countries:           %s" % v("VPN_COUNTRIES", "any"),
+        "  Provider:            %s, %s" % (setting("VPN_PROVIDER"), setting("VPN_TYPE")),
+        "  Countries:           %s" % setting("VPN_COUNTRIES", "any"),
         "",
         "SENDING BOOKS TO A KINDLE",
-        "  From address:        %s" % v("SMTP_USER"),
+        "  From address:        %s" % setting("SMTP_USER"),
         "  Each Kindle must list it as an approved sender on Amazon.",
         "",
         "HOME PAGE VISUALS",
-        "  Home town:           %s (%s, %s)" % (v("HOME_PLACE"), v("HOME_LAT", "?"), v("HOME_LON", "?")),
-        "  Visuals repository:  %s" % v("VISUALS_REPO", "none: the built-in ones"),
+        "  Home town:           %s (%s, %s)" % (setting("HOME_PLACE"), setting("HOME_LAT", "?"), setting("HOME_LON", "?")),
+        "  Visuals repository:  %s" % setting("VISUALS_REPO", "none: the built-in ones"),
         "",
         "WHERE THINGS ARE KEPT (from .env; check these on a new machine)",
-        "  Books:               %s" % v("LIBRARY_PATH", "./stack/library"),
-        "  Films, TV, downloads: %s" % v("DATA_ROOT", "./stack/data"),
-        "  Chapters:            %s" % v("SERIES_PATH", "./stack/series"),
-        "  Second-disk copy:    %s" % v("BACKUP_PATH", "none"),
+        "  Books:               %s" % setting("LIBRARY_PATH", "./stack/library"),
+        "  Films, TV, downloads: %s" % setting("DATA_ROOT", "./stack/data"),
+        "  Chapters:            %s" % setting("SERIES_PATH", "./stack/series"),
+        "  Second-disk copy:    %s" % setting("BACKUP_PATH", "none"),
         "",
         "Everything above is also in .env, which this setup file restores. Guides 2 and 7 have the steps.",
     ]
@@ -158,30 +159,30 @@ def build(hub, passphrase, out_dir=None, host="<server address>"):
     if config.stack_dir and Path(config.stack_dir).is_dir():
         sources += [("stack/" + name, Path(config.stack_dir) / name) for name in secondcopy.SETTINGS if (Path(config.stack_dir) / name).is_dir()]
     count = 0
-    with tempfile.TemporaryDirectory() as tmp, pyzipper.AESZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as z:
-        z.setpassword(passphrase.encode("utf-8"))
-        z.writestr("README.txt", README.format(day=date.today().isoformat()))
-        z.writestr(NOTES_NAME, notes(hub, env.read(), host))
-        z.write(env.path, ".env")
+    with tempfile.TemporaryDirectory() as tmp, pyzipper.AESZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as locked:
+        locked.setpassword(passphrase.encode("utf-8"))
+        locked.writestr("README.txt", README.format(day=date.today().isoformat()))
+        locked.writestr(NOTES_NAME, notes(hub, env.read(), host))
+        locked.write(env.path, ".env")
         for prefix, root in sources:
             for path, name in _wanted(root):
                 if path.resolve() == target.resolve():
-                    continue
+                    continue  # don't zip the zip into itself, that way lies madness
                 arc = prefix + "/" + name
                 try:
                     if _is_sqlite(path):
                         copy = Path(tmp) / ("db-%d" % count)
                         secondcopy._copy_database(path, copy)
-                        z.write(copy, arc)
-                        # A database in a read-only folder is copied as its files, the recent changes alongside.
+                        locked.write(copy, arc)
+                        # read-only folder fallback copies the raw files, and the -wal file holds the recent changes. bring it
                         for extra in ("-wal", "-shm"):
                             side = Path(str(copy) + extra)
                             if side.is_file():
-                                z.write(side, arc + extra)
+                                locked.write(side, arc + extra)
                                 side.unlink()
                         copy.unlink()
                     else:
-                        z.write(path, arc)
+                        locked.write(path, arc)
                     count += 1
                 except (OSError, sqlite3.Error):
                     continue  # a file that vanished or is locked; the rest of the setup still counts
@@ -195,12 +196,12 @@ def restore(file, folder, passphrase):
     if not folder.is_dir():
         raise SetupError("%s is not a folder." % folder)
     try:
-        with pyzipper.AESZipFile(file) as z:
-            z.setpassword(passphrase.encode("utf-8"))
-            names = z.namelist()
+        with pyzipper.AESZipFile(file) as locked:
+            locked.setpassword(passphrase.encode("utf-8"))
+            names = locked.namelist()
             if ".env" not in names:
                 raise SetupError("That is not a Family Hub setup file.")
-            z.read(".env")  # a wrong passphrase fails here, before anything is written
+            locked.read(".env")  # canary read: a wrong passphrase blows up here, before we touch a single file
             if (folder / ".env").is_file():
                 (folder / ".env").replace(folder / ".env.before-restore")
             for name in names:
@@ -208,9 +209,9 @@ def restore(file, folder, passphrase):
                     continue
                 dest = (folder / name).resolve()
                 if folder not in dest.parents:
-                    continue  # never outside the folder
+                    continue  # a sneaky "../../something" name? nope, stays in the folder
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(z.read(name))
+                dest.write_bytes(locked.read(name))
     except RuntimeError as exc:
         if "password" in str(exc).lower() or "Bad" in str(exc):
             raise SetupError("The passphrase is not right.")
@@ -227,11 +228,11 @@ def main(argv):
     import getpass
     phrase = os.environ.get("SETUP_PASSPHRASE") or getpass.getpass("Passphrase: ")
     try:
-        n = restore(argv[2], argv[3], phrase)
+        restored = restore(argv[2], argv[3], phrase)
     except SetupError as exc:
         print(exc)
         return 1
-    print("Restored %d files into %s. Check the paths in .env, then start Family Hub." % (n, argv[3]))
+    print("Restored %d files into %s. Check the paths in .env, then start Family Hub." % (restored, argv[3]))
     return 0
 
 

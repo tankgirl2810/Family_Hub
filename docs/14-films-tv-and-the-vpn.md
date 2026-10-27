@@ -1,6 +1,6 @@
 # 14. Films, TV shows, subtitles and the VPN
 
-**Movies and TV Shows** in the sidebar has two tabs:
+**Movies and TV Shows** in the sidebar has three tabs:
 
 | Tab | What is in it |
 |---|---|
@@ -8,7 +8,7 @@
 | **Search** | Search for a film or show and request it |
 | **Downloads** | Its own section in the sidebar (also a tab here and in Books): every download in qBittorrent, films, TV and books, with **Pause**, **Continue**, buttons to move it up or down the line, and **Delete** for admins; what was added lately |
 
-Family Hub is only the front end. Five programs do the work:
+Family Hub is only the front end. These programs do the work:
 
 | Program | Its job | Its own page |
 |---|---|---|
@@ -60,9 +60,10 @@ film on the server has its own **Watch** button.
   answers, best first by the quality in their names. Press **Stop
   searching** to pick from what has been found so far; Radarr or Sonarr
   check the one you pick, and if they turn it down they say why and offer
-  **Use anyway**. When their own full search finishes, their checked list
+  **Use this anyway**. When their own full search finishes, their checked list
   replaces the early one.
-- **Downloads → Speed** shows the speed now and a slider in 24 small
+- **Downloads → Speed** (under the list of downloads; press it to open)
+  shows the speed now and a slider in 24 small
   steps from **Fastest** (no limit) to **Slowest** (100 KB/s), or type an
   exact speed in MB/s and press **Set**. Slide it right when someone needs
   the internet: downloads keep going, just slower. Uploads follow at a
@@ -71,13 +72,35 @@ film on the server has its own **Watch** button.
   any moment) and a line saying how many downloads are downloading, waiting
   their turn, waiting for seed, paused and done. Anyone who may download
   things can change the speed.
-- **Waiting for seed.** A download that nobody has shared for ten minutes
+- **Waiting for seed.** A book download that nobody has shared for ten minutes
   goes to the back of the line and is paused, so it does not hold up the
   rest. It is listed under **Waiting for seed** with when it was last
   checked. Every half hour it is started for five minutes to look for
   someone sharing it; if it finds someone it carries on by itself from the
   back of the line, otherwise it is paused again. **Continue** starts it
   straight away and takes it out of waiting for seed.
+- **Books and graphic novels swap to a shared copy.** A book download that
+  had people sharing it and then has nobody for half an hour is looked for
+  again. If another copy of the same book has someone sharing it (an EPUB
+  first, then the one with most sharers), that copy is downloaded instead and
+  the stuck one is deleted with its unfinished files. "The same book" means the
+  title and author words match and any volume or issue number is the same. If
+  no other copy is shared yet, it looks again an hour later, then three hours
+  after that. If there is still none, it stops looking: the download is paused
+  and says **Paused · no shared copy found**. **Find a new copy** tries again
+  by hand; **Continue** starts it again. A download that never had anyone
+  sharing it just waits for seed. Swaps show under **Discover → Recent
+  requests**.
+- **Find a new copy** (book downloads still coming in) lists other copies of
+  the same book that someone is sharing, the best first; **Use this copy**
+  downloads it and deletes the stuck one with its unfinished files.
+- **Waiting for seed, and the swap, are for books and graphic novels only.**
+  Films and TV are left to Radarr and Sonarr, which give up on a stuck
+  download and look for another copy themselves.
+- **Files are missing.** qBittorrent says this when a download's files were
+  moved by hand, or the downloads folder changed. They are listed together on
+  the Downloads page; if you already have them, **Forget (files stay)** or
+  **Forget all** takes them off qBittorrent's list without touching any file.
 - While a version of a film or episode is coming in, its card says
   **Downloading** with how far along it is, instead of "being looked for".
 - **Remove from the server** is for admins only. Removing deletes the files
@@ -247,10 +270,14 @@ To use another provider, set `VPN_PROVIDER` to its name as gluetun spells it
    `http://gluetun:8080`.
 4. In Family Hub open **Admin → Hub → Films and TV** and press **Connect
    everything**. It reads each program's API key from its own settings, then:
+   - sets the user name and password from **Connections → Sign-in for the
+     programs' own pages** on Radarr, Sonarr, Prowlarr, Bazarr and
+     qBittorrent, when one is saved;
    - gives Radarr and Sonarr their folders (`/data/media/movies`, `/data/media/tv`);
    - makes the Family Hub quality profile in both;
    - connects both to qBittorrent;
-   - tells Prowlarr to share its indexers with both;
+   - tells Prowlarr to share its indexers with both, and to send books
+     from Discover to qBittorrent;
    - gives qBittorrent a folder for films, TV and books;
    - points Bazarr at Radarr and Sonarr and asks for English subtitles
      (forced ones too, and hearing-impaired ones when nothing else exists);

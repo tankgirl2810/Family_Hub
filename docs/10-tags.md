@@ -15,28 +15,37 @@ by any of them (see "Searching the library" below).
 You build a search, then press **Search**. Until you do, the books shown stay
 as they were, and a note says the search has changed.
 
+Under the box are **Sort** and **Refine**. **Refine** opens the less-used
+settings: **Look in**, **Add tags as**, the colour key and **How to type a
+search**. Press it again (**Hide refine**) to fold them away; the choice is
+remembered.
+
 Plain words typed in the box are looked for in the places switched on under
-it: **Title**, **Author**, **Series** and **Tag**. **Enter** keeps what you typed
+**Look in**: **Title**, **Author**, **Series** and **Tag**. **Enter** keeps what you typed
 as terms, shown as chips under the box (Search keeps them too).
 
 Under the chips are the tags you can pick from the part of the library you
 are in, the most used first (**All tags** shows the rest, and typing narrows
-the list). First choose how a tag you click counts under **Add tags as**:
+the list). First choose how a tag you click counts under **Add tags as**
+(press **Refine** under the search box to show it):
 **+ Must have**, **− Must not have** or **∨ Any of these**, then click tags to
 add them. A tag already in the search shows pressed; clicking it
-again takes it out. Each chip says what it is and has its own colour:
+again takes it out. A tag of the same name from several sorts (a book file's
+"Fiction" and the community's "Fiction") is one tag, found whichever sort
+carries it. Coloured dots say what each tag or term is, one dot per sort; the
+key under **Refine** explains them, and hovering shows the names:
 
-| Chip | Colour |
+| Dot | Colour |
 |---|---|
 | Title | olive |
 | Author | blue |
 | Series | indigo |
-| Genre (book file tags) | brown |
+| Book file tags | brown |
 | Community | coral |
 | Family | green |
 | Mine | plum |
 
-You can type more than words (**How to type a search**, under the tags,
+You can type more than words (**How to type a search**, under **Refine**,
 says the same):
 
 - `cafe in science fiction`: "cafe" in the title (or wherever is switched on),
@@ -49,13 +58,18 @@ says the same):
 
 The sign at the front of a chip says how it counts. Click it to cycle through
 **+** (must match), **−** (must not) and **∨ or** (one of the "or" chips will
-do), and click **×** to take the chip away. All + chips must match, except
-that two of the same kind (two authors, two Family tags) mean "either".
+do), and click **×** to take the chip away. All + chips must match: two
+tags mean a book needs both. Two typed words of the same kind (two authors)
+mean "either".
 
 At the top of the page, beside **Books** and **Graphic novels**, are the tabs
 for that part: All, Fiction, Non-fiction, Tabletop and Unsorted for Books, and
 All, Series and One-shots for Graphic novels. They change the books straight
 away, without pressing Search, and the search covers the tab you are on.
+
+Under **Sort**, just below the search box, **Last added**, **Title A–Z** and **Author A–Z** set the
+order (authors by surname; "The" and "A" are skipped in titles). A series card
+counts as its newest volume. The choice is remembered on that device.
 
 ## Tags and a rating for a whole series
 
@@ -112,9 +126,10 @@ How it works:
 
 ### Looking up by hand
 
-- **One book:** open it and press **Look up tags** under Community tags.
-- **Everything waiting:** Admin → Tidy tags → **Look up waiting books now**.
-- **After fixing book details:** Admin → Tidy tags → **Ask again about
+- **One book:** open it and press **Look up tags** under Community tags
+  (**Look up again** once it has some).
+- **Everything waiting:** Admin → Books → Tidy tags → **Look up waiting books now**.
+- **After fixing book details:** Admin → Books → Tidy tags → **Ask again about
   unrecognised books**.
 
 A book the catalogues did not know is asked about again after 30 days.
@@ -125,7 +140,7 @@ A book the catalogues did not know is asked about again after 30 days.
 
 - Set **Look up tags for new books** to Off to stop all lookups. Tags
   already found stay.
-- To add Comic Vine, see **Comics and Comic Vine** above.
+- To add Comic Vine, see **Comics and Comic Vine** below.
 - To add Google Books: in the Google Cloud console create a project, enable
   the **Books API**, create an **API key**, and paste it here. Press **Test
   connection**.

@@ -54,12 +54,14 @@ def _tag_kind(tags):
     fiction = nonfiction = False
     for tag in tags:
         low = tag.strip().lower()
-        parts = {low} | {p.strip() for p in re.split(r"[/&,;:>-]", low)}
+        # "Fiction / Fantasy & Magic" -> the whole thing plus each bit on its own
+        pieces = {low} | {piece.strip() for piece in re.split(r"[/&,;:>-]", low)}
+        # order matters here: "nonfiction" has "fiction" hiding inside it
         if "nonfiction" in low or "non-fiction" in low:
             nonfiction = True
-        elif "fiction" in low or parts & FICTION_WORDS:
+        elif "fiction" in low or pieces & FICTION_WORDS:
             fiction = True
-        elif parts & NONFICTION_WORDS:
+        elif pieces & NONFICTION_WORDS:
             nonfiction = True
     if fiction:
         return FICTION
@@ -69,7 +71,7 @@ def _tag_kind(tags):
 def guess(title, author="", series="", tags=(), formats=(), origin=""):
     """Return (kind, [tags to add]) for a book."""
     text = " ".join([title or "", author or "", series or "", " ".join(tags), origin or ""])
-    formats = {f.upper() for f in formats}
+    formats = {fmt.upper() for fmt in formats}
     if TABLETOP_RE.search(text):
         kind = TABLETOP
     elif (formats and formats <= COMIC_FORMATS) or GRAPHIC_RE.search(text):

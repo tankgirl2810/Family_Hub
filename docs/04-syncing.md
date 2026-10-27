@@ -21,9 +21,10 @@ a custom server.
 
 **Once per profile, in Family Hub**
 
-1. Sign in, open **Profiles → Settings → Reading app sync**.
-2. Set a **sync password**. This is separate from the passcode, because it
-   is stored on each device.
+1. Sign in, press your name at the top right, and find **Reading app sync**
+   under **Settings for** your name.
+2. Type a **Sync password** and press **Save sync password**. This is
+   separate from the passcode, because it is stored on each device.
 
 **On each device**
 
@@ -43,7 +44,7 @@ a custom server.
 1. Open a book, then **Tools → Progress sync → Custom sync server**:
    `http://<server>:8090/kosync`
 2. **Register / Login** → **Login** with the profile name and sync password.
-   (Registering from the device is switched off; profiles are made in Book
+   (Registering from the device is switched off; profiles are made in Family
    Hub.)
 3. Set **Document matching method** to **Binary**. Family Hub matches books by
    the file's fingerprint, so the file on the device must be the one from
@@ -109,9 +110,9 @@ leaves is "started" and "finished", and only to Goodreads.
 1. **Kindle → Goodreads.** In the Kindle app or on the e-reader, link the
    person's Goodreads account and switch on automatic updates. Starting a
    book shelves it as Currently Reading; finishing shelves it as Read.
-2. **Goodreads → Family Hub.** In Family Hub: **Profiles → Settings →
-   Goodreads**, paste the address of the Goodreads profile and save. Book
-   Hub reads the shelves straight away and then every six hours. The
+2. **Goodreads → Family Hub.** In Family Hub, under **Settings for** your
+   name, find **Goodreads**, paste the address of the Goodreads profile and
+   press **Save link**. Family Hub reads the shelves straight away and then every six hours. The
    Goodreads profile has to be public; for a private one, import an export
    file instead. [Guide 11](11-goodreads.md) has the details.
 
@@ -119,7 +120,8 @@ leaves is "started" and "finished", and only to Goodreads.
 Hardcover's Goodreads import or a community sync tool from its
 [showcase](https://docs.hardcover.app/showcase) (third-party, not tested for
 this guide), then in Hardcover's account settings copy the **Hardcover API**
-key and paste it under **Profiles → Settings → Kindle and other reading**.
+key and paste it under **Settings for** your name → **Kindle and other
+reading (experimental)**.
 It is only worth it if you already use Hardcover.
 
 Each profile links its own accounts, so a different Kindle account per

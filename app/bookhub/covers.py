@@ -20,7 +20,7 @@ GENERATED = (600, 900)
 MAX_OPTIONS = 12
 TIMEOUT = 20
 AGENT = {"User-Agent": "BookHub/1.0 (self-hosted family library; covers)"}
-COVER_HOST = "covers.openlibrary.org"  # the only place pictures are ever fetched from
+COVER_HOST = "covers.openlibrary.org"  # where pictures are fetched from (and AniList's cover store, anilist.cover_allowed)
 COLORS = ["#7A4B2A", "#2F5D62", "#5B3A6B", "#8A3B3B", "#3B5B8A", "#4F6B3A", "#6B5A2F", "#3A4A5B"]
 
 
@@ -44,24 +44,26 @@ def _jpeg(data):
         raise CoverError("That picture is too small to use as a cover.")
     picture = picture.convert("RGB")
     picture.thumbnail(MAX_SIZE)
-    out = io.BytesIO()
-    picture.save(out, "JPEG", quality=88)
-    return out.getvalue()
+    jpeg = io.BytesIO()
+    picture.save(jpeg, "JPEG", quality=88)
+    return jpeg.getvalue()
 
 
 def _allowed(url):
-    return isinstance(url, str) and url.startswith("https://%s/b/" % COVER_HOST) and ".." not in url
+    from . import anilist
+    # only ever two picture shops. the ".." check stops anyone sneaking off to another path on the same host
+    return (isinstance(url, str) and url.startswith("https://%s/b/" % COVER_HOST) and ".." not in url) or anilist.cover_allowed(url)
 
 
 def fetch(url):
-    """Download one picture from Open Library's cover store. Nothing else is ever fetched."""
+    """Download one picture from Open Library's cover store, or AniList's. Nothing else is ever fetched."""
     if not _allowed(url):
-        raise CoverError("Covers can only be taken from Open Library.")
+        raise CoverError("Covers can only be taken from Open Library or AniList.")
     try:
-        r = requests.get(url, headers=AGENT, timeout=TIMEOUT, stream=True)
-        if r.status_code != 200:
+        reply = requests.get(url, headers=AGENT, timeout=TIMEOUT, stream=True)
+        if reply.status_code != 200:
             raise CoverError("Open Library does not have that cover any more.")
-        data = r.raw.read(MAX_BYTES + 1, decode_content=True)
+        data = reply.raw.read(MAX_BYTES + 1, decode_content=True)  # one byte over the limit is enough to know it's too big
     except requests.RequestException as exc:
         raise CoverError("Open Library could not be reached: %s" % str(exc)[:150])
     if len(data) > MAX_BYTES:
@@ -80,20 +82,17 @@ def title_cover(title, author):
     size = 64 if len(title) < 30 else (50 if len(title) < 70 else 38)
     font, small = ImageFont.load_default(size=size), ImageFont.load_default(size=30)
     lines = textwrap.wrap(title, width=max(8, int(width * 1.55 / size)))[:9]
-    y = 110
-    for line in lines:
-        draw.text((60, y), line, font=font, fill="#F6F3EC")
-        y += int(size * 1.25)
+    for row, line in enumerate(lines):
+        draw.text((60, 110 + row * int(size * 1.25)), line, font=font, fill="#F6F3EC")
     if (author or "").strip().lower() in catalogues.NO_AUTHOR:
         author = ""  # "Unknown" on a cover helps nobody
     names = textwrap.wrap((author or "").strip(), width=28)[:3]
-    y = height - 80 - 40 * len(names)
-    for line in names:
-        draw.text((60, y), line, font=small, fill="#F6F3EC")
-        y += 40
-    out = io.BytesIO()
-    picture.save(out, "JPEG", quality=90)
-    return out.getvalue()
+    top = height - 80 - 40 * len(names)  # the author sits at the bottom, growing upwards
+    for row, line in enumerate(names):
+        draw.text((60, top + row * 40), line, font=small, fill="#F6F3EC")
+    jpeg = io.BytesIO()
+    picture.save(jpeg, "JPEG", quality=90)
+    return jpeg.getvalue()
 
 
 def options(book):
@@ -116,13 +115,13 @@ def options(book):
                 if catalogues.author_known(author):
                     params["author"] = author.split("&")[0].strip()
                 hits = catalogues._get(url, params).get("docs") or []
-                docs = [d for d in hits if catalogues.same_book(title, author, d.get("title"), d.get("author_name"))]
+                docs = [doc for doc in hits if catalogues.same_book(title, author, doc.get("title"), doc.get("author_name"))]
                 if docs:
                     break
         for doc in docs:
             work = work or doc.get("key")
             add(doc.get("cover_i"), "Open Library" + (", %s" % doc["first_publish_year"] if doc.get("first_publish_year") else ""))
-        if work:  # other editions of the same work often have a better picture
+        if work:  # pro tip: other editions of the same book often have way nicer covers
             editions = catalogues._get("https://openlibrary.org%s/editions.json" % work, {"limit": 40}).get("entries") or []
             for edition in editions:
                 for cover_id in edition.get("covers") or []:
@@ -140,7 +139,7 @@ class Covers:
 
     def index(self):
         """{book key: when its cover was chosen} for every book with a cover of its own."""
-        return {r["book_key"]: r["at"] for r in self.hub.con().execute("SELECT book_key, at FROM covers")}
+        return {row["book_key"]: row["at"] for row in self.hub.con().execute("SELECT book_key, at FROM covers")}
 
     def row(self, book_key):
         return self.hub.con().execute("SELECT * FROM covers WHERE book_key=?", (book_key,)).fetchone()
@@ -158,9 +157,10 @@ class Covers:
         self.folder.mkdir(parents=True, exist_ok=True)
         name = _file(book_key, jpeg)
         old = self.row(book_key)
-        tmp = self.folder / (name + ".part")
-        tmp.write_bytes(jpeg)
-        tmp.replace(self.folder / name)
+        # write to a side file then swap it in, so nobody ever downloads half a picture
+        partial = self.folder / (name + ".part")
+        partial.write_bytes(jpeg)
+        partial.replace(self.folder / name)
         if old and old["file"] != name:
             self._discard(old["file"])
         con = self.hub.con()

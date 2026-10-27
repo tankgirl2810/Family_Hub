@@ -50,7 +50,7 @@ def label(source):
 # --------------------------------------------------------------- matching
 
 def _words(text):
-    return [w for w in db.slug((text or "").replace("&", " and ")).split("-") if w and w != "and"]
+    return [word for word in db.slug((text or "").replace("&", " and ")).split("-") if word and word != "and"]
 
 
 def query_title(title):
@@ -65,6 +65,7 @@ def author_known(author):
     words = _words(author)
     if not words or (author or "").strip().lower() in NO_AUTHOR:
         return False
+    # one short word ("elenak", "admin") smells like a username. known casualty: Homer. sorry Homer
     return len(words) > 1 or len(words[0]) > 5
 
 
@@ -83,12 +84,13 @@ def same_book(title, author, their_title, their_authors):
     ours, theirs = _words(query_title(title)), _words(their_title)
     if not ours or not theirs:
         return False
-    their_names = {w for name in their_authors or [] for w in _words(name)}
+    their_names = {word for name in their_authors or [] for word in _words(name)}
     title_ok = same_title(title, their_title)
     if author_known(author):
-        mine = {w for w in _words(author) if len(w) > 2}
+        mine = {word for word in _words(author) if len(word) > 2}
         return title_ok and bool(mine & their_names)
-    # No usable author. Accept "Title, Author Name" titles, or an exact match on a long title.
+    # no usable author, so we get picky: either the author's name is tacked on the end of our title
+    # ("Title, Author Name"), or it's a long title (4+ words) matching exactly. short titles are too risky
     if len(theirs) >= 2 and ours[:len(theirs)] == theirs and ours[len(theirs):] and set(ours[len(theirs):]) <= their_names:
         return True
     return title_ok and len(theirs) >= 4
@@ -112,18 +114,19 @@ _last_asked = {}
 
 def _get(url, params, headers=None):
     host = url.split("/")[2]
+    # be a polite guest: keep a per-site gap between questions so nobody rate-limits us into the ground
     wait = _last_asked.get(host, 0) + GAP.get(host, 0) - time.monotonic()
     if wait > 0:
         time.sleep(wait)
     try:
-        r = requests.get(url, params=params, headers=dict(AGENT, **(headers or {})), timeout=TIMEOUT)
+        reply = requests.get(url, params=params, headers=dict(AGENT, **(headers or {})), timeout=TIMEOUT)
         _last_asked[host] = time.monotonic()
-        if r.status_code in (420, 429):
+        if reply.status_code in (420, 429):
             raise SlowDown("it asked for fewer questions; trying again later")
-        r.raise_for_status()
-        return r.json()
+        reply.raise_for_status()
+        return reply.json()
     except (requests.RequestException, ValueError) as exc:
-        # requests puts the whole address in its messages, and Google and Comic Vine take their key in it.
+        # requests helpfully puts the WHOLE url in its errors, API key and all. scrub it before it hits a log
         text = str(exc)
         for name in ("key", "api_key"):
             secret = str((params or {}).get(name) or "")
@@ -162,12 +165,13 @@ WIKIDATA = "https://www.wikidata.org/w/api.php"
 
 
 def _claim_ids(entity, prop):
-    out = []
+    ids = []
+    # wikidata's JSON is nested like a russian doll: claims -> mainsnak -> datavalue -> value -> id
     for claim in (entity.get("claims") or {}).get(prop, []):
         value = ((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value")
         if isinstance(value, dict) and value.get("id"):
-            out.append(value["id"])
-    return out
+            ids.append(value["id"])
+    return ids
 
 
 def wikidata(config, book):
@@ -177,10 +181,10 @@ def wikidata(config, book):
         return None  # too many films and songs share a title to go by title alone
     found = _get(WIKIDATA, {"action": "wbsearchentities", "search": title, "language": "en", "type": "item",
                             "limit": 5, "format": "json"}).get("search") or []
-    hits = [h for h in found if same_title(title, h.get("label"))]
+    hits = [hit for hit in found if same_title(title, hit.get("label"))]
     if not hits:
         return None
-    entities = _get(WIKIDATA, {"action": "wbgetentities", "ids": "|".join(h["id"] for h in hits),
+    entities = _get(WIKIDATA, {"action": "wbgetentities", "ids": "|".join(hit["id"] for hit in hits),
                                "props": "claims", "format": "json"}).get("entities") or {}
     wanted = set()
     for entity in entities.values():
@@ -190,16 +194,16 @@ def wikidata(config, book):
         return None
     names = {}
     ids = sorted(wanted)
-    for start in range(0, len(ids), 50):
+    for start in range(0, len(ids), 50):  # wikidata takes 50 ids per question, max
         got = _get(WIKIDATA, {"action": "wbgetentities", "ids": "|".join(ids[start:start + 50]), "props": "labels",
                               "languages": "en", "format": "json"}).get("entities") or {}
         for qid, entity in got.items():
             names[qid] = ((entity.get("labels") or {}).get("en") or {}).get("value") or ""
     for hit in hits:
         entity = entities.get(hit["id"]) or {}
-        authors = [names.get(q, "") for q in _claim_ids(entity, "P50")]
+        authors = [names.get(qid, "") for qid in _claim_ids(entity, "P50")]
         if authors and same_book(title, author, hit.get("label"), authors):
-            return [names.get(q, "") for q in _claim_ids(entity, "P136") + _claim_ids(entity, "P921")]
+            return [names.get(qid, "") for qid in _claim_ids(entity, "P136") + _claim_ids(entity, "P921")]
     return None
 
 
@@ -215,20 +219,20 @@ def google_books(config, book):
 def google_books_info(config, book, full=True):
     """Google's record of a book (its volumeInfo), or None when it has no such book."""
     key = config.google_books_key
+    title, author = attempts(book)[-1]
     if book["isbn"]:
-        q = "isbn:" + book["isbn"]
+        query = "isbn:" + book["isbn"]
     else:
-        title, author = attempts(book)[-1]
-        q = 'intitle:"%s"' % title
+        query = 'intitle:"%s"' % title
         if author_known(author):
-            q += ' inauthor:"%s"' % re.split(r"\s*&\s*", author)[0]
-    items = _get(GOOGLE, {"q": q, "maxResults": 5, "key": key}).get("items") or []
+            query += ' inauthor:"%s"' % re.split(r"\s*&\s*", author)[0]
+    items = _get(GOOGLE, {"q": query, "maxResults": 5, "key": key}).get("items") or []
     for item in items:
         info = item.get("volumeInfo") or {}
         if book["isbn"] or same_book(title, author, info.get("title"), info.get("authors")):
             if not full:
                 return info
-            # The search result only has the top category; the volume itself has the full list.
+            # the search result is stingy (top category only), the volume page has the whole list. one more trip
             return dict(info, **(_get(GOOGLE + "/" + item["id"], {"key": key}).get("volumeInfo") or {}))
     return None
 
@@ -278,25 +282,25 @@ def comic_vine(config, book):
     found = _comic_vine_get("/search/", key, {
         "resources": "volume", "query": name, "limit": 20,
         "field_list": "id,name,publisher,start_year,count_of_issues"})
-    same = [v for v in found if _words(v.get("name")) == _words(name)]
-    if hint:
+    same = [volume for volume in found if _words(volume.get("name")) == _words(name)]
+    if hint:  # "(Malibu)" or "(1993)" in the file name picks between runs with the same name
         wanted = set(_words(hint))
-        same = [v for v in same if str(v.get("start_year") or "") == hint
-                or wanted <= set(_words((v.get("publisher") or {}).get("name")))]
+        same = [volume for volume in same if str(volume.get("start_year") or "") == hint
+                or wanted <= set(_words((volume.get("publisher") or {}).get("name")))]
     if not same:
         _volumes[cached] = None
         return None
-    volume = max(same, key=lambda v: int(v.get("count_of_issues") or 0))
+    volume = max(same, key=lambda volume: int(volume.get("count_of_issues") or 0))  # the longest run is usually The One
     detail = _comic_vine_get("/volume/4050-%s/" % volume["id"], key, {"field_list": "publisher,characters,concepts"})
-    if isinstance(detail, list):  # an empty answer comes back as a list
+    if isinstance(detail, list):  # comic vine sends an empty answer as [] instead of {}. because of course it does
         detail = {}
 
     def top(items):
-        ranked = sorted(items or [], key=lambda i: -int(i.get("count") or 0))
-        return [i.get("name") or "" for i in ranked[:COMIC_TAGS]]
+        ranked = sorted(items or [], key=lambda item: -int(item.get("count") or 0))
+        return [item.get("name") or "" for item in ranked[:COMIC_TAGS]]
 
     publisher = (detail.get("publisher") or volume.get("publisher") or {}).get("name") or ""
-    _volumes[cached] = [t for t in [publisher] + top(detail.get("concepts")) + top(detail.get("characters")) if t]
+    _volumes[cached] = [tag for tag in [publisher] + top(detail.get("concepts")) + top(detail.get("characters")) if tag]
     return _volumes[cached]
 
 
@@ -341,22 +345,22 @@ class Catalogues:
         return row["status"] == "none" and age > timedelta(days=RETRY_NONE_DAYS)
 
     def _awake(self):
-        return [s for s in active(self.hub.config) if self._resting.get(s, 0) < time.monotonic()]
+        return [source for source in active(self.hub.config) if self._resting.get(source, 0) < time.monotonic()]
 
     def pending(self):
         """Library books that still have a catalogue to ask."""
         sources = self._awake()
         if not sources:
             return []
-        rows = {(r["book_key"], r["source"]): r for r in self.hub.con().execute("SELECT * FROM tag_lookups")}
+        rows = {(row["book_key"], row["source"]): row for row in self.hub.con().execute("SELECT * FROM tag_lookups")}
         kind_of = self.hub.kind_index()
-        return [b for b in self.hub.library.books()
-                if any(suits(s, b, kind_of.get(b["key"])) and self._due(b["key"], s, rows) for s in sources)]
+        return [book for book in self.hub.library.books()
+                if any(suits(source, book, kind_of.get(book["key"])) and self._due(book["key"], source, rows) for source in sources)]
 
     def look_up(self, book, force=False):
         """Ask each catalogue about one book. Returns {source: number of tags added}."""
         hub, con = self.hub, self.hub.con()
-        rows = {(r["book_key"], r["source"]): r for r in con.execute("SELECT * FROM tag_lookups WHERE book_key=?", (book["key"],))}
+        rows = {(row["book_key"], row["source"]): row for row in con.execute("SELECT * FROM tag_lookups WHERE book_key=?", (book["key"],))}
         skip = [book["title"], book["author"], book.get("publisher", "")] + list(book["authors"])
         result = {}
         kind = hub.kind_index().get(book["key"])
@@ -374,7 +378,7 @@ class Catalogues:
             else:
                 found = tags.tidy(raw or [], skip=skip, limit=PER_SOURCE, plain=True)
                 status, note = ("found" if found else "none"), ""
-            if status != "error":  # a fresh answer replaces what this catalogue said before
+            if status != "error":  # fresh answer wipes the old one. an error keeps what we had (better than nothing)
                 con.execute("DELETE FROM community_tags WHERE book_key=? AND source=?", (book["key"], source))
             hub.ensure_meta(book["key"])
             for tag in found:
@@ -397,7 +401,7 @@ class Catalogues:
         row = con.execute("SELECT kind, source FROM book_kind WHERE book_key=?", (book["key"],)).fetchone()
         if row and (row["source"] != "auto" or row["kind"] != kinds.UNSORTED):
             return
-        found = [r["tag"] for r in con.execute("SELECT tag FROM community_tags WHERE book_key=?", (book["key"],))]
+        found = [row["tag"] for row in con.execute("SELECT tag FROM community_tags WHERE book_key=?", (book["key"],))]
         kind, _ = kinds.guess(book["title"], book["author"], book["series"], book["tags"] + found, book["formats"])
         if kind != kinds.UNSORTED:
             self.hub.set_kind(book["key"], kind, source="auto")
@@ -438,16 +442,16 @@ class Catalogues:
         keys = set(self.hub.library.keys())
         sources = active(self.hub.config)
         asked, matched, errors = set(), set(), 0
-        for r in con.execute("SELECT book_key, source, status FROM tag_lookups"):
-            if r["book_key"] not in keys:
+        for row in con.execute("SELECT book_key, source, status FROM tag_lookups"):
+            if row["book_key"] not in keys:
                 continue
-            asked.add(r["book_key"])
-            if r["status"] == "found":
-                matched.add(r["book_key"])
-            errors += r["status"] == "error"
+            asked.add(row["book_key"])
+            if row["status"] == "found":
+                matched.add(row["book_key"])
+            errors += row["status"] == "error"  # True counts as 1. sneaky but handy
         return {
             "on": self.hub.config.tag_lookups == "on", "running": self.running,
-            "sources": [label(s) for s in sources], "books": len(keys),
+            "sources": [label(source) for source in sources], "books": len(keys),
             "asked": len(asked), "matched": len(matched), "errors": errors, "waiting": len(self.pending()),
         }
 
@@ -485,14 +489,14 @@ def hardcover_info(config, book):
         time.sleep(wait)
     _last_asked["hardcover"] = time.monotonic()
     try:
-        r = requests.post(HARDCOVER, json={"query": query, "variables": {"q": wanted}},
-                          headers=dict(AGENT, authorization=token), timeout=TIMEOUT)
-        if r.status_code == 429:
+        reply = requests.post(HARDCOVER, json={"query": query, "variables": {"q": wanted}},
+                              headers=dict(AGENT, authorization=token), timeout=TIMEOUT)
+        if reply.status_code == 429:
             raise SlowDown("Hardcover asked us to slow down")
-        if r.status_code in (401, 403):
+        if reply.status_code in (401, 403):
             raise LookupError_("it refused the API key")
-        r.raise_for_status()
-        payload = r.json()
+        reply.raise_for_status()
+        payload = reply.json()
     except (requests.RequestException, ValueError) as exc:
         raise LookupError_(str(exc))
     results = ((payload.get("data") or {}).get("search") or {}).get("results") or {}

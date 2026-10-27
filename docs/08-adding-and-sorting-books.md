@@ -119,7 +119,7 @@ An exception: when the title looks like a file name (`scan_01`,
 `1592005934.pdf`) or the author like a user name (`admin`), the name proves
 nothing. Those entries are only joined when they hold exactly the same file.
 
-**Admin → Books → See the copies** lists every set:
+**Admin → Books → Copies of the same book → See the copies** lists every set:
 
 | Button | What it does |
 |---|---|
@@ -185,7 +185,7 @@ the library manager's own import folder are not checked.
 
 ### Deleting a book
 
-Admins see **Delete this book** on a book's page. It removes the book and
+Admins find **Delete this book** under **More** on a book's page. It removes the book and
 every copy of it from the library, files included, after a confirmation
 that names the title, its formats and how many copies go with it.
 
@@ -201,7 +201,7 @@ that names the title, its formats and how many copies go with it.
 ## Changing a cover
 
 Some books arrive with no cover, or with the first page of a PDF as one. On
-the book's page, under the cover, press **Change cover**. Admins can do this,
+the book's page, under the cover, press **More**, then **Change cover**. Admins can do this,
 and so can anyone allowed to edit family tags.
 
 | Choice | What it does |
@@ -232,6 +232,8 @@ Search and tags narrow it down.
 | On the card | Meaning |
 |---|---|
 | Faded cover with **Already read** across it | You have finished this book. Other people see it as usual |
+| **Reading** and a percentage across the cover | You are part-way through it |
+| **ELSEWHERE** on the cover, **Read outside the library** | A book you added under **Dashboard → Add a book read elsewhere**, or that came from Hardcover; the library has no copy |
 | **Already in my library** | It is on your My books list ([guide 9](09-devices-and-my-books.md)) |
 | **On Kindle only** | Someone in the family has it on Goodreads; the library has no copy ([guide 11](11-goodreads.md)) |
 | **My rating** | The stars you gave it |
@@ -244,10 +246,13 @@ Search and tags narrow it down.
 - **Open Library**, for the rest of the library, with the number of
   ratings. Four books a minute are looked up, so a large library takes an
   hour or two the first time. Only the title, author and ISBN are sent.
+- **Google Books** and **Hardcover** too, when their keys are saved under
+  **Admin → Hub → Connections → Community tags from book catalogues**. Of
+  these, the figure the most people stand behind is kept.
 
-A Goodreads figure is used when both exist. Books neither knows show no
-readers' rating. Open Library has far fewer ratings than Goodreads, so treat
-an average from a handful of ratings with care.
+A Goodreads figure is used when one exists. An average from fewer than ten
+ratings is not shown, since it says too little. Books nobody knows show no
+readers' rating.
 
 This is switched off together with tag lookups: **Admin → Hub → Connections → Community tags from book catalogues**.
 
@@ -290,9 +295,11 @@ can still be downloaded on its own.
 ## Kinds of book
 
 Every book has one kind: **Fiction**, **Non-fiction**, **Graphic novel**,
-**Tabletop** or **Unsorted**. The Library page has a **Show** row to switch
-kinds on and off; the choice is remembered on that device for that profile.
-Everything is shown to begin with.
+**Tabletop** or **Unsorted**. At the top of the Library, under **Books**,
+the tabs **All**, **Fiction**, **Non-fiction**, **Tabletop** and
+**Unsorted** show one kind at a time; graphic novels have their own half,
+**Graphic novels** ([guide 13](13-manga-and-series-by-chapter.md)). The
+tab you chose is remembered on that device for that profile.
 
 Family Hub guesses the kind once, when a book first appears:
 

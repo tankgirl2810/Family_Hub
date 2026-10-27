@@ -22,7 +22,6 @@ import requests
 from . import db, readers
 
 FEED = "https://www.goodreads.com/review/list_rss/%s"
-BOOK_PAGE = "https://www.goodreads.com/book/show/%s"
 AGENT = {"User-Agent": "BookHub/1.0 (self-hosted family library; shelf sync)"}
 TIMEOUT = 30
 PER_PAGE = 100
@@ -53,8 +52,9 @@ def _day(text):
     text = (text or "").strip()
     if not text:
         return None
-    for parse in (lambda t: parsedate_to_datetime(t), lambda t: datetime.strptime(t, "%Y/%m/%d"),
-                  lambda t: datetime.strptime(t, "%Y-%m-%d")):
+    # Goodreads can't pick one date format, so try all three it uses
+    for parse in (parsedate_to_datetime, lambda value: datetime.strptime(value, "%Y/%m/%d"),
+                  lambda value: datetime.strptime(value, "%Y-%m-%d")):
         try:
             return parse(text).strftime("%Y-%m-%d")
         except (TypeError, ValueError):
@@ -103,24 +103,24 @@ def fetch(uid, shelf, pages=MAX_PAGES):
     items = []
     for page in range(1, pages + 1):
         try:
-            r = requests.get(FEED % uid, params={"shelf": shelf, "per_page": PER_PAGE, "page": page},
-                             headers=AGENT, timeout=TIMEOUT)
+            reply = requests.get(FEED % uid, params={"shelf": shelf, "per_page": PER_PAGE, "page": page},
+                                 headers=AGENT, timeout=TIMEOUT)
         except requests.RequestException as exc:
             raise GoodreadsError("Goodreads could not be reached: %s" % str(exc)[:150])
-        if r.status_code == 404:
+        if reply.status_code == 404:
             raise GoodreadsError("Goodreads does not know that profile number. Check the link.")
-        if r.status_code != 200:
-            raise GoodreadsError("Goodreads answered with an error (%d). Try again later." % r.status_code)
-        got = parse_feed(r.content, shelf)
+        if reply.status_code != 200:
+            raise GoodreadsError("Goodreads answered with an error (%d). Try again later." % reply.status_code)
+        got = parse_feed(reply.content, shelf)
         items += got
         if len(got) < PER_PAGE:
-            break
+            break  # a short page means that was the last one
     return items
 
 
 def parse_csv(text):
     """Goodreads' own export file (My Books, Import and export, Export library)."""
-    rows = csv.DictReader(io.StringIO(text.lstrip("﻿")))
+    rows = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))  # Excel's invisible byte-order mark, begone
     if not rows.fieldnames or "Title" not in rows.fieldnames or "Exclusive Shelf" not in rows.fieldnames:
         raise GoodreadsError("That is not a Goodreads export file. It should have columns such as Title and Exclusive Shelf.")
     items = []
@@ -129,7 +129,7 @@ def parse_csv(text):
         title = (row.get("Title") or "").strip()
         if shelf not in SHELVES or not title:
             continue
-        isbn = db.clean_isbn(row.get("ISBN13")) or db.clean_isbn(row.get("ISBN"))  # written as ="0441172717"
+        isbn = db.clean_isbn(row.get("ISBN13")) or db.clean_isbn(row.get("ISBN"))  # Goodreads writes them as ="0441172717", lovely
         items.append({
             "gr_id": (row.get("Book Id") or "").strip(), "title": plain_title(title),
             "author": (row.get("Author") or "").strip(), "isbn": isbn, "rating": _number(row.get("My Rating")) or 0,
@@ -175,17 +175,17 @@ def reconcile(hub):
     moved = 0
     rows = con.execute("SELECT DISTINCT g.book_key, m.title, m.author, m.isbn FROM goodreads_books g "
                        "JOIN book_meta m ON m.book_key=g.book_key").fetchall()
-    for r in rows:
-        if r["book_key"] in keys:
+    for row in rows:
+        if row["book_key"] in keys:
             continue
-        new = key_for(hub, r["title"], r["author"], r["isbn"] or "", index)
-        if new == r["book_key"] or new not in keys:
+        new = key_for(hub, row["title"], row["author"], row["isbn"] or "", index)
+        if new == row["book_key"] or new not in keys:
             continue
         hub.ensure_meta(new)
         for table in ("goodreads_books", "reading", "ratings", "personal_tags"):
-            # Whatever is already recorded against the library's entry wins.
-            con.execute("UPDATE OR IGNORE %s SET book_key=? WHERE book_key=?" % table, (new, r["book_key"]))
-            con.execute("DELETE FROM %s WHERE book_key=?" % table, (r["book_key"],))
+            # OR IGNORE: if the library's entry already has a row, that one wins and ours gets swept by the DELETE
+            con.execute("UPDATE OR IGNORE %s SET book_key=? WHERE book_key=?" % table, (new, row["book_key"]))
+            con.execute("DELETE FROM %s WHERE book_key=?" % table, (row["book_key"],))
         moved += 1
     con.commit()
     if moved:
@@ -204,10 +204,11 @@ def apply(hub, profile_id, items):
                           (key, profile_id)).fetchone()
         known = con.execute("SELECT status FROM goodreads_books WHERE profile_id=? AND book_key=?",
                             (profile_id, key)).fetchone()
-        # Progress from a device or typed in by hand is never overwritten, except to mark a book finished.
+        # the e-reader / a human typed it? that wins. Goodreads only gets to overrule it to say "finished"
         ours = old is None or old["source"] == SOURCE
         finishing = item["status"] == "finished" and old is not None and old["status"] != "finished"
         if ours or finishing:
+            # "same" = nothing new to say. a missing finish date on Goodreads doesn't wipe the one we have
             same = old is not None and old["status"] == item["status"] and (old["finished"] or None) == (
                 item["finished"] or old["finished"] or None)
             if not same:
@@ -314,7 +315,7 @@ def forget_profile(hub, profile_id):
 
 def book_ids(hub, profile_id):
     """{book key: Goodreads book number} for one profile, for "View on Goodreads"."""
-    return {r["book_key"]: r["gr_id"] for r in hub.con().execute(
+    return {row["book_key"]: row["gr_id"] for row in hub.con().execute(
         "SELECT book_key, gr_id FROM goodreads_books WHERE profile_id=? AND gr_id!=''", (profile_id,))}
 
 
@@ -323,13 +324,13 @@ def elsewhere(hub):
     {book key: {"title", "author", "pages", "gr_id", "profiles": [ids]}}. Who they
     belong to is for the Admin page only."""
     keys = hub.library.keys()
-    out = {}
-    for r in hub.con().execute(
+    missing = {}
+    for row in hub.con().execute(
             "SELECT g.book_key, g.profile_id, g.gr_id, m.title, m.author, m.pages FROM goodreads_books g "
             "LEFT JOIN book_meta m ON m.book_key=g.book_key ORDER BY g.profile_id"):
-        if r["book_key"] in keys:
+        if row["book_key"] in keys:
             continue
-        entry = out.setdefault(r["book_key"], {"title": r["title"] or r["book_key"], "author": r["author"] or "",
-                                               "pages": r["pages"], "gr_id": r["gr_id"], "profiles": []})
-        entry["profiles"].append(r["profile_id"])
-    return out
+        entry = missing.setdefault(row["book_key"], {"title": row["title"] or row["book_key"], "author": row["author"] or "",
+                                                     "pages": row["pages"], "gr_id": row["gr_id"], "profiles": []})
+        entry["profiles"].append(row["profile_id"])
+    return missing

@@ -89,21 +89,23 @@ def _split(tag):
     """Break "Fiction.Horror", "FICTION / Literary" and "Fiction, psychological" into their parts."""
     tag = re.sub(r"\([^)]*\)", " ", tag)
     parts = re.split(r"\s*[;|]\s*|\s+/\s+|\s+--?\s+|\s+>\s+|(?<=[A-Za-z])\.(?=[A-Za-z])", tag)
-    out = []
+    one_word = lambda pieces: all(len(piece.split()) == 1 for piece in pieces)  # noqa: E731
+    found = []
     for part in parts:
-        # "Fiction, psychological" is two tags; "Solo, Han" is one name the other way round.
-        pieces = [x.strip() for x in part.split(",") if x.strip()]
+        # the comma problem: "Fiction, psychological" is two tags, but "Solo, Han" is one guy written backwards.
+        # no perfect rule exists, these guesses are just right most of the time
+        pieces = [piece.strip() for piece in part.split(",") if piece.strip()]
         if len(pieces) < 2:
-            out += pieces
-        elif len(pieces) == 3 and pieces[-1].lower() in BROAD and all(len(x.split()) == 1 for x in pieces[:2])                 and pieces[0].lower() not in BROAD:
-            out += [(pieces[1] + " " + pieces[0]).title(), pieces[2]]  # "Solo, Han, fiction"
+            found += pieces
+        elif len(pieces) == 3 and pieces[-1].lower() in BROAD and one_word(pieces[:2]) and pieces[0].lower() not in BROAD:
+            found += [(pieces[1] + " " + pieces[0]).title(), pieces[2]]  # "Solo, Han, fiction"
         elif pieces[0].lower() in BROAD or pieces[-1].lower() in BROAD:
-            out += pieces
-        elif len(pieces) == 2 and all(len(x.split()) == 1 for x in pieces):
-            out.append((pieces[1] + " " + pieces[0]).title())
+            found += pieces
+        elif len(pieces) == 2 and one_word(pieces):
+            found.append((pieces[1] + " " + pieces[0]).title())
         else:
-            out.append(" ".join(pieces))
-    return out
+            found.append(" ".join(pieces))
+    return found
 
 
 def _keep(tag, skip):
@@ -132,8 +134,8 @@ def tidy(raw, skip=(), limit=None, plain=False):
     leaves out tags with accented letters, which in catalogues are nearly
     always the same subject again in another language.
     """
-    skip = {s.strip().lower() for s in skip if s and s.strip()}
-    out, seen = [], set()
+    skip = {thing.strip().lower() for thing in skip if thing and thing.strip()}
+    kept, seen = [], set()
     for whole in raw or []:
         whole = re.sub(r"\s+", " ", str(whole or "")).strip().lstrip("#*•- ").strip()
         if not whole or LABEL_RE.match(whole) or WEB_RE.search(whole) or whole.lower() in skip:
@@ -148,31 +150,28 @@ def tidy(raw, skip=(), limit=None, plain=False):
                 tag = _case(tag)
                 if _same(tag) not in seen:
                     seen.add(_same(tag))
-                    out.append(tag)
-    if limit and len(out) > limit:
-        out = ([t for t in out if t.lower() in GENRES] + [t for t in out if t.lower() not in GENRES])[:limit]
-    return out
+                    kept.append(tag)
+    if limit and len(kept) > limit:
+        # genres jump the queue, everything else keeps its place behind them
+        kept = ([tag for tag in kept if tag.lower() in GENRES] + [tag for tag in kept if tag.lower() not in GENRES])[:limit]
+    return kept
 
 
 def dropped(raw, kept):
     """The raw tags that left nothing behind, for the admin's "removed" list."""
-    kept = {t.lower() for t in kept}
-    gone = []
-    for whole in raw or []:
-        if not {t.lower() for t in tidy([whole])} & kept:
-            gone.append(whole)
-    return gone
+    kept = {tag.lower() for tag in kept}
+    return [whole for whole in raw or [] if not {tag.lower() for tag in tidy([whole])} & kept]
 
 
 def apply_rules(tags, rules):
     """Apply an admin's choices: ``rules`` maps a tag (lower case) to its new name, or "" to hide it."""
     if not rules:
         return list(tags)
-    out, seen = [], set()
+    renamed, seen = [], set()
     for tag in tags:
         new = rules.get(tag.lower())
-        tag = tag if new is None else new
+        tag = tag if new is None else new  # careful: "" means hide it, None means no rule. not the same thing!
         if tag and tag.lower() not in seen:
             seen.add(tag.lower())
-            out.append(tag)
-    return out
+            renamed.append(tag)
+    return renamed

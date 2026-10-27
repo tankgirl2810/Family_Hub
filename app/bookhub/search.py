@@ -9,8 +9,9 @@ A term is {"fields": ["title", "author", "series", "tag"], "value": "cafe", "sou
           must match whole.
   sign    "+" the book must match, "-" it must not, "or" one of the "or" terms will do
 
-How they combine: every "+" term must match, except that "+" terms of the same kind (two authors, two family
-tags) mean "either"; any "-" term rules a book out; when there are "or" terms, at least one must match.
+How they combine: every "+" term must match, except that "+" words of the same kind (two authors) mean
+"either"; two "+" tags must both be there; any "-" term rules a book out; when there are "or" terms, at least
+one must match.
 """
 import re
 import unicodedata
@@ -36,28 +37,30 @@ def _pattern(value, whole):
 
 def clean(terms):
     """The terms as sent by the page, checked: unknown fields, sources and signs are dropped."""
-    out = []
-    for t in terms if isinstance(terms, list) else []:
-        if not isinstance(t, dict):
+    cleaned = []
+    for term in terms if isinstance(terms, list) else []:
+        if not isinstance(term, dict):
             continue
-        fields = [f for f in (t.get("fields") or []) if f in FIELDS]
-        value = str(t.get("value") or "").strip()[:200]
+        fields = [field for field in (term.get("fields") or []) if field in FIELDS]
+        value = str(term.get("value") or "").strip()[:200]
         if not fields or not norm(value):
             continue
-        source = t.get("source") if t.get("source") in SOURCES else None
-        sign = t.get("sign") if t.get("sign") in ("+", "-", "or") else "+"
-        out.append({"fields": fields, "value": value, "source": source, "sign": sign, "phrase": bool(t.get("phrase"))})
-    return out[:40]
+        source = term.get("source") if term.get("source") in SOURCES else None
+        sign = term.get("sign") if term.get("sign") in ("+", "-", "or") else "+"
+        cleaned.append({"fields": fields, "value": value, "source": source, "sign": sign, "phrase": bool(term.get("phrase"))})
+    return cleaned[:40]
 
 
 def matcher(terms):
     """A function item, series_tags -> bool for these terms (already cleaned)."""
     compiled = []
-    for t in terms:
-        words = [t["value"]] if t["phrase"] else norm(t["value"]).split(" ")
-        loose, whole = [_pattern(w, False) for w in words], _pattern(t["value"], True)
-        kind = (tuple(t["fields"]), t["source"])
-        compiled.append((t, loose, whole, kind))
+    for term in terms:
+        words = [term["value"]] if term["phrase"] else norm(term["value"]).split(" ")
+        loose, whole = [_pattern(word, False) for word in words], _pattern(term["value"], True)
+        # the "kind" is the bucket a + term lands in. picked tags each get their own bucket (all must match),
+        # typed words share one per field (so two authors = either one). subtle, but it matters
+        kind = (tuple(term["fields"]), term["source"], term["value"].lower() if term["fields"] == ["tag"] else "")
+        compiled.append((term, loose, whole, kind))
 
     def text(item, field):
         if field == "title":
@@ -66,32 +69,31 @@ def matcher(terms):
             return item["author"]
         return " ".join([item.get("series") or "", item.get("collection") or ""])
 
-    def hits(t, loose, whole, item, series_tags):
-        words = [f for f in t["fields"] if f != "tag"]
-        if words:
-            hay = norm(" | ".join(text(item, f) for f in words))
-            if all(p.search(hay) for p in loose):
+    def tags_of(item, series_tags, source):
+        for group in [source] if source else SOURCES:
+            yield from item["tags"].get(group, []) + series_tags.get(group, [])
+
+    def hits(term, loose, whole, item, series_tags):
+        word_fields = [field for field in term["fields"] if field != "tag"]
+        if word_fields:
+            haystack = norm(" | ".join(text(item, field) for field in word_fields))
+            if all(pattern.search(haystack) for pattern in loose):
                 return True
-        for field in t["fields"]:
-            if field == "tag":
-                groups = [t["source"]] if t["source"] else list(SOURCES)
-                for g in groups:
-                    for tag in item["tags"].get(g, []) + series_tags.get(g, []):
-                        if whole.search(norm(tag)):
-                            return True
-        return False
+        if "tag" not in term["fields"]:
+            return False
+        return any(whole.search(norm(tag)) for tag in tags_of(item, series_tags, term["source"]))
 
     def keep(item, series_tags=None):
         series_tags = series_tags or {}
-        groups, either = {}, []
-        for t, loose, whole, kind in compiled:
-            hit = hits(t, loose, whole, item, series_tags)
-            if t["sign"] == "-" and hit:
+        must, either = {}, []
+        for term, loose, whole, kind in compiled:
+            hit = hits(term, loose, whole, item, series_tags)
+            if term["sign"] == "-" and hit:
                 return False
-            if t["sign"] == "+":
-                groups[kind] = groups.get(kind, False) or hit
-            elif t["sign"] == "or":
+            if term["sign"] == "+":
+                must[kind] = must.get(kind, False) or hit
+            elif term["sign"] == "or":
                 either.append(hit)
-        return all(groups.values()) and (not either or any(either))
+        return all(must.values()) and (not either or any(either))
 
     return keep

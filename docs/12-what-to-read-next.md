@@ -56,11 +56,46 @@ Things to know:
 - Family tags that mean something only at home ("Read together") match
   nothing outside and are skipped.
 
+## Manga and manhwa you might like
+
+**Discover → Manga and manhwa you might like** comes from AniList (anilist.co), a free catalogue of manga,
+manhwa and manhua whose readers tag every title and say what else people who liked it enjoyed.
+
+- It starts from the series you have enjoyed: ones you follow chapter by chapter that you rated (or have
+  read a fifth of, at least three chapters), and graphic novel series in the library you rated or finished
+  a volume of.
+- For each, Family Hub asks AniList what readers recommend, leaves out what you already follow or have in
+  the library and anything you said **Not for me** to, and puts the rest in order: how many readers
+  recommend it, from how many of your series, how well its tags match what you like, and how well it is
+  liked. No one series fills the list.
+- **Find on reading sites** searches your series server for it, ready to **Follow**. **On AniList** opens
+  its page there.
+- Only series titles are sent to AniList, never who is asking, and only while looking things up outside
+  is switched on (the same switch as Open Library). Answers are kept for a week; a few series are asked
+  about at a time, because AniList allows only so many questions a minute. **Look again** asks about any
+  left.
+
+Series you follow chapter by chapter also count towards your taste for every suggestion, with the
+reading site's tags: a rated series by its rating, an unrated one once you are a fifth of the way in.
+
+## Authors you like, and ones you do not
+
+**Discover → Authors for my suggestions.** Type an author (the library's authors are offered as you type)
+and press **I like them** or **I don't like them**. **Not this author** on a weekly suggestion does the
+same as "I don't like them".
+
+- An author you like counts as strongly as two books you rated five stars: their unread books come first,
+  and they are the first authors asked about when looking for books the library lacks. Each one also
+  counts towards the handful of books needed before suggestions start.
+- An author you do not like is never suggested, in the library or from outside.
+- The cross on a name takes it off the list; adding it to the other list moves it across.
+
+Only you see your lists. They are kept in Family Hub's own data, so they move to the home server with it.
+
 ## The other suggestions on the Discover page
 
-These were there before and still work:
 
 | Section | What it shows |
 |---|---|
 | Similar to books you've read | Pick one book you finished; see books that share its tags or author, in the library or not |
-| New for you | New releases for the authors and tags on your watchlist |
+| New for you | Books for the authors and tags you follow under **Your watchlist** on the same page ([guide 5](05-finding-new-books.md), "Following authors and tags") |

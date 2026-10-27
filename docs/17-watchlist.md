@@ -14,12 +14,13 @@ straight away and then every six hours.
 | Film | Films whose title contains every word you typed, coming ones first: announced, in cinemas from a date, out to watch at home from a date, out now, or already on the server. |
 | TV show | The same for shows: starting on a date, running (with the next episode's date), ended, or on the server. |
 
-Add a year to the name ("Dune 2026") to match only that year.
+Add a year to the name ("Dune 2026") to match only that year. **Stop watching** takes an entry off your list.
 
 ## Getting films and shows
 
-- **Get it** asks for a match. One that is not out yet is added straight away and downloads once it is
-  released (Radarr and Sonarr keep watching for it).
+- **Get it** asks for a match (the button says **Get it when it is out** for one still to come). One that
+  is not out yet is added straight away and downloads once it is released (Radarr and Sonarr keep watching
+  for it).
 - **Get automatically** (or ticking it when you add the name) asks for every match that appears while it
   is still to come, without anyone pressing anything. It needs **Can request films and TV**. A match that
   is already out is never got by itself: press **Get it** for those.
