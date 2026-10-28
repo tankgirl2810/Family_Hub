@@ -35,12 +35,17 @@ async function api(method, url, body) {
   const opts = { method, headers: {}, credentials: 'same-origin' };
   if (body instanceof FormData) opts.body = body;
   else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-  const res = await fetch(url, opts);
+  let res;
+  try { res = await fetch(url, opts); } catch (err) {
+    if (gen !== routeGen) throw new Stale('moved on');
+    throw new Error('Family Hub could not be reached. Check this device is on the home network, then try again.');
+  }
   let data = null;
   try { data = await res.json(); } catch (err) { /* no body */ }
   // Moved to another page meanwhile: a save still happened, but nothing may redraw the old page over the new one.
   if (gen !== routeGen) throw new Stale('moved on');
-  if (!res.ok) throw new Error((data && data.error) || 'Something went wrong (' + res.status + ').');
+  if (!res.ok && !(data && data.error) && res.status >= 502 && res.status <= 504) throw new Error('Family Hub is not answering (' + res.status + '). It may be restarting; try again in a minute.');
+  if (!res.ok) throw new Error((data && data.error) || 'Something went wrong (' + res.status + '). Try again, or reload the page.');
   return data;
 }
 
@@ -276,10 +281,18 @@ function shell(section, tab) {
   }
 }
 
+// A page that could not load says why, with a way to try again and a way home.
+function pageFailed(err) {
+  setMain(el('section', { class: 'panel cut stack', role: 'alert' }, head('This page could not load'),
+    el('p', { class: 'bad', text: err.message }),
+    el('div', { class: 'row' }, el('button', { class: 'btn pri', type: 'button', text: 'Try again', onclick: () => route() }),
+      location.hash === '#/home' ? null : el('a', { class: 'btn', href: '#/home', text: 'Go to Home' }))));
+}
+
 let lastHash = null;
 async function route() {
   routeGen++;
-  try { appState = await api('GET', '/api/state'); } catch (err) { if (err instanceof Stale) return; setMain(el('p', { class: 'bad', text: err.message })); return; }
+  try { appState = await api('GET', '/api/state'); } catch (err) { if (err instanceof Stale) return; pageFailed(err); return; }
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   let page = parts[0] || (appState.me ? 'home' : 'profiles');
   if (appState.setup_needed) { shell('profiles'); return pageSetup(); }
@@ -305,7 +318,7 @@ async function route() {
     dashboard: pageDashboard, admin: parts[1] === 'books' ? pageBooksAdmin : pageHubAdmin, sort: pageSort, tags: pageTags, copies: pageCopies, details: pageDetails, watchlist: pageWatchlist,
     discover: pageDiscover, devices: pageDevices, series: pageSeries, read: pageRead, mybooks: pageMyBooks };
   const gen = routeGen;
-  try { await (pages[page] || pageLibrary)(page === 'admin' ? parts[2] : parts[1], parts[2]); } catch (err) { if (!(err instanceof Stale)) setMain(el('p', { class: 'bad', text: err.message })); }
+  try { await (pages[page] || pageLibrary)(page === 'admin' ? parts[2] : parts[1], parts[2]); } catch (err) { if (!(err instanceof Stale)) pageFailed(err); }
   // The link that was used has been redrawn, so keyboard and screen reader users would be left at the top of
   // the document. Start them at the new page instead, unless the page put focus somewhere itself (a search box, say).
   if (moved && gen === routeGen && (!document.activeElement || document.activeElement === document.body)) main().focus({ preventScroll: true });
@@ -333,7 +346,7 @@ function posterCard(item, extra) {
   const href = item.id ? '#/movies/' + item.kind + '/' + item.id : null;
   const props = { class: 'cover' + (item.poster ? ' has-img' : '') + titleSize(item.title),
       style: '--cv:' + coverColor(item.title) + (item.poster ? ';background-image:url(' + item.poster + ')' : '') };
-  const inner = [el('span', { class: 'fmt', text: item.kind === 'film' ? 'FILM' : 'TV' }), el('span', { class: 't', text: item.title })];
+  const inner = [el('span', { class: 'fmt', text: item.kind === 'film' ? 'Film' : 'TV' }), el('span', { class: 't', text: item.title })];
   return el('div', { class: 'book' }, href ? el('a', Object.assign({ href }, props), inner) : el('div', props, inner),
     el('div', { class: 'small dim', text: [item.year, KIND_WORD[item.kind]].filter(Boolean).join(' · ') }), extra || null);
 }
@@ -513,8 +526,8 @@ const Tracker = (() => {
     const ready = items.length - waiting - fetched;
     fill(box,
       el('div', { class: 'row between tracker-head' },
-        el('strong', { class: 'small', text: [waiting ? 'Looking for ' + waiting : '', fetched ? fetched + ' downloaded' : '', ready ? ready + ' ready' : ''].filter(Boolean).join(' · ') }),
-        el('button', { class: 'btn sm', type: 'button', 'aria-expanded': String(!small), text: small ? 'Show' : 'Hide', onclick: () => { write(MIN, !small); render(shown); } })),
+        el('strong', { class: 'small', text: [waiting ? plural(waiting, 'title') + ' being looked for' : '', fetched ? fetched + ' downloaded' : '', ready ? ready + ' ready' : ''].filter(Boolean).join(' · ') }),
+        el('button', { class: 'btn sm', type: 'button', 'aria-expanded': String(!small), text: small ? 'Show list' : 'Hide list', onclick: () => { write(MIN, !small); render(shown); } })),
       small ? null : items.map((item) => el('div', { class: 'tracker-item stack' + (item.finished || item.downloaded ? ' ready' : '') },
         el('div', { class: 'row between', style: 'gap:8px;flex-wrap:nowrap' },
           el('a', { href: item.kind === 'book' ? (item.finished ? '#/library' : '#/downloads') : '#/movies/' + item.kind + '/' + item.id,
@@ -695,7 +708,7 @@ async function pageMediaItem(kind, id) {
     el('div', { class: 'detail' },
       el('div', { class: 'bside' }, el('div', { class: 'cover' + (item.poster ? ' has-img' : '') + titleSize(item.title),
           style: '--cv:' + coverColor(item.title) + (item.poster ? ';background-image:url(' + item.poster + ')' : '') },
-        el('span', { class: 'fmt', text: kind === 'film' ? 'FILM' : 'TV' }), el('span', { class: 't', text: item.poster ? '' : item.title }))),
+        el('span', { class: 'fmt', text: kind === 'film' ? 'Film' : 'TV' }), el('span', { class: 't', text: item.poster ? '' : item.title }))),
       el('div', { class: 'bbody' },
         el('div', { class: 'stack' }, el('h1', { class: 'glow', text: item.title }), el('p', { class: 'dim', text: facts }),
           item.genres.length ? el('p', { class: 'lab', text: item.genres.join(' · ') }) : null,
@@ -761,7 +774,7 @@ async function pageWatchlist() {
   const gen = routeGen;
   const list = el('div', { class: 'stack' });
   const kindSel = el('select', {}, WATCH_KINDS.filter(([key]) => key === 'author' || (key === 'film' ? data.films : data.shows)).map(([key, label]) => el('option', { value: key, text: label })));
-  const name = el('input', { type: 'text', placeholder: 'A name, such as Brandon Sanderson or Dune Part Three' });
+  const name = el('input', { type: 'text', placeholder: 'Such as Brandon Sanderson or Dune' });
   const auto = el('input', { type: 'checkbox' });
   const autoRow = el('label', { class: 'check small' }, auto, 'Get it automatically as soon as it is announced (it downloads once it is out)');
   const showAuto = () => { autoRow.hidden = kindSel.value === 'author' || !data.can_request_media; };
@@ -774,7 +787,7 @@ async function pageWatchlist() {
     const act = [];
     if (watched.kind === 'author') act.push(el('a', { class: 'btn sm', href: '#/discover/' + encodeURIComponent(item.title + ' ' + watched.value), text: 'Find it' }));
     else if (item.in_library && item.arr_id) act.push(el('a', { class: 'btn sm', href: '#/movies/' + watched.kind + '/' + item.arr_id,
-        text: item.requested ? 'Got it for you · open' : 'On the server · open' }));
+        text: item.requested ? 'Open (got it for you)' : 'Open on the server' }));
     else if (data.can_request_media && item.external_id) act.push(el('button', { class: 'btn sm pri', type: 'button',
         text: item.coming ? 'Get it when it is out' : 'Get it', onclick: async (event) => {
       const button = event.currentTarget; button.disabled = true;
@@ -822,7 +835,7 @@ async function pageWatchlist() {
   const add = el('form', { class: 'row end gap8', onsubmit: async (event) => {
     event.preventDefault();
     const button = event.target.querySelector('button[type=submit]');
-    button.disabled = true; button.textContent = 'Looking…';
+    button.disabled = true; button.textContent = 'Adding…';
     try {
       const added = await api('POST', '/api/watchlist', { kind: kindSel.value, value: name.value, auto: auto.checked });
       items = items.filter((item) => item.id !== added.id).concat(added);
@@ -830,8 +843,8 @@ async function pageWatchlist() {
       draw();
       toast('Watching for ' + added.value + '.');
     } catch (err) { oops(err); }
-    button.disabled = false; button.textContent = 'Watch';
-  } }, field('What', kindSel), field('Name', name), el('button', { class: 'btn pri', type: 'submit', text: 'Watch' }));
+    button.disabled = false; button.textContent = 'Add to watchlist';
+  } }, field('What', kindSel), field('Name', name), el('button', { class: 'btn pri', type: 'submit', text: 'Add to watchlist' }));
   draw();
   setMain(
     pageHead('Watchlist', 'Authors, films and shows you are waiting for. Each is checked every few hours; anything new is marked. Tags you follow for book suggestions stay on Books, Discover.'),
@@ -1611,7 +1624,8 @@ function devicesBox(profileId) {
 }
 
 async function pageDevices(id) {
-  const profile = appState.profiles.find((candidate) => candidate.id === Number(id));
+  // a bare #/devices means my own
+  const profile = appState.profiles.find((candidate) => candidate.id === Number(id || appState.me.id));
   if (!profile || (!isAdmin() && profile.id !== appState.me.id)) { location.hash = '#/profiles'; return; }
   setMain(back(isAdmin() ? '#/admin' : '#/profiles', isAdmin() ? 'Back to admin' : 'Back to profiles'),
     el('h1', { class: 'glow', text: 'Devices for ' + profile.name }),
@@ -2187,7 +2201,7 @@ function chapterCard(item, onChange) {
     el('div', { class: 'coverwrap' + (done ? ' done' : '') },
       el('a', { href, class: 'cover has-img' + titleSize(item.title), title: item.title,
           style: '--cv:' + coverColor(item.title) + ';background-image:url(' + seriesCover({ id: item.series_id }) + ')' },
-        el('span', { class: 'fmt', text: 'CHAPTERS' }), el('span', { class: 't', text: '' })),
+        el('span', { class: 'fmt', text: 'Chapters' }), el('span', { class: 't', text: '' })),
       done ? el('span', { class: 'readnote', text: 'All caught up' }) : null),
     el('a', { class: 'card-title', href, title: item.title, text: item.title }),
     el('div', { class: 'small dim card-line', text: [item.author, item.source].filter(Boolean).join(' · ') }),
@@ -2338,7 +2352,9 @@ async function pageSeries(id) {
         el('span', {}, el('strong', { text: info.files.length > 1 ? 'Part ' + file.part : info.title }), el('span', { class: 'small dim',
             text: ' · ' + plural(file.chapters,
             'chapter') + ' (' + file.first + (file.chapters > 1 ? ' – ' + file.last : '') + ')' + (file.size ? ' · ' + (file.size / 1048576).toFixed(0) + ' MB' : '') })),
-        file.state === 'ready' ? el('a', { class: 'btn sm', href: '/api/series/' + info.id + '/file/' + file.part, download: '',
+        // a shorter copy made earlier still downloads while the newest chapters are being added
+        file.state === 'ready' || file.older ? el('a', { class: 'btn sm', href: '/api/series/' + info.id + '/file/' + file.part, download: '',
+            title: file.state === 'ready' ? null : 'The newest chapters are still being added; this is the copy made before them.',
             'aria-label': 'Download ' + file.title + ' as a comic file', text: 'Download CBZ' })
           : el('span', { class: 'small ' + (file.state === 'failed' ? 'bad' : 'dim'),
               text: file.state === 'making' ? 'Being put together…' : file.state === 'failed' ? 'Could not be made: ' + file.error : 'Waiting to be put together' }))))) : null,
@@ -2351,7 +2367,7 @@ async function pageSeries(id) {
           el('td', { class: entry.read ? 'dim' : '', text: entry.read ? 'Read' : 'Not yet' }),
           el('td', { class: entry.downloaded || info.local ? 'ok' : 'dim', text: entry.downloaded || info.local ? 'Kept' : 'Not yet' }),
           el('td', {}, el('div', { class: 'row' },
-            entry.downloaded ? el('a', { class: 'btn', href: '/api/series/chapters/' + entry.id + '/file', 'aria-label': 'Download ' + entry.name + ' as a file', text: 'File' }) : null,
+            entry.downloaded ? el('a', { class: 'btn', href: '/api/series/chapters/' + entry.id + '/file', 'aria-label': 'Download ' + entry.name + ' as a file', text: 'Download' }) : null,
             el('button', { class: 'btn', type: 'button', 'aria-label': (entry.read ? 'Mark as not read: ' : 'Mark as read: ') + entry.name,
                 text: entry.read ? 'Mark unread' : 'Mark read', onclick: () => mark([entry.id], !entry.read) })))))))) : el('p', { class: 'dim',
                 text: 'No chapters found. Try "Look for new chapters".' })));
@@ -2423,7 +2439,10 @@ function titleFit(title) {
 
 // A "More" disclosure for actions used now and then; the dangerous ones go last inside it.
 function moreMenu(items) {
-  return el('details', { class: 'more-menu' }, el('summary', { class: 'btn', text: 'More' }), el('div', { class: 'stack gap8' }, items));
+  // Escape folds it back up, like the phone's More menu, and leaves focus on its button.
+  return el('details', { class: 'more-menu', onkeydown: (event) => { if (event.key === 'Escape' && event.currentTarget.open) {
+    event.currentTarget.open = false; event.currentTarget.querySelector('summary').focus(); } } },
+  el('summary', { class: 'btn', text: 'More' }), el('div', { class: 'stack gap8' }, items));
 }
 
 async function pageBook(id) {
@@ -2443,11 +2462,12 @@ async function pageBook(id) {
     book.converted ? el('a', { class: 'btn pri', href: '/api/books/' + id + '/download/converted', text: 'Download converted EPUB' }) : null);
   if (book.formats.includes('PDF') && !book.formats.includes('EPUB') && !book.converted && !guest) {
     const running = book.convert_status === 'running';
-    side.append(el('button', { class: 'btn', type: 'button', disabled: running, text: running ? 'Converting…' : 'Convert to EPUB',
+    // append() would print a left-out part as the word "null"; filter them first
+    side.append(...[el('button', { class: 'btn', type: 'button', disabled: running || !appState.can_convert, text: running ? 'Converting…' : 'Convert to EPUB',
         onclick: () => post('/convert').then(() => toast('Conversion started. Check back in a minute.')) }),
       book.convert_status === 'failed' ? el('p', { class: 'small bad', text: 'The last conversion failed. Scanned PDFs often cannot be converted.' }) : null,
       appState.can_convert ? null : el('p', { class: 'small dim',
-          text: 'The converter is not installed in Family Hub' + (appState.cwa_url ? '; use Convert in the library manager instead.' : '.') }));
+          text: 'The converter is not installed in Family Hub' + (appState.cwa_url ? '; use Convert in the library manager instead.' : '.') })].filter(Boolean));
   }
   // Things done now and then (and deleting) wait behind More, away from the download buttons.
   const more = [];
@@ -2579,7 +2599,7 @@ function similarList(title, books) {
       el('strong', { style: 'font-size:18px', text: book.title }), el('span', { class: 'small dim', text: book.author }),
       el('span', { class: 'lab', text: 'Shares: ' + book.shared.join(', ') }),
       book.already_read ? el('span', { class: 'small dim', text: 'You have read this' }) : null,
-      book.in_library ? el('a', { class: 'btn', href: '#/book/' + book.id, text: 'In library · open' })
+      book.in_library ? el('a', { class: 'btn', href: '#/book/' + book.id, text: 'Open in library' })
         : (canRequest() ? el('a', { class: 'btn pri', href: '#/discover/' + encodeURIComponent(book.title + ' ' + book.author),
             text: 'Find it' }) : el('span', { class: 'small dim', text: 'Not in the library' })))))
       : el('p', { class: 'small dim', text: 'No matches yet. Add a few tags to this book to get suggestions.' }));
@@ -2617,10 +2637,12 @@ async function pageMyBooks() {
   const finished = read.books.slice().sort((book, index) => String(index.finished || '').localeCompare(String(book.finished || '')));
   const grid = (books) => el('div', { class: 'shelf' }, books.map((book) => bookCard(book, again, { plain: true })));
   const appBox = el('section', { class: 'panel cut', 'aria-label': 'For your reading app' });
+  const comicsBox = el('section', { class: 'panel cut', 'aria-label': 'For your graphic novel app', hidden: true });
   setMain(
     pageHead('My books', 'The books on your list, where each one stands on your devices, and what you are reading and have read.'),
     dashTabs('mybooks', () => pageMyBooks()),
     appBox,
+    comicsBox,
     el('section', { class: 'panel cut' }, head('On my devices', el('a', { class: 'btn', href: '#/devices/' + appState.me.id, text: 'Add or change devices' })),
       shelf.devices.length ? null : el('p', { class: 'small warn', text: 'You have no devices yet. Add one and the books on your list are offered to it.' }),
       apps.length ? el('p', { class: 'small dim',
@@ -2639,6 +2661,58 @@ async function pageMyBooks() {
       finished.length ? el('p', { class: 'small dim', text: plural(finished.length, 'book') + ', the most recent first.' }) : null,
       finished.length ? grid(finished) : el('p', { class: 'small dim', text: 'Nothing finished yet.' })));
   watchReadingApp(appBox);
+  watchComicsApp(comicsBox);
+}
+
+// What the graphic novel app (Paperback) can get from Komga, and what's new in it. Paperback is really bad at
+// saying what it has and hasn't got yet, so this is the list to check it against.
+const KOMGA_STATUS = { ONGOING: 'Ongoing', HIATUS: 'On hiatus', ENDED: 'Ended', ABANDONED: 'No more coming' };
+async function watchComicsApp(box) {
+  let data;
+  try { data = await api('GET', '/api/me/comics-app'); } catch (err) { box.hidden = false; fill(box, el('p', { class: 'small bad', text: err.message })); return; }
+  if (!box.isConnected) return;
+  box.hidden = !data.used;
+  if (!data.used) return;
+  if (!data.ready) { fill(box, head('For your graphic novel app'), el('p', { class: 'small warn', text: data.message })); return; }
+  // straight to the series on Komga's own page, which also works as a reader in the browser
+  const seriesLink = (item) => el('a', { class: 'ink', text: item.title, target: '_blank', rel: 'noopener',
+    href: data.port ? location.protocol + '//' + location.hostname + ':' + data.port + '/series/' + item.series_id : null });
+  const isNew = (group) => !data.seen || group.newest > data.seen;
+  const unit = (kind, count) => plural(count, kind === 'graphic' ? 'volume' : 'chapter');
+  const added = (group) => {
+    const books = group.books, span = books.length > 1 ? books[0].name + ' – ' + books[books.length - 1].name : books[0].name;
+    return el('div', { class: 'stack gap4' },
+      el('div', { class: 'row between' },
+        el('div', { class: 'row gap10' }, seriesLink(group), isNew(group) ? el('span', { class: 'chip xs', text: 'New' }) : null),
+        el('span', { class: 'small dim', text: 'added ' + niceDate(group.newest) })),
+      el('span', { class: 'small' + (group.unread ? '' : ' dim'),
+        text: unit(group.kind, books.length) + ': ' + span + (group.unread ? ' · ' + group.unread + ' unread' : ' · all read') }));
+  };
+  const onTheWay = (item) => el('div', { class: 'row between' }, el('span', { text: item.title }),
+    el('span', { class: 'small dim', text: item.kind === 'graphic'
+      ? unit('graphic', item.count) + ' being copied in · there within 10 minutes'
+      : unit('chapters', item.count) + ' still downloading on the series server' + (item.status === 'Hiatus' ? ' · on hiatus' : '') }));
+  const shelfRow = (item) => el('div', { class: 'stack gap4' },
+    el('div', { class: 'row between' },
+      el('div', { class: 'row gap10' }, seriesLink(item), item.status ? el('span', { class: 'chip xs', text: KOMGA_STATUS[item.status] || item.status }) : null),
+      el('span', { class: 'small ' + (item.unread ? '' : 'ok'), text: item.unread ? item.unread + ' of ' + item.total + ' unread' : 'All ' + item.total + ' read' })),
+    item.kind === 'chapters' && item.summary ? el('span', { class: 'small dim', text: item.summary }) : null);
+  const fresh = data.added.filter(isNew);
+  const unread = data.shelf.reduce((total, item) => total + item.unread, 0);
+  const section = (title, items, row) => items.length ? el('div', { class: 'stack' }, el('h3', { text: title + ' (' + items.length + ')' }), el('div', { class: 'list' }, items.map(row))) : null;
+  const seenButton = fresh.length ? el('button', { class: 'btn sm', type: 'button', text: 'Mark all as seen',
+    title: 'Clears the New marks, once your graphic novel app has everything',
+    onclick: () => api('POST', '/api/me/comics-app/seen').then(() => watchComicsApp(box)).catch(oops) }) : null;
+  fill(box, head('For your graphic novel app', seenButton),
+    el('div', { class: 'stack gap6' },
+      el('div', { class: 'row between' },
+        el('strong', { role: 'status', text: fresh.length ? plural(fresh.length, 'series', 'series') + ' with something new' : 'Nothing new since you last looked' }),
+        el('span', { class: 'small dim', text: plural(data.shelf.length, 'series', 'series') + ' in Komga · ' + unread + ' unread' }))),
+    el('p', { class: 'small dim', text: 'Paperback gets these from Komga, signed in as ' + data.account + ". It doesn't always notice new ones by itself: "
+      + 'open a series marked New, pull down to refresh it, then download what you want to read offline.' }),
+    section('Added in the last ' + data.days + ' days', data.added, added) || el('p', { class: 'small dim', text: 'Nothing added in the last ' + data.days + ' days.' }),
+    data.coming.length ? el('details', {}, el('summary', { text: 'On the way (' + data.coming.length + ')' }), el('div', { class: 'list' }, data.coming.map(onTheWay))) : null,
+    data.shelf.length ? el('details', {}, el('summary', { text: 'Everything in Komga (' + data.shelf.length + ')' }), el('div', { class: 'list' }, data.shelf.map(shelfRow))) : null);
 }
 
 // Everything on my list as the reading app gets it: how much of it the app has downloaded, what is still to come
@@ -2673,7 +2747,9 @@ async function watchReadingApp(box) {
       el('div', { class: 'row between' }, el('strong', { role: 'status', text: data.on_app + ' of ' + plural(data.total, 'item') + ' on your reading app' }),
         el('span', { class: 'small dim', text: todo.length ? todo.length + ' still to come' : 'Everything is there' })),
       bar(share, share + ' percent of your list is on your reading app')),
-    el('p', { class: 'small dim', text: 'Counted from what your reading app has downloaded from the catalogue. A comic series counts once per part; a series by chapter once per 50 chapters.' }),
+    el('p', { class: 'small dim', text: data.comics_elsewhere
+      ? 'Counted from what your reading app has downloaded from the catalogue. Graphic novels and series by chapter are read in Paperback instead, from Komga, so they are not counted here.'
+      : 'Counted from what your reading app has downloaded from the catalogue. A comic series counts once per part; a series by chapter once per 50 chapters.' }),
     group('Being made on the server', making),
     group('Ready, not fetched yet', fetch),
     have.length ? el('details', {}, el('summary', { text: 'On your reading app (' + have.length + ')' }), el('div', { class: 'list' }, have.map(row))) : null);
@@ -3059,7 +3135,7 @@ async function pageBooksAdmin() {
     pageHead('Library and family', 'Books only · visible to admins · ' + stats.year + ' so far'),
     el('div', { class: 'tiles' },
       tile('Books in the library', stats.total.toLocaleString(), stats.formats.map(([fmt, count]) => count + ' ' + fmt).join(' · ')),
-      tile('Added this month', stats.added_month, stats.added_year + ' added this year'),
+      tile('Added this month', stats.added_month.toLocaleString(), stats.added_year.toLocaleString() + ' added this year'),
       tile('Books read by the family', stats.read_year, stats.read_month + ' so far this month'),
       tile('Never opened', stats.never_opened.toLocaleString(), 'Books no profile has started')),
     sortCard(stats), tagsCard(stats.tags), detailsCard(), copiesCard(stats.copies), elsewhereCard(stats.elsewhere), attentionCard(stats, reload),
@@ -3332,7 +3408,7 @@ async function pageDetails() {
     pageHead('Books without real details', 'Titles that are file names and authors that are user names. Find details reads the file for an ISBN and its own title, then asks Open Library '
       + '(and Google Books, when its key is saved). Saving changes the title and author in the library through the library manager, after a copy of the library database. '
       + 'Reading progress, tags and ratings stay with the book. Afterwards, Copies of the same book may find more spare copies.'),
-    data.blocked ? el('p', { class: 'bad', text: data.blocked }) : null,
+    data.blocked ? el('p', { class: 'bad' }, data.blocked + ' ', el('a', { href: '#/admin', text: 'Open Admin, Hub' })) : null,
     el('section', { class: 'panel cut' }, head(plural(data.books.length, 'book') + ' to look at', el('button', { class: 'btn sm', type: 'button', text: 'Look again', onclick: again })),
       data.books.length ? list : el('p', { class: 'small dim', text: 'Every book has a real title and author.' }), more));
 }
@@ -3381,7 +3457,7 @@ const SPARE_SORTS = [
 function spareEntry(book, extra) {
   const files = book.files.length ? book.files.map((file) => file.format + ' ' + fileSize(file.size)).join(' · ') : 'no book file';
   return el('div', { class: 'row between' },
-    el('span', {}, book.kept ? el('span', { class: 'tag on', text: 'Keep' }) : el('span', { class: 'tag', text: 'Spare' }), ' ',
+    el('span', { class: 'wrap' }, book.kept ? el('span', { class: 'tag on', text: 'Keep' }) : el('span', { class: 'tag', text: 'Spare' }), ' ',
       book.files.length ? el('a', { href: '/api/books/' + book.id + '/download/' + book.files[0].format, text: files }) : el('span', { class: 'dim', text: files }),
       el('span', { class: 'small dim',
           text: (book.converted ? ' · converted copy' : '') + ' · added ' + niceDate(book.added) + ' · ' + (book.details.length ? book.details.join(', ') : 'no details') })),
@@ -3395,7 +3471,7 @@ function spareCopiesCard(data, again) {
   const of = (cls) => data.sets.filter((set) => set.cls === cls);
   const review = of('review');
   const setBlock = (group, button) => el('div', { class: 'stack gap6' },
-    el('div', { class: 'row between' }, el('span', {}, el('strong', { text: group.title }), el('span', { class: 'small dim',
+    el('div', { class: 'row between' }, el('span', { class: 'wrap' }, el('strong', { text: group.title }), el('span', { class: 'small dim',
         text: ' · ' + (group.author || 'no author') + (group.copy.length ? ' · copies across: ' + group.copy.map((entry) => entry.label).join(', ') : '') })),
         button),
     group.why ? el('p', { class: 'small warn', text: group.why }) : null,
@@ -3409,7 +3485,7 @@ function spareCopiesCard(data, again) {
   return el('section', { class: 'panel cut' }, head('Remove spare copies from the library'),
     el('p', { class: 'small dim',
         text: 'This is the one place where Family Hub changes the library, and it does it by asking the library manager. The library\'s database is copied first, every time. A spare is only deleted outright when the kept file is identical; otherwise its files are moved to ' + data.set_aside + ' for you to empty when you are satisfied.' }),
-    data.blocked ? el('p', { class: 'warn', role: 'status', text: data.blocked }) : null,
+    data.blocked ? el('p', { class: 'warn', role: 'status' }, data.blocked + ' ', el('a', { href: '#/admin', text: 'Open Admin, Hub' })) : null,
     busy ? el('p', { class: 'ok', role: 'status', text: 'Working: ' + data.job.done + ' of ' + data.job.total + ' done…' }) : null,
     !busy && data.job.finished ? el('p', { class: 'small ' + (data.job.problems.length ? 'bad' : 'ok'), role: 'status',
         text: 'Last run: ' + data.job.done + ' of ' + data.job.total + ' done' + (data.job.problems.length ? ', ' + plural(data.job.problems.length,
@@ -3450,12 +3526,12 @@ async function pageCopies() {
   const one = copies.sets.filter((set) => set.together), apart = copies.sets.filter((set) => !set.together);
   const files = (book) => (book.files.length ? book.files.map((file) => file.format + ' ' + fileSize(file.size)).join(' · ') : 'no book file');
   const entry = (book) => el('div', { class: 'row between' },
-    el('span', {}, book.files.length ? el('a', { href: '/api/books/' + book.id + '/download/' + book.files[0].format, text: files(book) }) : el('span', { class: 'dim', text: files(book) }),
+    el('span', { class: 'wrap' }, book.files.length ? el('a', { href: '/api/books/' + book.id + '/download/' + book.files[0].format, text: files(book) }) : el('span', { class: 'dim', text: files(book) }),
       el('span', { class: 'small dim', text: ' · added ' + niceDate(book.added) + (book.has_cover ? '' : ' · no cover') })),
     el('span', { class: 'row gap8' }, book.shown ? el('span', { class: 'tag', text: 'Shown' }) : null,
       appState.cwa_url ? el('a', { class: 'small', href: appState.cwa_url + '/book/' + book.id, target: '_blank', rel: 'noopener', text: 'Open in library manager' }) : null));
   const block = (group, button) => el('div', { class: 'stack gap6' },
-    el('div', { class: 'row between' }, el('span', {}, el('strong', { text: group.title }), el('span', { class: 'small dim',
+    el('div', { class: 'row between' }, el('span', { class: 'wrap' }, el('strong', { text: group.title }), el('span', { class: 'small dim',
         text: ' · ' + (group.author || 'no author') + (group.choice ? ' · your choice' : '') })), button),
     el('div', { class: 'list' }, group.books.map(entry)));
   setMain(back('#/admin/books', 'Back to books admin'),
@@ -3723,7 +3799,7 @@ async function pageDiscover(prefill) {
     else body = el('div', { class: 'shelf' }, data.books.map((book) => el('div', { class: 'book' },
       el('div', { class: 'cover' + (book.cover ? ' has-img' : '') + titleSize(book.title),
           style: '--cv:' + coverColor(book.title) + (book.cover ? ';background-image:url(/api/covers/preview?' + qs({ url: book.cover }) + ')' : '') },
-        el('span', { class: 'fmt', text: book.kind.toUpperCase() }), el('span', { class: 't', style: 'text-decoration:none', text: book.cover ? '' : book.title })),
+        el('span', { class: 'fmt', text: book.kind }), el('span', { class: 't', style: 'text-decoration:none', text: book.cover ? '' : book.title })),
       el('div', { class: 'card-title', title: book.title, text: book.title }),
       el('div', { class: 'small dim card-line', text: [book.status, book.score ? book.score + '% liked' : ''].filter(Boolean).join(' · ') }),
       el('div', { class: 'card-tags', title: book.tags.concat(book.genres).join(' · ') }, el('span', { class: 'lab',
@@ -3764,7 +3840,7 @@ async function pageDiscover(prefill) {
     else body = el('div', { class: 'shelf' }, data.books.map((book) => el('div', { class: 'book' },
       el('div', { class: 'cover' + (book.cover_id ? ' has-img' : '') + titleSize(book.title),
           style: '--cv:' + coverColor(book.title) + (book.cover_id ? ';background-image:url(/api/covers/preview?' + qs({ url: 'https://covers.openlibrary.org/b/id/' + book.cover_id + '-M.jpg' }) + ')' : '') },
-        el('span', { class: 'fmt', text: 'NOT IN LIBRARY' }), el('span', { class: 't', style: 'text-decoration:none', text: book.title })),
+        el('span', { class: 'fmt', text: 'Not in library' }), el('span', { class: 't', style: 'text-decoration:none', text: book.title })),
       el('div', { class: 'small dim', text: book.author + (book.year ? ' · ' + book.year : '') }),
       el('div', { class: 'small', text: book.reason }),
       canRequest() ? el('button', { class: 'btn pri', type: 'button', 'aria-label': 'Find it: ' + book.title, text: 'Find it',
@@ -3779,7 +3855,7 @@ async function pageDiscover(prefill) {
           body);
   }
 
-  const simBox = el('div', {});
+  const simBox = el('div', { class: 'stack' });
   const read = (await api('GET', '/api/books?filter=read')).books;
   let pick = read[0];
   async function drawSimilar() {
@@ -3802,7 +3878,7 @@ async function pageDiscover(prefill) {
       : el('p', { class: 'small dim', text: 'Follow an author or a tag to get suggestions here.' }));
     fill(newBox, news.items.length ? el('div', { class: 'list' }, news.items.slice(0, 12).map((item) => el('div', { class: 'row between' },
       el('div', {}, el('strong', { text: item.title }), el('div', { class: 'small dim', text: item.reason + (item.author && !item.release ? ' · ' + item.author : '') })),
-      item.in_library ? el('a', { class: 'btn', href: '#/book/' + item.id, text: 'In library · open' })
+      item.in_library ? el('a', { class: 'btn', href: '#/book/' + item.id, text: 'Open in library' })
         : (canRequest() ? el('button', { class: 'btn pri', type: 'button', text: 'Find it',
             onclick: () => { searchBox.value = item.release ? item.title : item.title + ' ' + item.author; search(); window.scrollTo(0,
             0); } }) : null))))

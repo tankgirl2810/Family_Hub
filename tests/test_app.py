@@ -3449,21 +3449,32 @@ def test_a_followed_series_goes_to_the_reading_app_as_one_book_with_chapters(app
     assert client.post("/api/series/7/mine", json={"on": True}).get_json() == {"mine": True}
     assert client.get("/api/series/7").get_json()["mine"] is True
     mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
-    assert "<title>Tower Climber</title>" in mine and "urn:bookhub:chapters:7:2.2." in mine  # two chapters kept so far
-    assert "2 chapters in one book, from Chapter 1 to Chapter 2. New chapters come as a longer copy." in mine
+    # Listed straight away, but with nothing to download until its comic file is made.
+    assert "<title>Tower Climber</title>" in mine and "urn:bookhub:chapters:7:cbz:none" in mine
+    assert "2 chapters, from Chapter 1 to Chapter 2. Being put together on the server" in mine and 'rel="http://opds-spec.org/acquisition"' not in mine
     book = client.get("/opds/chapters-book/7", headers=you)
     assert book.status_code == 200 and book.headers["Content-Type"] == "application/epub+zip"
     epub = zipfile.ZipFile(io.BytesIO(book.data))
     assert re.findall(r">(Chapter \d)</a>", epub.read("OEBPS/nav.xhtml").decode()) == ["Chapter 1", "Chapter 2"]
     assert [epub.read(n) for n in sorted(n for n in epub.namelist() if n.startswith("OEBPS/images/"))] == \
         [b"c71-p1", b"c71-p2", b"c71-p10", b"c72-p1", b"c72-p2", b"c72-p10"]
-    # A new chapter kept: the entry changes, so the reading app fetches the longer book.
-    link = re.search(r'href="(/opds/chapters-book/7[^"]*)"', mine).group(1)
-    series_server.chapters[7][2]["isDownloaded"] = True
+    # Once made, the comic file is the only download: Readest would pick an EPUB over it if both were offered.
+    from bookhub import chapterfile
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
     mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
-    assert "urn:bookhub:chapters:7:2.3." in mine
+    assert mine.count('rel="http://opds-spec.org/acquisition"') == 1 and "application/epub+zip" not in mine
+    assert "2 chapters in one comic, from Chapter 1 to Chapter 2. New chapters come as a longer copy" in mine
+    # A new chapter kept: the entry changes, so the reading app fetches the longer copy.
+    entry_id = re.search(r"<id>(urn:bookhub:chapters:7:[^<]*)</id>", mine).group(1)
+    link = re.search(r'href="(/opds/chapters-file/7[^"]*)"', mine).group(1)
+    series_server.chapters[7][2]["isDownloaded"] = True
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
+    mine = client.get("/opds/mine", headers=you).get_data(as_text=True)
+    assert re.search(r"<id>(urn:bookhub:chapters:7:[^<]*)</id>", mine).group(1) != entry_id
     # The link changes too: Readest skips a link it has downloaded before, whatever the entry's id.
-    longer = re.search(r'href="(/opds/chapters-book/7[^"]*)"', mine).group(1)
+    longer = re.search(r'href="(/opds/chapters-file/7[^"]*)"', mine).group(1)
     assert longer != link and client.get(longer.replace("&amp;", "&"), headers=you).status_code == 200
     # Someone else's catalogue does not have it, and cannot fetch it.
     nan = {"Authorization": "Basic " + base64.b64encode(b"Nan:demo").decode()}
@@ -3524,19 +3535,25 @@ def test_a_followed_series_is_kept_as_one_comic_file_with_its_chapters(app, clie
         kept = list(chapterfile.folder(app.hub, 7).glob("*.cbz"))
     assert len(kept) == 1
     assert sum(n.endswith(".jpg") for n in zipfile.ZipFile(io.BytesIO(client.get("/api/series/7/file/1").data)).namelist()) == 9
-    # While chapters are still downloading, an unfinished part is not made again for every chapter.
+    # While chapters are still downloading, an unfinished part is not made again for every chapter...
     series_server.queued = [74]
     series_server.chapters[7][3]["isDownloaded"] = True
     with app.app_context():
         chapterfile.keep_all(app.hub)
     assert client.get("/api/series/7").get_json()["files"][0]["state"] == "waiting"
-    # The reading app's catalogue offers the comic file beside the book, once it is made.
-    series_server.queued = []
-    with app.app_context():
-        chapterfile.keep_all(app.hub)
+    # ...and the reading app is offered the shorter copy meanwhile, rather than nothing.
     client.post("/api/series/7/mine", json={"on": True})
     you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
-    assert "/opds/chapters-file/7/1" in client.get("/opds/mine", headers=you).get_data(as_text=True)
+    shorter = re.search(r'href="(/opds/chapters-file/7/1[^"]*)"', client.get("/opds/mine", headers=you).get_data(as_text=True)).group(1)
+    assert sum(n.endswith(".jpg") for n in zipfile.ZipFile(io.BytesIO(client.get(shorter, headers=you).data)).namelist()) == 9
+    # But a queue that never empties doesn't hold it back for ever: after an hour it is made again anyway.
+    import os
+    import time
+    with app.app_context():
+        for old in chapterfile.folder(app.hub, 7).glob("*.cbz"):
+            os.utime(old, (time.time() - chapterfile.BUSY_REMAKE - 60,) * 2)
+        chapterfile.keep_all(app.hub)
+    assert client.get("/api/series/7").get_json()["files"][0]["state"] == "ready"
     assert client.get("/opds/chapters-file/7/1", headers=you).status_code == 200
     # The whole series takes tags and a rating like a series of volumes.
     assert client.post("/api/series-info/rating", json={"name": "Tower Climber", "rating": 5}).status_code == 200
@@ -3544,6 +3561,322 @@ def test_a_followed_series_is_kept_as_one_comic_file_with_its_chapters(app, clie
     own = client.get("/api/series-info?name=Tower%20Climber").get_json()
     assert own["rating"] == 5 and own["tags"]["mine"] == ["Weekly"]
 
+
+
+def test_a_longer_copy_of_a_chapter_part_opens_where_you_were(app, client, series_server, monkeypatch):
+    import re
+    import zipfile
+    from bookhub import chapterfile
+
+    def chapter_file(cid):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for page in (1, 2, 3):
+                z.writestr("%d.jpg" % page, b"c%d-p%d" % (cid, page))
+        return buf.getvalue()
+
+    class Answer:
+        def __init__(self, data):
+            self.data, self.content, self.headers = data, data, {}
+
+        def iter_content(self, n):
+            yield self.data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(series.Series, "raw", lambda self, path, stream=False: Answer(
+        chapter_file(int(re.match(r"/api/v1/chapter/(\d+)/download", path).group(1)))))
+    # Hundreds of chapters still queued: a part with no comic file at all is made anyway.
+    series_server.queued = [99]
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
+        first = next(chapterfile.folder(app.hub, 7).glob("*.cbz"))
+        first_hash = kosync.partial_md5(first)
+    headers = {"x-auth-user": "You", "x-auth-key": hashlib.md5(b"demo").hexdigest()}
+    # Readest reports the page it is on counting from 0: page index 4 is chapter 2's second page.
+    client.put("/kosync/syncs/progress", headers=headers,
+               json={"document": first_hash, "percentage": 5 / 6, "progress": "4", "device": "Readest (iOS)"})
+    with app.app_context():  # understood as this series' part, not an unknown "doc:" file
+        assert not app.hub.con().execute("SELECT 1 FROM reading WHERE book_key LIKE 'doc:%'").fetchone()
+    # A third chapter arrives and the longer copy is made (the queue has emptied).
+    series_server.queued = []
+    series_server.chapters[7][2]["isDownloaded"] = True
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
+        longer_hash = kosync.partial_md5(next(chapterfile.folder(app.hub, 7).glob("*.cbz")))
+    assert longer_hash != first_hash
+    back = client.get("/kosync/syncs/progress/" + longer_hash, headers=headers).get_json()
+    # Readest opens page (progress - 1) counting from 0, so "5" lands on index 4: the same page of chapter 2.
+    assert back["progress"] == "5" and abs(back["percentage"] - 5 / 9) < 0.001
+    # Once the app reports on the longer copy itself, that's what it gets back.
+    client.put("/kosync/syncs/progress", headers=headers, json={"document": longer_hash, "percentage": 8 / 9, "progress": "7"})
+    assert client.get("/kosync/syncs/progress/" + longer_hash, headers=headers).get_json()["progress"] == "7"
+
+
+def test_graphic_novels_are_laid_out_for_komga_one_folder_per_series(tmp_path):
+    import types
+    import zipfile
+    from bookhub import kinds, komga
+
+    library_dir = tmp_path / "library"
+    library_dir.mkdir()
+
+    def comic(name, pages=2):
+        path = library_dir / name
+        with zipfile.ZipFile(path, "w") as z:
+            for page in range(pages):
+                z.writestr("%d.jpg" % page, b"x" * 2000)
+        return path
+
+    files = {1: comic("cats1.cbz"), 2: comic("cats2.cbz"), 3: comic("cats2-again.cbz"), 5: comic("one.epub"), 4: comic("novel.epub")}
+    books = [
+        {"id": 1, "key": "k1", "title": "Space Cats v01", "series": "Space: Cats", "series_index": 1.0, "formats": {"CBZ": "x"}},
+        {"id": 2, "key": "k2", "title": "Space Cats v02", "series": "Space: Cats", "series_index": 2.0, "formats": {"CBZ": "x"}},
+        # a second copy of volume 2: only one goes in
+        {"id": 3, "key": "k3", "title": "Space Cats v02", "series": "Space: Cats", "series_index": 2.0, "formats": {"CBZ": "x"}},
+        {"id": 4, "key": "k4", "title": "A Novel", "series": "", "series_index": 1.0, "formats": {"EPUB": "x"}},
+        {"id": 5, "key": "k5", "title": "Lonely Moon", "series": "", "series_index": 1.0, "formats": {"EPUB": "x"}},
+    ]
+    kind_of = {"k1": kinds.GRAPHIC, "k2": kinds.GRAPHIC, "k3": kinds.GRAPHIC, "k5": kinds.GRAPHIC, "k4": "fiction"}
+    library = types.SimpleNamespace(books=lambda: [book for book in books if book["id"] in files],
+                                    file_path=lambda book, fmt: files.get(book["id"]) if fmt in book["formats"] else None)
+    root = tmp_path / "komga"
+    root.mkdir()
+    hub = types.SimpleNamespace(library=library, kind_index=lambda: kind_of, config=types.SimpleNamespace(komga_comics_dir=root))
+
+    assert sorted(komga.wanted(hub)) == ["Space Cats/Space Cats - Volume 001.cbz", "Space Cats/Space Cats - Volume 002.cbz",
+                                         "_oneshots/Lonely Moon.epub"]
+    assert komga.sync_files(hub) == (3, 0)
+    assert (root / "Space Cats" / "Space Cats - Volume 002.cbz").read_bytes() == files[2].read_bytes()
+    assert komga.sync_files(hub) == (0, 0)  # nothing new: nothing copied again
+    # A one-shot taken out of the library goes from the folder too, and so does its empty folder.
+    del files[5]
+    assert komga.sync_files(hub) == (0, 1) and not (root / "_oneshots").exists()
+    # A half-copied file left by a crash is cleared away.
+    (root / "Space Cats" / "Space Cats - Volume 003.cbz.part").write_bytes(b"half")
+    assert komga.sync_files(hub) == (0, 1)
+
+
+def test_a_series_by_chapter_shows_in_komga_whether_more_chapters_are_coming():
+    from bookhub import komga
+
+    def info(status, downloaded):
+        chapters = [{"id": n, "name": "Ch. %d" % n, "number": n, "order": n, "read": False, "downloaded": n <= downloaded,
+                     "group": "", "page": 0, "uploaded": 0} for n in range(1, 11)]
+        return {"status": status, "chapters_list": chapters}
+
+    assert komga.note(info("Ongoing", 7)) == ("ONGOING", "7 of 10 chapters here; 3 more on the way.")
+    assert komga.note(info("Ongoing", 10)) == ("ONGOING", "All 10 chapters are here. Waiting for the next one to come out.")
+    assert komga.note(info("Hiatus", 10)) == ("HIATUS", "On hiatus. All 10 chapters are here; new ones come once it's back.")
+    assert komga.note(info("Finished", 10)) == ("ENDED", "Finished. All 10 chapters are here.")
+    assert komga.note(info("Licensed", 10))[0] == "ABANDONED"
+
+
+class FakeKomga:
+    """Stands in for Komga's API: books with one reader's progress, and the progress written to them."""
+
+    def __init__(self, series=(), books=()):
+        self.series, self.books, self.written = list(series), {book["id"]: book for book in books}, {}
+
+    def __call__(self, hub, method, path, auth=None, **kwargs):
+        if method == "POST" and path.endswith("/thumbnails"):
+            self.covers = getattr(self, "covers", [])
+            self.covers.append((path.split("/")[3], path.split("/")[4], kwargs["files"]["file"][1]))
+            return None
+        if method == "PATCH":
+            self.written[path.split("/")[4]] = kwargs["json"]
+            return None
+        # like the real one, Komga only shows a reader the file's name, never where it is on the server
+        hide = (lambda found: dict(found, url=found["url"].rsplit("/", 1)[-1])) if auth else (lambda found: found)
+        if path == "/api/v1/series":
+            return {"content": [hide(found) for found in self.series]}
+        return {"content": [hide(book) for book in self.books.values()]}  # /api/v1/books and /api/v1/series/<id>/books
+
+
+def _komga_book(book_id, url, pages=10, progress=None, name=""):
+    return {"id": book_id, "name": name, "url": url, "media": {"pagesCount": pages}, "readProgress": progress}
+
+
+def test_graphic_novel_reading_history_goes_both_ways_with_komga(app, monkeypatch):
+    from pathlib import Path
+    from bookhub import komga
+    with app.app_context():
+        hub = app.hub
+        you = hub.con().execute("SELECT * FROM profiles WHERE name='You'").fetchone()
+        read = {row["book_key"] for row in hub.con().execute("SELECT book_key FROM reading WHERE profile_id=?", (you["id"],))}
+        emma, persuasion, dracula = [b for b in hub.library.books() if b["key"] not in read][:3]  # three with no history yet
+        hub.save_reading(you["id"], emma["key"], status="finished", source="device")  # read in the reading app before
+        hub.save_reading(you["id"], dracula["key"], percent=50, source="device")
+        monkeypatch.setattr(komga, "placed", lambda hub: {
+            "Moon/Moon - Volume 001.cbz": (Path("x"), [emma["key"]]),
+            "Moon/Moon - Volume 002.cbz": (Path("x"), [persuasion["key"]]),
+            "Moon/Moon - Volume 003.cbz": (Path("x"), [dracula["key"]])})
+        fake = FakeKomga(books=[
+            _komga_book("v1", "/comics/Moon/Moon - Volume 001.cbz"),
+            _komga_book("v2", "/comics/Moon/Moon - Volume 002.cbz", progress={"completed": True, "page": 10, "readDate": "2026-10-20T08:00:00Z", "deviceName": "Paperback"}),
+            _komga_book("v3", "/comics/Moon/Moon - Volume 003.cbz", progress={"completed": False, "page": 5})])
+        monkeypatch.setattr(komga, "_call", fake)
+        assert komga.sync_graphic_history(hub, {"id": "lib"}, you, ("you@x", "pw")) == (1, 1)
+        # Finished in the reading app: finished in Komga too.
+        assert fake.written == {"v1": {"completed": True}}
+        # Finished in Paperback: in Family Hub's history, on the day it was read.
+        row = hub.con().execute("SELECT * FROM reading WHERE book_key=? AND profile_id=?", (persuasion["key"], you["id"])).fetchone()
+        assert row["status"] == "finished" and row["finished"] == "2026-10-20" and row["device"] == "Paperback"
+        # Halfway on both sides: left alone. Nothing ever goes backwards.
+        assert hub.con().execute("SELECT percent FROM reading WHERE book_key=?", (dracula["key"],)).fetchone()["percent"] == 50
+
+
+def test_chapters_read_on_either_side_are_read_on_both(app, client, series_server, monkeypatch):
+    from bookhub import komga
+    # chapter 1 is read on the series server; chapter 2 was read in Paperback
+    fake = FakeKomga(series=[{"id": "s7", "name": "Tower Climber", "url": "/data/mangas/Reading Site (EN)/Tower Climber"}],
+                     books=[_komga_book("c1", "/data/x/Chapter 1.cbz", name="Chapter 1"),
+                            _komga_book("c2", "/data/x/Chapter 2.cbz", name="Chapter 2", progress={"completed": True, "page": 10})])
+    monkeypatch.setattr(komga, "_call", fake)
+    with app.app_context():
+        you = app.hub.con().execute("SELECT * FROM profiles WHERE name='You'").fetchone()
+        assert komga.sync_chapter_history(app.hub, {"id": "lib"}, you, ("you@x", "pw")) == (1, 1)
+    assert fake.written == {"c1": {"completed": True}}
+    assert [c["isRead"] for c in series_server.chapters[7]] == [True, True, False, False]
+
+
+def test_where_you_stopped_in_a_chapter_in_the_reading_app_reaches_komga(app, client, series_server, monkeypatch):
+    import json
+    from bookhub import db, komga
+    fake = FakeKomga(series=[{"id": "s7", "name": "Tower Climber", "url": "/data/mangas/Reading Site (EN)/Tower Climber"}],
+                     books=[_komga_book("c3", "/data/x/Chapter 3.cbz", name="Chapter 3")])
+    monkeypatch.setattr(komga, "_call", fake)
+    with app.app_context():
+        hub = app.hub
+        you = hub.con().execute("SELECT * FROM profiles WHERE name='You'").fetchone()
+        # a part holding chapters 3 and 4, ten pages each, read up to page 5: halfway through chapter 3
+        parts = [{"label": "Chapter 3", "first": 1, "key": "73"}, {"label": "Chapter 4", "first": 11, "key": "74"}]
+        hub.con().execute("INSERT INTO joined_books(hash, kind, name, title, parts, pages, path, made) VALUES(?,?,?,?,?,?,?,?)",
+                          ("part2", "chapters", "7", "Tower Climber · Part 2", json.dumps(parts), 20, "x", db.now()))
+        db.kv_set(hub.con(), "joined:%d:part2" % you["id"], json.dumps({"percent": 25.0, "progress": "4", "device": "Readest", "updated": db.now()}))
+        hub.con().commit()
+        assert komga.sync_chapter_history(hub, {"id": "lib"}, you, ("you@x", "pw")) == (1, 0)
+    assert fake.written == {"c3": {"page": 5}}
+
+
+def test_komga_shows_the_real_cover_art_not_the_first_page(app, client, series_server, monkeypatch, tmp_path):
+    from pathlib import Path
+    from bookhub import komga
+    with app.app_context():
+        hub = app.hub
+        first, second = hub.library.books()[:2]
+        (hub.library.dir / first["path"] / "cover.jpg").write_bytes(b"cover of volume 1")
+        (hub.library.dir / second["path"] / "cover.jpg").write_bytes(b"cover of volume 2")
+        monkeypatch.setattr(komga, "placed", lambda hub: {
+            "Moon/Moon - Volume 002.cbz": (Path("x"), [second["key"]]),
+            "Moon/Moon - Volume 001.cbz": (Path("x"), [first["key"]])})
+        fake = FakeKomga(series=[{"id": "s7", "name": "Tower Climber", "url": "/data/mangas/Site/Tower Climber"}],
+                         books=[dict(_komga_book("v2", "/comics/Moon/Moon - Volume 002.cbz"), seriesId="moon"),
+                                dict(_komga_book("v1", "/comics/Moon/Moon - Volume 001.cbz"), seriesId="moon")])
+        monkeypatch.setattr(komga, "_call", fake)
+
+        class Picture:
+            headers, content = {"Content-Type": "image/jpeg"}, b"the site's cover"
+        monkeypatch.setattr(series.Series, "raw", lambda self, path, stream=False: Picture())
+        assert komga.sync_graphic_covers(hub, {"id": "gn"}) == 3
+        # each volume its own cover, and the series the first volume's
+        assert sorted(fake.covers) == [("books", "v1", b"cover of volume 1"), ("books", "v2", b"cover of volume 2"),
+                                       ("series", "moon", b"cover of volume 1")]
+        assert komga.sync_chapter_covers(hub, {"id": "ch"}) == 1 and fake.covers[-1] == ("series", "s7", b"the site's cover")
+        # Komga keeps every cover sent, so the same one isn't sent again
+        assert komga.sync_graphic_covers(hub, {"id": "gn"}) == 0 and komga.sync_chapter_covers(hub, {"id": "ch"}) == 0
+        # a one-shot gets its book cover only: Komga refuses a series cover for one
+        fake.books = {"o1": dict(_komga_book("o1", "/comics/_oneshots/Moon.cbz"), seriesId="o-series", oneshot=True)}
+        monkeypatch.setattr(komga, "placed", lambda hub: {"_oneshots/Moon.cbz": (Path("x"), [second["key"]])})
+        (hub.library.dir / second["path"] / "cover.jpg").write_bytes(b"one-shot cover")
+        assert komga.sync_graphic_covers(hub, {"id": "gn"}) == 1 and fake.covers[-1] == ("books", "o1", b"one-shot cover")
+
+
+def test_my_books_shows_what_is_new_for_the_graphic_novel_app(app, client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from bookhub import db, komga
+    when = lambda **ago: (datetime.now(timezone.utc) - timedelta(**ago)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    first_import, today = when(days=3), when(hours=1)
+    chapters = [  # the newest first, as Komga sorts them
+        {"id": "c108", "name": "Bato_Ch. 108", "number": 108, "seriesId": "s1", "seriesTitle": "Villain", "libraryId": "ch", "created": today, "readProgress": None},
+        {"id": "c107", "name": "Bato_Ch. 107", "number": 107, "seriesId": "s1", "seriesTitle": "Villain", "libraryId": "ch", "created": today,
+         "readProgress": {"completed": True}},
+        {"id": "v1", "name": "Moon - Volume 001", "number": 1, "seriesId": "s2", "seriesTitle": "Moon", "libraryId": "gn", "created": first_import, "readProgress": None},
+        {"id": "c1", "name": "Bato_Ch. 1", "number": 1, "seriesId": "s1", "seriesTitle": "Villain", "libraryId": "ch", "created": first_import, "readProgress": None},
+    ]
+
+    def fake(hub, method, path, auth=None, params=None, **kwargs):
+        if path == "/api/v1/libraries":
+            return [{"id": "ch", "root": "/data/mangas"}, {"id": "gn", "root": "/comics"}]
+        if path == "/api/v1/series":
+            return {"content": [{"id": "s1", "name": "Villain", "libraryId": "ch", "booksCount": 108, "booksReadCount": 107,
+                                 "booksUnreadCount": 1, "booksInProgressCount": 0, "metadata": {"status": "ONGOING", "summary": "All 108 here."}},
+                                {"id": "s2", "name": "Moon", "libraryId": "gn", "booksCount": 1, "booksReadCount": 1,
+                                 "booksUnreadCount": 0, "booksInProgressCount": 0, "metadata": {"status": "ENDED", "summary": ""}}]}
+        if params.get("sort") == "createdDate,asc":
+            return {"content": [book for book in reversed(chapters) if book["libraryId"] == params["library_id"]][:1]}
+        if params.get("sort") == "createdDate,desc":
+            return {"content": chapters}
+        return {"content": [{"url": "/comics/Moon/Moon - Volume 001.cbz"}]}  # what Komga has of the graphic novels
+
+    monkeypatch.setattr(komga, "_call", fake)
+    monkeypatch.setattr(komga, "placed", lambda hub: {"Moon/Moon - Volume 001.cbz": (None, []), "Moon/Moon - Volume 002.cbz": (None, [])})
+    monkeypatch.setattr(app.hub.config, "komga_url", "http://komga:25600")
+    monkeypatch.setattr(app.hub.config, "komga_user", "bookhub@x")
+    monkeypatch.setattr(app.hub.config, "komga_pass", "pw")
+    monkeypatch.setattr(app.hub.config, "komga_accounts", "You:you@familyhub.local:pw")
+    monkeypatch.setattr(app.hub.config, "comics_app", "paperback")
+    with app.app_context():
+        db.kv_set(app.hub.con(), "komga:coming", '{"Predatory Marriage": {"here": 36, "total": 120, "status": "Ongoing"}}')
+        app.hub.con().commit()
+    login(client, "You")
+    found = client.get("/api/me/comics-app").get_json()
+    assert found["ready"] and found["account"] == "you@familyhub.local"
+    # what came with the first import isn't "new"; the two chapters since are, with the translators' name taken off
+    [group] = found["added"]
+    assert group["title"] == "Villain" and [b["name"] for b in group["books"]] == ["Ch. 107", "Ch. 108"] and group["unread"] == 1
+    assert found["seen"] == ""
+    # what's still on its way: chapters downloading, and a volume not in Komga yet
+    assert {(item["title"], item["kind"], item["count"]) for item in found["coming"]} == {("Predatory Marriage", "chapters", 84), ("Moon", "graphic", 1)}
+    assert [item["title"] for item in found["shelf"]] == ["Villain", "Moon"]  # unread first
+    client.post("/api/me/comics-app/seen")
+    assert client.get("/api/me/comics-app").get_json()["seen"] >= today
+    # Without a Komga login for this person, it says so rather than show someone else's
+    monkeypatch.setattr(app.hub.config, "komga_accounts", "")
+    assert "no Komga login" in client.get("/api/me/comics-app").get_json()["message"]
+
+
+def test_komga_logins_are_matched_to_profiles(app, monkeypatch):
+    from bookhub import komga
+    monkeypatch.setattr(app.hub.config, "komga_accounts", "You:you@familyhub.local:pa_ss-1, Nobody:no@x:pw, Nan:broken")
+    with app.app_context():
+        assert [(profile["name"], auth) for profile, auth in komga.accounts(app.hub)] == [("You", ("you@familyhub.local", "pa_ss-1"))]
+
+
+def test_comics_go_to_paperback_instead_of_the_reading_app_when_asked(app, client, monkeypatch):
+    import base64
+    from bookhub import kinds
+    you = {"Authorization": "Basic " + base64.b64encode(b"You:demo").decode()}
+    with app.app_context():
+        profile_id = app.hub.con().execute("SELECT id FROM profiles WHERE name='You'").fetchone()["id"]
+        emma = next(b for b in app.hub.library.books() if b["title"] == "Emma")
+        app.hub.devices.set_shelf(profile_id, emma, True)
+    real_index = app.hub.kind_index
+    monkeypatch.setattr(app.hub, "kind_index", lambda: dict(real_index(), **{emma["key"]: kinds.GRAPHIC}))
+    assert b"Emma" in client.get("/opds/mine", headers=you).data  # the reading app gets it, as before
+    monkeypatch.setattr(app.hub.config, "comics_app", "paperback")
+    assert b"Emma" not in client.get("/opds/mine", headers=you).data
+    # nor anywhere else in the reading app's catalogue: only one app ever takes graphic novels in
+    assert b"Emma" not in client.get("/opds/all", headers=you).data
+    assert b"Emma" not in client.get("/opds/search?q=emma", headers=you).data
+    assert b"Persuasion" in client.get("/opds/all", headers=you).data
+    login(client, "You")
+    listed = client.get("/api/me/reading-app").get_json()
+    assert listed["comics_elsewhere"] is True and "Emma" not in [item["title"] for item in listed["items"]]
 
 
 def test_a_chapter_listed_twice_is_kept_once_preferring_the_18_plus_copy(app, client, series_server, monkeypatch):
@@ -3601,9 +3934,14 @@ def test_a_chapter_listed_twice_is_kept_once_preferring_the_18_plus_copy(app, cl
     epub = zipfile.ZipFile(io.BytesIO(client.get("/opds/chapters-book/7", headers=you).data))
     assert re.findall(r'<a href="[^"]+">([^<]+)</a>', epub.read("OEBPS/nav.xhtml").decode()) == ["Chapter 1 · Light (1)", "Chapter 2 · (18+)"]
     assert "Chapter 2 · (18+)</p>" in epub.read("OEBPS/pages/p00002.xhtml").decode()
-    # My books shows it as fetched.
-    items = [i for i in client.get("/api/me/reading-app").get_json()["items"] if i["kind"] == "chapters"]
-    assert [(i["version"][:4], i["state"]) for i in items] == [("2.2.", "on_app")]
+    # My books follows the comic file the reading app is offered: waiting until it is made, then fetched.
+    chapters_items = lambda: [(i["version"], i["state"]) for i in client.get("/api/me/reading-app").get_json()["items"] if i["kind"] == "chapters"]  # noqa: E731
+    assert chapters_items() == [("", "waiting")]
+    with app.app_context():
+        chapterfile.keep_all(app.hub)
+    assert client.get("/opds/chapters-file/7/1", headers=you).status_code == 200
+    [(version, state)] = chapters_items()
+    assert len(version) == 12 and state == "on_app"
 
 
 def test_no_comic_file_is_made_on_a_nearly_full_disk_and_the_older_one_stays(app, client, series_server, monkeypatch):

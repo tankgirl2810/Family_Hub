@@ -43,7 +43,10 @@ def create_app(config=None):
     @app.get("/")
     def index():
         html = (static / "index.html").read_text(encoding="utf-8")
-        return looks.page(html, looks.current(app.hub.con())), 200, {"Cache-Control": "no-cache"}
+        # frame-ancestors: no other page (another program on this host included) can show this one in a frame
+        # and trick a click out of someone signed in
+        return looks.page(html, looks.current(app.hub.con())), 200, {
+            "Cache-Control": "no-cache", "Content-Security-Policy": "frame-ancestors 'self'", "X-Content-Type-Options": "nosniff"}
 
     # The visuals at the top of Home, in a sandboxed frame (visuals.py). Nothing here is private: the frame is
     # only code and libraries, and the page sends it the colours and home town itself. No sign-in is asked for,

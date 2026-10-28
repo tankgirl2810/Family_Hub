@@ -35,6 +35,8 @@ def prowlarr_search(config, query, limit=60):
                                "open Prowlarr (Admin, Manage the programs) and remove or switch off sites that keep failing.")
     except (requests.RequestException, ValueError) as exc:
         raise IntegrationError("Could not reach Prowlarr: %s" % exc)
+    if not isinstance(releases, list):
+        raise IntegrationError("Prowlarr answered with something that is not a list of results.")
     results = [{
         "guid": release.get("guid"), "indexer_id": release.get("indexerId"), "indexer": release.get("indexer") or "",
         "title": release.get("title") or "", "size": release.get("size") or 0,
@@ -150,13 +152,16 @@ def hardcover_sync(hub, profile):
         payload = reply.json()
     except (requests.RequestException, ValueError) as exc:
         raise IntegrationError("Could not reach Hardcover: %s" % exc)
+    if not isinstance(payload, dict):
+        raise IntegrationError("Hardcover sent an answer Family Hub does not understand.")
     if payload.get("errors"):
-        raise IntegrationError("Hardcover returned an error: %s" % payload["errors"][0].get("message"))
+        first = payload["errors"][0] if isinstance(payload["errors"], list) else payload["errors"]
+        raise IntegrationError("Hardcover returned an error: %s" % (first.get("message") if isinstance(first, dict) else first))
     me = (payload.get("data") or {}).get("me")
     if isinstance(me, list):  # sometimes a list of one, sometimes not. ¯\_(ツ)_/¯
         me = me[0] if me else {}
     count = 0
-    for user_book in (me or {}).get("user_books", []):
+    for user_book in (me or {}).get("user_books") or []:  # a null there would crash a plain .get(..., [])
         book = user_book.get("book") or {}
         title = book.get("title")
         if not title:

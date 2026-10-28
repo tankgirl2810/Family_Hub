@@ -167,6 +167,8 @@ def run(hub, now=None):
             swap(hub, session, torrent_hash, name, pick)
         except integrations.IntegrationError as exc:
             log.warning("could not send %s instead of %s: %s", pick["title"], name, exc)
+            # wait like after an empty look, or Prowlarr gets asked again every single minute
+            watch["next"] = now + RETRY_MINUTES[min(watch["tries"], len(RETRY_MINUTES)) - 1] * 60
             continue
         state.pop(torrent_hash, None)
     known = {torrent.get("hash") for torrent in found}

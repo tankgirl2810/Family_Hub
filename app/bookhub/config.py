@@ -31,7 +31,7 @@ class Config:
         self.inbox_dir = _path("INBOX_DIR")
         self.attention_dir = _path("ATTENTION_DIR")
         self.tagpacks_dir = _path("TAGPACKS_DIR", str(Path(__file__).resolve().parents[2] / "tagpacks"))
-        self.port = int(os.environ.get("BOOKHUB_PORT", "8090"))
+        self.port = _int("BOOKHUB_PORT", 8090)
 
         self.guest_enabled = _bool("GUEST_ENABLED", True)
         self.guest_lan_only = _bool("GUEST_LAN_ONLY", True)
@@ -69,6 +69,16 @@ class Config:
         self.series_user = os.environ.get("SUWAYOMI_USER") or ""
         self.series_pass = os.environ.get("SUWAYOMI_PASS") or ""
         self.series_langs = os.environ.get("SERIES_LANGUAGES") or ""
+
+        # Komga, the comic server Paperback reads from (komga.py). COMICS_APP=paperback sends graphic novels and
+        # series by chapter there instead of to the book-reading app's catalogue (opds.py).
+        self.komga_url = (os.environ.get("KOMGA_URL") or "").rstrip("/")
+        self.komga_user = os.environ.get("KOMGA_USER") or ""
+        self.komga_pass = os.environ.get("KOMGA_PASS") or ""
+        self.komga_comics_dir = _path("KOMGA_COMICS_DIR")
+        # Each person's own Komga login, so reading history goes both ways: "Profile:email:password, Profile2:...".
+        self.komga_accounts = os.environ.get("KOMGA_ACCOUNTS") or ""
+        self.comics_app = (os.environ.get("COMICS_APP") or "readest").strip().lower()
 
         # The nightly copy to a second disk (docs/06). Off until SECOND_DISK_DIR names a folder that exists.
         self.second_disk_dir = _path("SECOND_DISK_DIR")
@@ -112,7 +122,8 @@ class Config:
             ("jellyfin", "JELLYFIN_PORT", 8096), ("suwayomi", "SUWAYOMI_PORT", 4567), ("komga", "KOMGA_PORT", 25600))}
 
         self.background_jobs = _bool("BACKGROUND_JOBS", True)
-        self.backup_keep = int(os.environ.get("BACKUP_KEEP", "30"))
+        # how many daily book-data files to keep; today's is always one of them
+        self.backup_keep = max(1, _int("BACKUP_KEEP", 30))
 
     @property
     def db_path(self):

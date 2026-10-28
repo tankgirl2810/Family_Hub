@@ -37,9 +37,9 @@ class GoodreadsError(Exception):
 def user_id(text):
     """The number from a profile link, a shelf link, or typed by itself. "" when there is none."""
     text = (text or "").strip()
-    if text.isdigit():
+    if re.fullmatch(r"[0-9]+", text):  # not isdigit(): that lets "²" and other digits Goodreads has never heard of through
         return text
-    found = re.search(r"goodreads\.com/(?:user/show|review/list(?:_rss)?|user/updates_rss)/(\d+)", text)
+    found = re.search(r"goodreads\.com/(?:user/show|review/list(?:_rss)?|user/updates_rss)/([0-9]+)", text)
     return found.group(1) if found else ""
 
 
@@ -252,6 +252,10 @@ def describe(hub, profile_id):
 
 def set_link(hub, profile_id, text):
     """Save a profile's Goodreads link, or forget it (and what was listed from it) when empty."""
+    if isinstance(text, int) and not isinstance(text, bool):
+        text = str(text)  # the profile number on its own, sent as a number
+    elif text is not None and not isinstance(text, str):
+        raise GoodreadsError("That does not look like a Goodreads profile link.")
     con = hub.con()
     text = (text or "").strip()
     if not text:

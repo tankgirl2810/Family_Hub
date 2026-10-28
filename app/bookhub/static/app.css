@@ -10,6 +10,8 @@
 /* min(100%, 360px) is the trick: columns are 360px wide, but never wider than a phone screen */
 .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 16px; align-items: start; }
 .row.end { align-items: flex-end; }
+/* a panel is a column in the design; one that is also a .row (the Sort form) lays out across */
+.panel.row { flex-direction: row; }
 .center { text-align: center; align-items: center; }
 .narrow { align-self: center; width: 100%; max-width: 580px; }
 .list > * { padding: 12px 0; border-top: 1px dashed var(--line); }
@@ -24,8 +26,8 @@ td .btn { white-space: nowrap; flex-shrink: 0; }
 .back { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; min-height: 42px; text-decoration: none; }
 details > summary { cursor: pointer; color: var(--accent); min-height: 42px; display: flex; align-items: center; }
 label.check { display: flex; align-items: center; gap: 10px; color: var(--ink); }
-/* only loose selects; the ones inside a .field are already styled by the design */
-select:not(.field select) { min-height: 34px; padding: 0 8px; border: 1px solid var(--line2); background: var(--bg); color: var(--ink); }
+/* only loose selects and text boxes (tag renames, "what is this film?"); the ones inside a .field are already styled by the design */
+select:not(.field select), :where(input[type="text"], input[type="search"]):not(.field input) { min-height: 34px; padding: 0 8px; border: 1px solid var(--line2); background: var(--bg); color: var(--ink); }
 input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
 .field input[type="file"] { padding: 8px 12px; }
 .btn.danger { --bd: var(--warn); color: var(--warn); }
@@ -126,7 +128,7 @@ details .steps { margin-top: 12px; }
 .torrent-title { font-weight: 600; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* A search that is still running. Quick look-ups have no count to show, so their bar sweeps instead of filling. */
-.search-progress .bar > i { transition: width .6s linear; }
+@media (prefers-reduced-motion: no-preference) { .search-progress .bar > i { transition: width .6s linear; } }
 .bar.busy { overflow: hidden; }
 .bar.busy > i { width: 30% !important; }
 @media (prefers-reduced-motion: no-preference) {
@@ -373,3 +375,19 @@ a.ink:hover { text-decoration-color: var(--accent); }
 
 /* The "Family Hub / Books" line repeated the section name in the bar above it. */
 .strip { display: none; }
+
+/* Text that may be one long word (a web address used as a title, say) breaks rather than pushing a phone sideways. */
+.wrap { min-width: 0; overflow-wrap: anywhere; }
+#main { overflow-wrap: break-word; }
+
+/* On a phone the corner pop-ups sit above the bottom bar, not over it. */
+@media (max-width: 860px) {
+  .tracker { bottom: calc(66px + env(safe-area-inset-bottom)); max-height: min(45vh, 360px); }
+  .making-note { bottom: calc(70px + env(safe-area-inset-bottom)); }
+}
+
+/* On a phone a shelf inside a panel keeps two covers a row, rather than one cover the size of the screen. */
+@media (max-width: 600px) {
+  .shelf { grid-template-columns: repeat(auto-fill, minmax(min(136px, 100%), 1fr)); gap: 22px 14px; }
+  .shelf .book .btn { max-width: 100%; white-space: normal; text-align: center; line-height: 1.2; padding-block: 6px; }
+}

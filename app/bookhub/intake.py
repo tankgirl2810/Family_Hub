@@ -159,8 +159,8 @@ class Intake:
         target = _free_name(ingest, name or path.name)
         # land it as "x.part" then rename. the library manager ignores .part, so it never grabs half a book
         partial = target.with_name(target.name + ".part")
-        size = path.stat().st_size
         try:
+            size = path.stat().st_size
             if move:
                 shutil.move(str(path), str(partial))
             else:
@@ -169,6 +169,12 @@ class Intake:
         except OSError:
             if not move:
                 partial.unlink(missing_ok=True)
+            elif partial.exists() and not path.exists():
+                # put it back where it was: a stranded .part is a book nobody would ever see again
+                try:
+                    shutil.move(str(partial), str(path))
+                except OSError:
+                    pass
             return None
         self._log(target.name, origin, size, "delivered")
         return target.name
@@ -231,9 +237,12 @@ class Intake:
             return [], CANNOT_OPEN
         books = [name for name in names if Path(name).suffix.lower() in extensions]
         pages = [name for name in names if Path(name).suffix.lower() in IMAGE_EXTENSIONS]
+        # a comic is basically ALL pictures (80%+). a saved web page has pictures too, but it's not a comic
+        comic_like = len(pages) >= MIN_COMIC_PAGES and len(pages) >= 0.8 * len(names)
+        if comic_like and all(Path(name).suffix.lower() == ".txt" for name in books):
+            books = []  # the only "book" is the scanner's release note
         if not books:
-            # a comic is basically ALL pictures (80%+). a saved web page has pictures too, but it's not a comic
-            if len(pages) < MIN_COMIC_PAGES or len(pages) < 0.8 * len(names):
+            if not comic_like:
                 return [], EMPTY_ARCHIVE
             # A comic that was never renamed: the file is already what the library wants.
             comic = path.stem + ARCHIVE_EXTENSIONS[path.suffix.lower()]
@@ -245,7 +254,15 @@ class Intake:
                 files = self._extract_books(path, Path(tmp), extensions)
             except (OSError, zipfile.BadZipFile, subprocess.SubprocessError):
                 return [], CANNOT_OPEN
+            # same rules as loose files: no Kindle twin of an EPUB, nothing the library already has
+            epubs = {book.stem.lower() for book in files if book.suffix.lower() == ".epub"}
             for book in files:
+                if book.suffix.lower() in TWIN_EXTENSIONS and book.stem.lower() in epubs:
+                    self._log(book.name, origin, book.stat().st_size, "skipped", TWIN)
+                    continue
+                if self.already_in_library(book):
+                    self._log(book.name, origin, book.stat().st_size, "skipped", ALREADY)
+                    continue
                 name = self._deliver(book, origin, move=True)
                 if name:
                     delivered.append(name)

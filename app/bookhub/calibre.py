@@ -13,6 +13,7 @@ import re
 import sqlite3
 import threading
 import zipfile
+import zlib
 from pathlib import Path
 
 from . import catalogues, db, kinds, tags
@@ -88,6 +89,8 @@ def volume_from_title(title, comic=False):
             continue
         if word == "Volume" and match["v"] == "V" and not comic and not match["n"].startswith("0"):
             continue  # "Vampire The Masquerade V5" is the fifth EDITION, not volume 5. volumes look like "v01" or "Vol. 5"
+        if word == "Volume" and match["v"] and not comic and "." in match["n"] and not match["n"].startswith("0"):
+            continue  # "Character Sheet v1.1" is a document's version. a manga's "v10.5" is a comic, so that's still a volume
         # A leading "[Group]" is a release detail; brackets before the number belong to the name: "(Marvel)", "(2016)".
         name = LEADING_BRACKETS.sub("", match["name"]).strip(" -_.,:")
         if len(name) < 2 or name.count("(") != name.count(")") or name.count("[") != name.count("]"):
@@ -179,7 +182,7 @@ class Library:
                     "id": row["id"], "title": row["title"], "path": row["path"], "has_cover": bool(row["has_cover"]),
                     "added": (row["timestamp"] or "")[:19].replace(" ", "T"), "pubdate": (row["pubdate"] or "")[:10],
                     "series_index": row["series_index"], "authors": [], "tags": [], "formats": {},
-                    "synopsis": "", "series": "", "isbn": "", "publisher": "", "raw_tags": [],
+                    "synopsis": "", "series": "", "own_series": "", "isbn": "", "publisher": "", "raw_tags": [],
                     "own_formats": {}, "sizes": {}, "copies": [], "copy_of": None,
                 }
 
@@ -199,7 +202,7 @@ class Library:
             except sqlite3.OperationalError:
                 pass  # a cut-down library without publishers
             for book, row in link("SELECT l.book, s.name FROM books_series_link l JOIN series s ON s.id=l.series"):
-                book["series"] = row[1]
+                book["series"] = book["own_series"] = row[1]  # own_series: what the library says, before any guess from the name
             for book, row in link("SELECT book, text FROM comments"):
                 book["synopsis"] = strip_html(row[1])
             for book, row in link("SELECT book, format, name, uncompressed_size FROM data"):
@@ -352,5 +355,5 @@ def estimate_pages(path):
                 if info.filename.lower().endswith((".xhtml", ".html", ".htm")):
                     total += len(strip_html(epub.read(info).decode("utf-8", "ignore")))
         return max(1, round(total / 1800)) if total else None
-    except (zipfile.BadZipFile, OSError, KeyError):
-        return None
+    except (zipfile.BadZipFile, OSError, KeyError, EOFError, zlib.error, RuntimeError, NotImplementedError, ValueError):
+        return None  # damaged, locked (RuntimeError) or oddly packed (NotImplementedError): no estimate, but no crash

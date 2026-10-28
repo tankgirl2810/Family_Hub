@@ -16,6 +16,7 @@ tags, ratings, shelves, its own cover) move with it to its new name.
 import json
 import logging
 import re
+import sqlite3
 import zipfile
 from pathlib import Path
 
@@ -268,7 +269,10 @@ class BookFix:
         if not title or not authors:
             raise FixError("Give both a title and at least one author.")
         old_key = book["key"]
-        self.hub.duplicates.backup()
+        try:
+            self.hub.duplicates.backup()
+        except (OSError, sqlite3.Error) as exc:
+            raise FixError("The library's database could not be copied first, so nothing was changed: %s" % exc)
         manager = self.hub.manager
         try:
             manager.set_field(book_id, "title", title)

@@ -124,6 +124,11 @@ def _seconds_between(first, second):
         return 1e9  # can't read the dates? call them "ages apart"
 
 
+def _dicts(answer):
+    """The objects in a list a service sent back, or none: an error page or a lone object isn't a list of releases."""
+    return [entry for entry in answer if isinstance(entry, dict)] if isinstance(answer, list) else []
+
+
 def jellyfin_auth(key):
     """Jellyfin 12 no longer accepts the old X-Emby-Token header; this form works on 10.x too."""
     return {"Authorization": 'MediaBrowser Token="%s"' % key}
@@ -178,6 +183,51 @@ def _fill(schema, values, only=None):
     for field in schema.get("fields") or []:
         if field.get("name") in values and (only is None or field.get("name") in only):
             field["value"] = values[field["name"]]
+
+
+def _item_path(kind, arr_id):
+    """Radarr's or Sonarr's address for one film or show."""
+    return ("movie/%d" if kind == "film" else "series/%d") % arr_id
+
+
+def _queue_details(kind):
+    """What to ask a queue or history list to include, so each entry says which film, show or episode it's for."""
+    return {"includeMovie": "true"} if kind == "film" else {"includeSeries": "true", "includeEpisode": "true"}
+
+
+def _command_is_for(body, arr_id, film):
+    """Whether a Radarr or Sonarr command (a search, say) is about this film or show."""
+    return arr_id in (body.get("movieIds") or []) if film else body.get("seriesId") == arr_id
+
+
+def _latest_season(show):
+    """The newest season of a show (not the specials), or 1 when Sonarr doesn't list any."""
+    numbers = [season["seasonNumber"] for season in (show or {}).get("seasons") or [] if season.get("seasonNumber")]
+    return max(numbers) if numbers else 1
+
+
+def _episodes_label(episodes):
+    """Which episodes one download holds: "S01E02", "Season 1", or "Seasons 1–3" for a pack of several."""
+    seasons = sorted({episode["seasonNumber"] for episode in episodes if episode.get("seasonNumber") is not None})
+    if not seasons:
+        return ""
+    if len(episodes) == 1:
+        return "S%02dE%02d" % (seasons[0], episodes[0].get("episodeNumber") or 0)
+    return "Season %d" % seasons[0] if len(seasons) == 1 else "Seasons %d–%d" % (seasons[0], seasons[-1])
+
+
+def _is_torrent_hash(text):
+    # a torrent hash is 40 hex chars (v1) or 64 (v2). anything else is someone poking at us
+    return bool(re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", text or ""))
+
+
+def _schema_for(schemas, implementation, offered_by):
+    """The settings form for one kind of thing ("QBittorrent", "Radarr") from a service's list of them."""
+    found = next((schema for schema in _dicts(schemas) if schema.get("implementation") == implementation), None)
+    if found is None:
+        # used to be a bare next(), whose StopIteration sailed past every except and took the whole page down
+        raise MediaError("%s does not offer %s here. Is it an older version?" % (offered_by, implementation))
+    return found
 
 
 class Arr:
@@ -246,7 +296,8 @@ class Media:
         if not self.config.vpn_configured:
             return {"configured": False, "ok": False, "message": "Waiting for VPN · not set up"}
         try:
-            ip = self.gluetun("/v1/publicip/ip") or {}
+            ip = self.gluetun("/v1/publicip/ip")
+            ip = ip if isinstance(ip, dict) else {}
         except MediaError as exc:
             return {"configured": True, "ok": False, "message": "VPN not connected · %s" % exc}
         port = self.forwarded_port()
@@ -271,12 +322,17 @@ class Media:
     def forwarded_port(self):
         for path in ("/v1/portforward", "/v1/openvpn/portforwarded"):
             try:
-                answer = self.gluetun(path) or {}
+                answer = self.gluetun(path)
             except MediaError:
                 continue
+            if not isinstance(answer, dict):
+                continue
             port = answer.get("port") or (answer.get("ports") or [0])[0]
-            if port:
-                return int(port)
+            try:
+                if port and int(port) > 0:
+                    return int(port)
+            except (TypeError, ValueError):
+                continue
         return 0
 
     @staticmethod
@@ -289,6 +345,8 @@ class Media:
                 found["ok"] = True
             except MediaError as exc:
                 found["error"] = str(exc)
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:  # answered, but not with what we asked for
+                found["error"] = "Unexpected answer: %s" % exc
         return found
 
     def status(self):
@@ -354,14 +412,18 @@ class Media:
             records = (self.arr(kind).get("queue", pageSize=500) or {}).get("records", [])
         except MediaError:
             return {}
-        incoming = {}
+        incoming, counted = {}, set()
         for record in records:
             owner = record.get("movieId") if kind == "film" else record.get("seriesId")
             if owner is None:
                 continue
             totals = incoming.setdefault(owner, {"size": 0, "left": 0, "episodes": 0, "ids": {}, "stuck": False})
-            totals["size"] += record.get("size") or 0
-            totals["left"] += record.get("sizeleft") or 0
+            # Sonarr lists a season pack once per episode, each with the WHOLE download's size: add it up once
+            download = (owner, record.get("downloadId") or id(record))
+            if download not in counted:
+                counted.add(download)
+                totals["size"] += record.get("size") or 0
+                totals["left"] += record.get("sizeleft") or 0
             totals["episodes"] += 1
             # Downloaded, but Radarr or Sonarr report a problem filing it: it will not arrive by itself.
             if not record.get("sizeleft") and (record.get("trackedDownloadStatus") or "").lower() in ("warning", "error"):
@@ -383,7 +445,7 @@ class Media:
 
     def item(self, kind, arr_id):
         arr = self.arr(kind)
-        return self.summary(arr.get(("movie/%d" if kind == "film" else "series/%d") % arr_id), kind, self.requested_by(kind),
+        return self.summary(arr.get(_item_path(kind, arr_id)), kind, self.requested_by(kind),
                             self.downloading(kind))
 
     def activity(self, kind, arr_id):
@@ -391,7 +453,7 @@ class Media:
         Each step: {"at": ISO time or "", "state": "done" | "active" | "bad" | "wait", "text": ...}."""
         arr = self.arr(kind)
         film = kind == "film"
-        item = arr.get(("movie/%d" if film else "series/%d") % arr_id)
+        item = arr.get(_item_path(kind, arr_id))
         title = item.get("title") or ""
         whose = {"movieId": arr_id} if film else {"seriesId": arr_id}
 
@@ -448,7 +510,7 @@ class Media:
         steps = []
         for command in arr.get("command") or []:
             body = command.get("body") or {}
-            mine = arr_id in (body.get("movieIds") or []) if film else body.get("seriesId") == arr_id
+            mine = _command_is_for(body, arr_id, film)
             if not mine or not command.get("name", "").endswith("Search"):
                 continue
             running = command.get("status") in ("queued", "started")
@@ -541,10 +603,8 @@ class Media:
             percent = int(100 * (size - left) / size) if size else 0
             status = (entry.get("status") or "").lower()
             added = entry.get("added", "") or ""
-            which = ""
-            if not film and episodes[0].get("seasonNumber") is not None:
-                which = ("S%02dE%02d: " % (episodes[0]["seasonNumber"], episodes[0].get("episodeNumber") or 0) if len(episodes) == 1
-                         else "Season %d: " % episodes[0]["seasonNumber"])
+            which = "" if film else _episodes_label(episodes)
+            which = which + ": " if which else ""
             problem = next((message for status_message in entry.get("statusMessages") or [] for message in status_message.get("messages") or []), "")
             if (entry.get("downloadId") or "").lower() in parked:
                 steps.append({"at": added, "state": "wait", "progress": percent, "stage": 50,
@@ -661,7 +721,7 @@ class Media:
         """Take a film or show off the server, files and all. Returns what was removed."""
         arr = self.arr(kind)
         item = self.item(kind, arr_id)
-        arr("DELETE", ("movie/%d" if kind == "film" else "series/%d") % arr_id,
+        arr("DELETE", _item_path(kind, arr_id),
             params={"deleteFiles": "true", "addImportListExclusion": "false"})
         con = self.hub.con()
         con.execute("DELETE FROM media_requests WHERE kind=? AND arr_id=?", (kind, arr_id))
@@ -689,7 +749,7 @@ class Media:
         anything already downloading carries on and is still filed."""
         arr = self.arr(kind)
         film = kind == "film"
-        path = ("movie/%d" if film else "series/%d") % arr_id
+        path = _item_path(kind, arr_id)
         item = arr.get(path)
         item["monitored"] = bool(on)
         arr("PUT", path, json=item)
@@ -700,7 +760,7 @@ class Media:
             return "Looking for %s again." % title
         for command in arr.get("command") or []:
             body = command.get("body") or {}
-            mine = arr_id in (body.get("movieIds") or []) if film else body.get("seriesId") == arr_id
+            mine = _command_is_for(body, arr_id, film)
             if mine and command.get("status") == "queued":
                 try:
                     arr("DELETE", "command/%d" % command["id"])
@@ -716,17 +776,18 @@ class Media:
             query = {"movieId": arr_id}
         else:
             if season is None:
-                numbers = [found["seasonNumber"] for found in (arr.get("series/%d" % arr_id).get("seasons") or []) if found.get("seasonNumber")]
-                season = max(numbers) if numbers else 1
+                season = _latest_season(arr.get("series/%d" % arr_id))
             query = {"seriesId": arr_id, "seasonNumber": season}
-        found = arr("GET", "release", params=query, timeout=SEARCH_TIMEOUT) or []
+        found = _dicts(arr("GET", "release", params=query, timeout=SEARCH_TIMEOUT))
         offered = [{
             "guid": release.get("guid"), "indexer_id": release.get("indexerId"), "title": release.get("title"),
             "quality": ((release.get("quality") or {}).get("quality") or {}).get("name", ""), "size": release.get("size") or 0,
             "indexer": release.get("indexer"), "seeders": release.get("seeders"), "rejected": bool(release.get("rejected")),
             "why": (release.get("rejections") or [""])[0],
         } for release in found]
-        offered.sort(key=lambda release: (release["rejected"], -(release["seeders"] or 0)))
+        # best first means the household order: 2160p, then 1080p, ... and the most seeders within each
+        offered.sort(key=lambda release: (release["rejected"], -QUALITY_RANK.get(_quality_from_name(release["quality"]), 0),
+                                          -(release["seeders"] or 0)))
         return offered[:60]
 
     def grab(self, kind, guid, indexer_id):
@@ -744,10 +805,9 @@ class Media:
         from concurrent.futures import ThreadPoolExecutor
         arr = self.arr(kind)
         film = kind == "film"
-        item = arr.get(("movie/%d" if film else "series/%d") % arr_id)
+        item = arr.get(_item_path(kind, arr_id))
         if not film and season is None:
-            numbers = [found["seasonNumber"] for found in item.get("seasons") or [] if found.get("seasonNumber")]
-            season = max(numbers) if numbers else 1
+            season = _latest_season(item)
         query = "%s %s" % (item.get("title") or "", item.get("year") or "") if film else "%s S%02d" % (item.get("title") or "", season)
         prowlarr_key = {"X-Api-Key": self._key("prowlarr")} if self.config.prowlarr_url and self._key("prowlarr") else None
         sites = []
@@ -766,14 +826,14 @@ class Media:
             # one thread per site, all writing into the same job dict, hence the lock. 2000 = movies, 5000 = TV (newznab)
             try:
                 rows = _call("GET", self.config.prowlarr_url + "/api/v1/search", prowlarr_key, timeout=SEARCH_TIMEOUT, params={
-                    "query": query.strip(), "type": "search", "indexerIds": site[0], "categories": 2000 if film else 5000, "limit": 100}) or []
+                    "query": query.strip(), "type": "search", "indexerIds": site[0], "categories": 2000 if film else 5000, "limit": 100})
             except MediaError:
                 rows = []
             with job["lock"]:
                 job["answered"] += 1
-                for release in rows:
+                for release in _dicts(rows):
                     link = release.get("magnetUrl") or release.get("downloadUrl")
-                    if link and release.get("guid") not in job["found"]:
+                    if link and release.get("guid") and release["guid"] not in job["found"]:
                         job["found"][release["guid"]] = {
                             "guid": release["guid"], "title": release.get("title") or "", "size": release.get("size") or 0,
                             "seeders": release.get("seeders"), "indexer": release.get("indexer") or site[1],
@@ -782,10 +842,11 @@ class Media:
 
         def checked():
             try:
-                job["checked"] = self.releases(kind, arr_id, season)
-            except MediaError as exc:
-                job["checked_error"] = str(exc)
-                job["checked"] = []
+                found = self.releases(kind, arr_id, season)
+            except Exception as exc:  # anything at all, or the search never says it's done
+                job["checked_error"] = str(exc) if isinstance(exc, MediaError) else "Unexpected answer: %s" % exc
+                found = []
+            job["checked"] = found
 
         threading.Thread(target=checked, daemon=True).start()
         if sites:
@@ -862,13 +923,13 @@ class Media:
                 continue
             try:
                 arr = self.arr(kind)
-                extra = {"includeMovie": "true"} if kind == "film" else {"includeSeries": "true", "includeEpisode": "true"}
+                extra = _queue_details(kind)
                 records = (arr.get("queue", pageSize=200, **extra) or {}).get("records", [])
             except MediaError as exc:
                 problems.append("%s: %s" % ("Films" if kind == "film" else "TV shows", exc))
                 continue
             requested = self.requested_by(kind)
-            groups = {}
+            groups, counted = {}, set()
             for record in records:
                 # a film is one line; a show gets one line per season (Sonarr lists every episode separately)
                 if kind == "film":
@@ -877,13 +938,18 @@ class Media:
                 else:
                     season = (record.get("episode") or {}).get("seasonNumber")
                     group_key = ("show", record.get("seriesId"), season)
-                    title = "%s · Season %s" % ((record.get("series") or {}).get("title") or record.get("title"), season)
+                    show_title = (record.get("series") or {}).get("title") or record.get("title")
+                    title = "%s · Season %s" % (show_title, season) if season is not None else show_title
                     owner = record.get("seriesId")
                 group = groups.setdefault(group_key, {"kind": kind, "title": title, "size": 0, "left": 0, "items": 0,
                                                       "status": record.get("trackedDownloadState") or record.get("status") or "",
                                                       "requested_by": requested.get(owner), "eta": record.get("estimatedCompletionTime")})
-                group["size"] += record.get("size") or 0
-                group["left"] += record.get("sizeleft") or 0
+                # every episode of a season pack carries the whole download's size: count each download once
+                download = (group_key, record.get("downloadId") or id(record))
+                if download not in counted:
+                    counted.add(download)
+                    group["size"] += record.get("size") or 0
+                    group["left"] += record.get("sizeleft") or 0
                 group["items"] += 1
                 messages = [message for status in record.get("statusMessages") or [] for message in status.get("messages") or []]
                 if messages:
@@ -903,7 +969,7 @@ class Media:
         self._need_qbit()
         try:
             session = integrations.qbit_session(self.config)
-            found = session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []
+            found = _dicts(session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json())
         except (integrations.IntegrationError, requests.RequestException, ValueError) as exc:
             raise MediaError("Could not reach qBittorrent: %s" % exc)
         # Radarr and Sonarr know which film or show each download is for, and who asked for it.
@@ -912,7 +978,7 @@ class Media:
             if not self.configured(kind):
                 continue
             try:
-                extra = {"includeMovie": "true"} if kind == "film" else {"includeSeries": "true", "includeEpisode": "true"}
+                extra = _queue_details(kind)
                 records = (self.arr(kind).get("queue", pageSize=200, **extra) or {}).get("records", [])
             except MediaError:
                 continue
@@ -924,11 +990,9 @@ class Media:
                 key = (record.get("downloadId") or "").lower()  # the downloadId IS qBittorrent's hash, in caps
                 owner = record.get("movieId") if kind == "film" else record.get("seriesId")
                 title = ((record.get("movie") if kind == "film" else record.get("series")) or {}).get("title")
-                in_download = episodes[key]
-                if kind == "show" and title and in_download[0].get("seasonNumber") is not None:
-                    # One episode, or a whole season in one download.
-                    title += (" · S%02dE%02d" % (in_download[0]["seasonNumber"], in_download[0].get("episodeNumber") or 0) if len(in_download) == 1
-                              else " · Season %d" % in_download[0]["seasonNumber"])
+                which = _episodes_label(episodes[key]) if kind == "show" else ""
+                if title and which:
+                    title += " · " + which  # one episode, a whole season, or several in one download
                 names[key] = {"title": title, "kind": kind, "id": owner, "requested_by": requested.get(owner)}
         books = self.config.qbit_category or "books"
         asked = {}
@@ -971,7 +1035,15 @@ class Media:
 
     def parked(self):
         """The downloads waiting for seed: {hash: {"since", "checked", "checking", "progress"}}."""
-        return json.loads(db.kv_get(self.hub.con(), "media:parked") or "{}")
+        return self._kept("media:parked")
+
+    def _kept(self, key):
+        """A {hash: ...} note kept between minutes; a damaged one starts again empty rather than stopping the Downloads page."""
+        try:
+            kept = json.loads(db.kv_get(self.hub.con(), key) or "{}")
+        except ValueError:
+            return {}
+        return kept if isinstance(kept, dict) else {}
 
     def _start_stop(self, session, hashes, start):
         """qBittorrent 5 calls these start and stop; older versions resume and pause."""
@@ -1001,11 +1073,11 @@ class Media:
             return
         now = now or _time.time()
         con = self.hub.con()
-        stalled = json.loads(db.kv_get(con, "media:stalled") or "{}")  # hash -> when it was first seen with nobody sharing
+        stalled = self._kept("media:stalled")  # hash -> when it was first seen with nobody sharing
         parked = self.parked()
         try:
             session = integrations.qbit_session(self.config)
-            found = {torrent.get("hash"): torrent for torrent in session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []}
+            found = {torrent.get("hash"): torrent for torrent in _dicts(session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json())}
         except (integrations.IntegrationError, requests.RequestException, ValueError):
             return
         from . import bookswap
@@ -1080,7 +1152,7 @@ class Media:
         parked = self.parked()
         if parked.pop(torrent_hash, None) is not None:
             db.kv_set(con, "media:parked", json.dumps(parked))
-            stalled = json.loads(db.kv_get(con, "media:stalled") or "{}")
+            stalled = self._kept("media:stalled")
             stalled[torrent_hash] = _time.time()  # the ten minutes start again
             db.kv_set(con, "media:stalled", json.dumps(stalled))
 
@@ -1089,8 +1161,7 @@ class Media:
         moved by hand (qBittorrent says "Files are missing"). Returns how many went."""
         from . import integrations
         self._need_qbit()
-        # a torrent hash is 40 hex chars (v1) or 64 (v2). anything else is someone poking at us
-        hashes = [torrent_hash for torrent_hash in hashes if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", torrent_hash or "")]
+        hashes = [torrent_hash for torrent_hash in hashes if _is_torrent_hash(torrent_hash)]
         if not hashes:
             return 0
         try:
@@ -1112,9 +1183,11 @@ class Media:
             prefs = session.get(self.config.qbit_url + "/api/v2/app/preferences", timeout=8).json()
             info = session.get(self.config.qbit_url + "/api/v2/transfer/info", timeout=8).json()
             slow = session.get(self.config.qbit_url + "/api/v2/transfer/speedLimitsMode", timeout=8).text.strip() == "1"
-            found = session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json() or []
+            found = _dicts(session.get(self.config.qbit_url + "/api/v2/torrents/info", timeout=8).json())
         except (integrations.IntegrationError, requests.RequestException, ValueError) as exc:
             raise MediaError("Could not reach qBittorrent: %s" % exc)
+        if not (isinstance(prefs, dict) and isinstance(info, dict)):
+            raise MediaError("Could not reach qBittorrent: it sent back something unexpected.")
         # How many downloads are doing what, so the Speed panel can say why the speed is what it is.
         counts = {"downloading": 0, "waiting_turn": 0, "waiting_seed": 0, "paused": 0, "done": 0}
         parked = self.parked()
@@ -1164,7 +1237,7 @@ class Media:
         """Pause, resume or move a download in qBittorrent's queue."""
         from . import integrations
         self._need_qbit()
-        if action not in TORRENT_ACTIONS or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", torrent_hash or ""):
+        if action not in TORRENT_ACTIONS or not _is_torrent_hash(torrent_hash):
             raise MediaError("That is not something a download can do.")
         try:
             session = integrations.qbit_session(self.config)
@@ -1274,7 +1347,7 @@ class Media:
         for kind in ("film", "show"):
             if not self.configured(kind):
                 continue
-            extra = {"includeMovie": "true"} if kind == "film" else {"includeSeries": "true", "includeEpisode": "true"}
+            extra = _queue_details(kind)
             try:
                 arr = self.arr(kind)
                 # eventType 3 = "downloadFolderImported", i.e. it landed in the library
@@ -1327,7 +1400,7 @@ class Media:
         """Where to watch a film, or each episode of a show, in Jellyfin. Episodes come from Sonarr, so ones not
         downloaded yet are listed too. {"jellyfin": {"link", "port"}, "watch_id"} or {..., "seasons": [...]}."""
         arr = self.arr(kind)
-        item = arr.get(("movie/%d" if kind == "film" else "series/%d") % arr_id)
+        item = arr.get(_item_path(kind, arr_id))
         where = {"jellyfin": {"link": self.config.jellyfin_link, "port": self.config.service_ports["jellyfin"]}}
         try:
             jellyfin_id = self._jellyfin_match(kind, item)
@@ -1388,7 +1461,7 @@ class Media:
                 steps.append((name, False, str(exc)))
             except integrations.IntegrationError as exc:
                 steps.append((name, False, str(exc)))
-            except (KeyError, TypeError, ValueError, requests.RequestException) as exc:
+            except (KeyError, TypeError, ValueError, AttributeError, requests.RequestException) as exc:
                 steps.append((name, False, "Unexpected answer: %s" % exc))
 
         from . import integrations, settings
@@ -1525,7 +1598,7 @@ class Media:
             _fill(existing, values, only=("host", "port", "useSsl", "username", "password"))
             arr("PUT", "downloadclient/%d" % existing["id"], params={"forceSave": "true"}, json=existing)
             return "Already connected · sign-in brought up to date"
-        schema = next(found for found in arr.get("downloadclient/schema") if found.get("implementation") == "QBittorrent")
+        schema = _schema_for(arr.get("downloadclient/schema"), "QBittorrent", arr.name.title())
         _fill(schema, values)
         body = dict(schema, name="qBittorrent (through the VPN)", enable=True, priority=1)
         # Saved even while the VPN is down; Radarr and Sonarr test it again by themselves later.
@@ -1540,8 +1613,7 @@ class Media:
         apps = _call("GET", self.config.prowlarr_url + "/api/v1/applications", headers) or []
         if any(app.get("implementation") == impl for app in apps):
             return "Already connected"
-        schema = next(found for found in _call("GET", self.config.prowlarr_url + "/api/v1/applications/schema", headers)
-                      if found.get("implementation") == impl)
+        schema = _schema_for(_call("GET", self.config.prowlarr_url + "/api/v1/applications/schema", headers), impl, "Prowlarr")
         arr = self.arr(kind)
         _fill(schema, {"prowlarrUrl": self.config.prowlarr_url, "baseUrl": arr.url, "apiKey": arr.key})
         _call("POST", self.config.prowlarr_url + "/api/v1/applications", headers, params={"forceSave": "true"},
@@ -1559,7 +1631,7 @@ class Media:
             _fill(existing, values, only=("host", "port", "useSsl", "username", "password"))
             _call("PUT", "%s/%d" % (url, existing["id"]), headers, params={"forceSave": "true"}, json=existing)
             return "Already connected · sign-in brought up to date"
-        schema = next(found for found in _call("GET", url + "/schema", headers) if found.get("implementation") == "QBittorrent")
+        schema = _schema_for(_call("GET", url + "/schema", headers), "QBittorrent", "Prowlarr")
         _fill(schema, values)
         _call("POST", url, headers, params={"forceSave": "true"}, json=dict(schema, name="qBittorrent", enable=True))
         return "Books from Discover go to qBittorrent, category %s" % values["category"]

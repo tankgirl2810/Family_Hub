@@ -31,6 +31,15 @@ def _grouped(finished):
     return lines
 
 
+def _month_of(day):
+    """"2026-10-27" -> 10; 0 for a date with no month in it ("2026", from an imported file, say)."""
+    try:
+        month = int((day or "")[5:7])
+    except ValueError:
+        return 0
+    return month if 1 <= month <= 12 else 0
+
+
 class Hub:
     def __init__(self, config):
         self.config = config
@@ -246,6 +255,7 @@ class Hub:
             return
         if percent is None:
             percent = 100.0 if status == "finished" else (old["percent"] if old else 0.0)
+        percent = min(100.0, max(0.0, float(percent)))
         if status is None:
             if percent >= 99:
                 status = "finished"
@@ -405,8 +415,8 @@ class Hub:
             pages_total += row["pages"] or 0
             if not self._matches(book_tags, row["author"], kind, value):
                 continue
-            month = int(row["finished"][5:7])  # "2026-10-27" -> 10
-            if month <= len(months):
+            month = _month_of(row["finished"])
+            if month and month <= len(months):
                 months[month - 1]["library" if in_library else "outside"] += 1
                 months[month - 1]["pages"] += row["pages"] or 0
         finished.sort(key=lambda item: item["finished"] or "", reverse=True)
@@ -590,7 +600,11 @@ class Hub:
         ids = {profile["name"].lower(): profile["id"] for profile in self.profiles()}
 
         def pid(name):
-            """The profile id for a name in the file, making a member profile for a name we've never met."""
+            """The profile id for a name in the file, making a member profile for a name we've never met. None for
+            no name at all, or "?" (whoever's profile was deleted): those would become passcode-less profiles."""
+            name = " ".join(str(name).split())
+            if not name or name == "?":
+                return None
             low = name.lower()
             if low not in ids:
                 cur = con.execute("INSERT INTO profiles(name, role, created) VALUES(?, 'member', ?)", (name, db.now()))
@@ -619,16 +633,20 @@ class Hub:
                 con.execute("INSERT OR IGNORE INTO family_tags(book_key, tag, added_by, created) VALUES(?,?,NULL,?)",
                             (key, db.clean_tag(tag), db.now()))
             for name, their_tags in (saved.get("personal_tags") or {}).items():
-                for tag in their_tags:
+                for tag in their_tags if pid(name) else []:
                     con.execute("INSERT OR IGNORE INTO personal_tags(book_key, profile_id, tag, created) VALUES(?,?,?,?)",
                                 (key, pid(name), db.clean_tag(tag), db.now()))
             for name in saved.get("shelves") or []:
-                con.execute("INSERT OR IGNORE INTO shelf(profile_id, book_key, added_by, added) VALUES(?,?,NULL,?)",
-                            (pid(name), key, db.now()))
+                if pid(name):
+                    con.execute("INSERT OR IGNORE INTO shelf(profile_id, book_key, added_by, added) VALUES(?,?,NULL,?)",
+                                (pid(name), key, db.now()))
             for name, rating in (saved.get("ratings") or {}).items():
-                con.execute("INSERT OR IGNORE INTO ratings(book_key, profile_id, rating, updated) VALUES(?,?,?,?)",
-                            (key, pid(name), max(1, min(5, int(rating))), db.now()))
+                if pid(name):
+                    con.execute("INSERT OR IGNORE INTO ratings(book_key, profile_id, rating, updated) VALUES(?,?,?,?)",
+                                (key, pid(name), max(1, min(5, int(rating))), db.now()))
             for name, reading in (saved.get("reading") or {}).items():
+                if not pid(name):
+                    continue
                 con.execute(
                     "INSERT OR IGNORE INTO reading(book_key, profile_id, status, percent, started, finished, source, updated) "
                     "VALUES(?,?,?,?,?,?,?,?)",
@@ -654,7 +672,8 @@ class Hub:
             partial.write_text(json.dumps(self.export_data(), indent=1, ensure_ascii=False), encoding="utf-8")
             partial.replace(target)
             files = sorted(folder.glob("bookdata-*.json"))
-            for old in files[:-self.config.backup_keep]:
+            # files[:-0] would be everything, so keep at least today's
+            for old in files[:-max(1, self.config.backup_keep)]:
                 old.unlink(missing_ok=True)
             db.kv_set(self.con(), "last_backup", db.now())
             self._dirty = False
@@ -719,8 +738,12 @@ class Hub:
             if by_size:
                 for fmt in book["formats"]:
                     path = self.library.file_path(book, fmt)
-                    if path and (fmt.lower(), path.stat().st_size) in by_size:
-                        origin = by_size[(fmt.lower(), path.stat().st_size)]
+                    try:
+                        size = path.stat().st_size if path else None
+                    except OSError:  # the library manager moved it since we looked
+                        size = None
+                    if size is not None and (fmt.lower(), size) in by_size:
+                        origin = by_size[(fmt.lower(), size)]
                         break
             kind, found_tags = kinds.guess(book["title"], book["author"], book["series"], book["tags"],
                                            book["formats"], origin)
@@ -735,61 +758,50 @@ class Hub:
 
 
 def _guarded(app, what, job):
-    """Run one job; if it blows up, log it and let the rest of the minute carry on."""
+    """Run one job; if it blows up, log it and let the rest of the minute carry on. True when it worked."""
     try:
         job()
+        return True
     except Exception as exc:
         app.logger.warning("%s: %s", what, exc)
+        return False
 
 
-def _housekeeping(hub, app, tick):
-    """One minute of chores. tick counts minutes since start-up, so "tick % 10 == 5" means every ten minutes,
-    five minutes in. the odd offsets are on purpose: they stop the slow jobs all piling onto the same minute."""
-    from . import bookswap, chapterfile, integrations, joined, kosync, recommend, visuals, watchlist
-    if tick % 10 == 0:
-        hub.load_tagpacks()
-        kosync.index_library(hub)
-        hub.fill_page_counts(limit=200)
+def chores_due(hub, app, tick):
+    """[(what failing would mean, job)] for this minute, in the order they run. tick counts minutes since start-up,
+    so "tick % 10 == 5" means every ten minutes, five minutes in. the odd offsets are on purpose: they stop the
+    slow jobs all piling onto the same minute."""
+    from . import bookswap, chapterfile, integrations, joined, komga, kosync, recommend, visuals, watchlist
+    chores = []
 
-        def adopt_progress():  # joined series books a reading app reported progress in before they were recorded
-            if tick == 0:
-                joined.record_existing(hub)
-            joined.adopt(hub)
-        _guarded(app, "could not match reading-app progress in joined books", adopt_progress)
-    hub.intake.tidy_inbox()
-    hub.import_downloads()
-    hub.ingest_stuck = hub.intake.nudge_stuck()
-    hub.sort_new_books(limit=500)
-    if tick % 10 == 5:  # followed series by chapter, joined into comic files as chapters arrive
-        if hub.series.configured:
-            try:  # finished and cancelled series are no longer checked for new chapters
+    def every(minutes, offset, what, job):
+        if tick % minutes == offset:
+            chores.append((what, job))
+
+    def always(what, job):
+        chores.append((what, job))
+
+    def adopt_progress():  # joined series books a reading app reported progress in before they were recorded
+        if tick == 0:
+            joined.record_existing(hub)
+        joined.adopt(hub)
+
+    def nudge_stuck():
+        hub.ingest_stuck = hub.intake.nudge_stuck()
+
+    def chapter_series():  # followed series by chapter, joined into comic files as chapters arrive
+        try:
+            if hub.series.configured:  # finished and cancelled series are no longer checked for new chapters
                 hub.series.rest_finished()
-            except series.SeriesError as exc:
-                app.logger.warning("could not put finished series aside: %s", exc)
+        except series.SeriesError as exc:
+            app.logger.warning("could not put finished series aside: %s", exc)
         chapterfile.start(hub, app)
-    # a book download whose sharers have all gone is swapped for a copy someone is sharing
-    _guarded(app, "could not look at stuck book downloads", lambda: bookswap.run(hub))
-    if tick % 10 == 3:
-        goodreads.reconcile(hub)  # books that were only on Goodreads and have now arrived
-    hub.devices.send_queued()
-    hub.catalogues.run(limit=4)  # a few books a minute, so catalogues are not hammered
-    readers.run(hub, limit=4)
-    hub.backup_if_needed()
-    if secondcopy.due(hub):  # once a day, after today's book-data file is written
-        secondcopy.start(hub, app)
-    if tick % 60 == 11:  # hourly: is anyone's weekly list of suggestions due?
-        recommend.refresh_due(hub, app.logger.warning)
-    if tick % 5 == 2:  # the VPN can hand out a new port when it reconnects
-        _guarded(app, "could not pass the VPN's port to qBittorrent", hub.media.sync_vpn_port)
-    # a few watchlist entries that are due another look (each every six hours)
-    _guarded(app, "could not check the watchlists", lambda: watchlist.run(hub))
-    # new visuals from the household's GitHub repository, checked hourly
-    _guarded(app, "could not check for new visuals", lambda: visuals.sync(hub))
-    # downloads nobody is sharing wait at the back of the line
-    _guarded(app, "could not check for downloads waiting for seed", hub.media.park_stalled)
-    if tick % 360 == 7:  # every six hours
-        goodreads.sync_all(hub, app.logger.warning)
-    if tick % 360 == 5:  # every six hours
+
+    def second_copy():  # once a day, after today's book-data file is written
+        if secondcopy.due(hub):
+            secondcopy.start(hub, app)
+
+    def trackers():
         for profile in hub.profiles():
             if not profile["hardcover_token"]:
                 continue
@@ -797,6 +809,46 @@ def _housekeeping(hub, app, tick):
                 integrations.hardcover_sync(hub, profile)
             except integrations.IntegrationError as exc:
                 app.logger.warning("tracker sync failed for %s: %s", profile["name"], exc)
+
+    every(10, 0, "could not read the tag packs", hub.load_tagpacks)
+    every(10, 0, "could not index the library for reading apps", lambda: kosync.index_library(hub))
+    every(10, 0, "could not count pages", lambda: hub.fill_page_counts(limit=200))
+    every(10, 0, "could not match reading-app progress in joined books", adopt_progress)
+    always("could not tidy the inbox", hub.intake.tidy_inbox)
+    always("could not import downloads", hub.import_downloads)
+    always("could not nudge the library manager", nudge_stuck)
+    always("could not sort new books", lambda: hub.sort_new_books(limit=500))
+    every(10, 5, "could not keep the chapter series as comic files", chapter_series)
+    # a book download whose sharers have all gone is swapped for a copy someone is sharing
+    always("could not look at stuck book downloads", lambda: bookswap.run(hub))
+    every(10, 3, "could not match Goodreads books that arrived", lambda: goodreads.reconcile(hub))
+    every(10, 7, "could not start the Komga sync", lambda: komga.start(hub, app))  # graphic novels and chapters, for Paperback
+    always("could not send books to devices", hub.devices.send_queued)
+    always("could not look books up in catalogues", lambda: hub.catalogues.run(limit=4))  # a few a minute, not hammered
+    always("could not ask the readers' sites", lambda: readers.run(hub, limit=4))
+    always("could not back up the book data", hub.backup_if_needed)
+    always("could not start the copy to the second disk", second_copy)
+    every(60, 11, "could not refresh suggestions", lambda: recommend.refresh_due(hub, app.logger.warning))  # hourly
+    every(5, 2, "could not pass the VPN's port to qBittorrent", hub.media.sync_vpn_port)  # a reconnect can change it
+    # a few watchlist entries that are due another look (each every six hours)
+    always("could not check the watchlists", lambda: watchlist.run(hub))
+    # new visuals from the household's GitHub repository, checked hourly
+    always("could not check for new visuals", lambda: visuals.sync(hub))
+    # downloads nobody is sharing wait at the back of the line
+    always("could not check for downloads waiting for seed", hub.media.park_stalled)
+    every(360, 7, "could not sync Goodreads shelves", lambda: goodreads.sync_all(hub, app.logger.warning))
+    every(360, 5, "could not sync reading trackers", trackers)
+    return chores
+
+
+def _housekeeping(hub, app, tick):
+    """One minute of chores, each on its own: one blowing up (a service away, a file gone) no longer skips the
+    rest of the minute, which used to mean no backups or device sends while, say, the downloads folder was odd."""
+    for what, job in chores_due(hub, app, tick):
+        db.finish(hub.config.db_path)  # keep what the last chore wrote, even if it forgot to commit
+        if not _guarded(app, what, job):
+            # a write that died half way would otherwise sit on SQLite's write lock for the rest of the minute
+            db.finish(hub.config.db_path, failed=True)
 
 
 def start_background(hub, app):

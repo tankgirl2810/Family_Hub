@@ -54,7 +54,8 @@ def _digest(path):
 def details(book):
     """Which details an entry carries. Calibre writes the year 0101 for "no date"."""
     return {
-        "synopsis": bool(book["synopsis"].strip()), "tags": bool(book["raw_tags"]), "series": bool(book["series"]),
+        # the library's own series: one only guessed from the file name ("Foo v01") isn't there to copy across
+        "synopsis": bool(book["synopsis"].strip()), "tags": bool(book["raw_tags"]), "series": bool(book.get("own_series", book["series"])),
         "publisher": bool(book["publisher"]), "isbn": bool(book["isbn"]),
         "pubdate": bool(book["pubdate"]) and not book["pubdate"].startswith("0101"), "cover": book["has_cover"],
     }
@@ -127,8 +128,13 @@ class Duplicates:
 
     def _judge(self, keep, spares, books, doubtful):
         """(class, why, details that would be lost, details to copy across) for a set with this keeper."""
+        mine = details(keep)
         if all(self._same_files(keep, spare) for spare in spares):
-            return IDENTICAL, "", [], []
+            # same bytes, but a spare may still carry a description or series someone typed in. those come across too
+            lost = sorted({LABEL[field] for spare in spares for field in FIXED if details(spare)[field] and not mine[field]})
+            if lost:
+                return REVIEW, "The kept entry lacks the %s, which the library manager cannot copy across." % " and ".join(lost), lost, []
+            return IDENTICAL, "", [], self._copies(mine, spares)
         if doubtful:
             return REVIEW, "The title looks like a file name or the author like a user name, so these may be different documents.", [], []
         if not all(self._similar(keep, spare) for spare in spares):
@@ -140,7 +146,6 @@ class Duplicates:
             return DUPLICATE, "", [], []
         # keep the better file, haul the other's details across. BUT the library manager can't copy an ISBN,
         # a date or a cover, so if we'd lose one of those a human gets to decide
-        mine = details(keep)
         lost = sorted({LABEL[field] for spare in spares for field in FIXED if details(spare)[field] and not mine[field]})
         if lost:
             why = "The entry with the better file lacks the %s, which the library manager cannot copy across." % " and ".join(lost)
@@ -291,12 +296,15 @@ class Duplicates:
                     except (OSError, sqlite3.Error) as exc:
                         self.job["problems"].append("The library's database could not be copied first, so nothing was changed: %s" % exc)
                         return
+                    refused = 0  # the library manager's failures in a row
                     for plan in wanted:
                         try:
                             self.carry_out(plan, keep)
-                        except (ValueError, OSError, librarymanager.ManagerError) as exc:
+                            refused = 0
+                        except (ValueError, OSError, sqlite3.Error, librarymanager.ManagerError) as exc:
                             self.job["problems"].append("%s: %s" % (plan["title"], exc))
-                            if isinstance(exc, librarymanager.ManagerError) and len(self.job["problems"]) >= 3:
+                            refused = refused + 1 if isinstance(exc, librarymanager.ManagerError) else 0
+                            if refused >= 3:
                                 self.job["problems"].append("Stopped after three failures in a row with the library manager.")
                                 break
                         self.job["done"] += 1

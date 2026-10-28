@@ -9,6 +9,7 @@ compute for every file in the library so progress lands on the right book.
 """
 import hashlib
 import hmac
+import math
 import threading
 import time
 from datetime import datetime, timezone
@@ -46,12 +47,12 @@ def index_library(hub):
             path = hub.library.file_path(book, fmt)
             if not path:
                 continue
-            mtime = path.stat().st_mtime
-            if known.get(str(path)) == mtime:
-                continue
             try:
+                mtime = path.stat().st_mtime
+                if known.get(str(path)) == mtime:
+                    continue
                 digest = partial_md5(path)
-            except OSError:
+            except OSError:  # moved or removed since the library was read
                 continue
             con.execute("DELETE FROM doc_hashes WHERE path=?", (str(path),))
             con.execute(
@@ -116,14 +117,18 @@ def put_progress():
     profile = _profile()
     if not profile:
         return _unauthorized()
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}  # a JSON list or a bare string is no progress report
     document = str(data.get("document") or "")[:255]
     if not document:
         return jsonify({"code": 2003, "message": "Field 'document' not provided."}), 403
     try:
-        percentage = max(0.0, min(1.0, float(data.get("percentage") or 0)))
+        percentage = float(data.get("percentage") or 0)
     except (TypeError, ValueError):
         percentage = 0.0
+    # "nan" slips through min/max as 1.0, which would mark the book finished
+    percentage = max(0.0, min(1.0, percentage)) if math.isfinite(percentage) else 0.0
 
     hub = current_app.hub
     con = hub.con()
@@ -157,7 +162,8 @@ def get_progress(document):
     row = con.execute("SELECT book_key FROM doc_hashes WHERE hash=?", (document,)).fetchone()
     if not row:
         from . import joined
-        kept = joined.kept_progress(current_app.hub, profile["id"], document)
+        kept = (joined.kept_progress(current_app.hub, profile["id"], document)
+                or joined.carried_progress(current_app.hub, profile["id"], document))
         if kept:
             return jsonify({"document": document, "percentage": kept["percent"] / 100.0, "progress": kept["progress"],
                             "device": kept["device"], "device_id": "", "timestamp": _timestamp(kept["updated"])})

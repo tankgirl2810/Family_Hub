@@ -20,8 +20,18 @@ from . import db
 NAV_ENTRY = re.compile(r'<a href="pages/p(\d+)\.xhtml">([^<]*)</a>')
 
 
+COMIC_PAGE = re.compile(r'<Page Image="(\d+)" Bookmark="([^"]*)"/>')
+
+
 def describe(path):
-    """(title, [(contents entry, first page)], pages) of a joined EPUB, read from the file itself."""
+    """(title, [(contents entry, first page)], pages) of a joined EPUB or a chapter part's CBZ, read from the file itself."""
+    if str(path).lower().endswith(".cbz"):
+        with zipfile.ZipFile(path) as cbz:
+            info = cbz.read("ComicInfo.xml").decode("utf-8", "replace")
+        title, pages = re.search(r"<Title>(.*?)</Title>", info, re.S), re.search(r"<PageCount>(\d+)</PageCount>", info)
+        # ComicInfo counts pictures from 0; the EPUBs (and joined_books) count pages from 1
+        toc = [(html.unescape(label), int(at) + 1) for at, label in COMIC_PAGE.findall(info)]
+        return html.unescape(title.group(1)) if title else "", toc, int(pages.group(1)) if pages else 0
     with zipfile.ZipFile(path) as epub:
         nav = epub.read("OEBPS/nav.xhtml").decode("utf-8", "replace")
         opf = epub.read("OEBPS/content.opf").decode("utf-8", "replace")
@@ -97,6 +107,42 @@ def apply(hub, profile_id, joined, percent, device="", progress="", finished=Non
 def kept_progress(hub, profile_id, digest):
     value = db.kv_get(hub.con(), "joined:%d:%s" % (profile_id, digest))
     return json.loads(value) if value else None
+
+
+def _page(joined, kept):
+    """The page (counting from 1) a kept report points at. Comic apps report the page they're on counting from 0
+    (Readest sends its page index as "progress"); anything else falls back to the percentage."""
+    progress = str(kept.get("progress") or "")
+    if progress.isdigit():
+        return int(progress) + 1
+    return max(1, math.ceil((kept.get("percent") or 0) / 100.0 * max(1, joined["pages"])))
+
+
+def carried_progress(hub, profile_id, digest):
+    """A new copy of a chapter part the app hasn't reported on yet (it grew, or arrived as a CBZ instead of an
+    EPUB): the place from the copy read most recently, moved to the same page of the same chapter in this one.
+    None when the place is in a chapter this copy doesn't have.
+
+    Readest treats every new file as a brand new book, so without this the longer part opens on page 1."""
+    this = find(hub, digest)
+    if not this or this["kind"] != "chapters":
+        return None
+    starts = {str(part["key"]): part["first"] for part in this["parts"] if part["key"]}
+    places = []
+    for row in hub.con().execute("SELECT * FROM joined_books WHERE kind='chapters' AND name=? AND hash!=?", (this["name"], digest)):
+        kept = kept_progress(hub, profile_id, row["hash"])
+        if kept:
+            places.append((kept["updated"], dict(row, parts=json.loads(row["parts"] or "[]")), kept))
+    for _, old, kept in sorted(places, key=lambda place: place[0], reverse=True):
+        page = _page(old, kept)
+        # the chapter the page is in: the last one starting on or before it
+        chapter = next((part for part in reversed(old["parts"]) if part["first"] <= page), None)
+        if chapter and str(chapter["key"]) in starts:
+            moved = min(this["pages"], starts[str(chapter["key"])] + page - chapter["first"])
+            # "progress" goes back as the page counting from 1: Readest opens page (progress - 1) counting from 0
+            return {"percent": round(100.0 * moved / max(1, this["pages"]), 2), "progress": str(moved),
+                    "device": kept["device"], "updated": db.now()}
+    return None
 
 
 def adopt(hub):

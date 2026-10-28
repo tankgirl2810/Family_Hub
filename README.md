@@ -87,6 +87,7 @@ both, and how two people can work on the code together.
 15. [What you need to get, and where it goes](docs/15-what-you-need.md)
 16. [Visuals on Home](docs/16-visuals-on-home.md)
 17. [The watchlist](docs/17-watchlist.md)
+18. [Comics in Paperback](docs/18-comics-in-paperback.md)
 
 ## How the pieces fit
 

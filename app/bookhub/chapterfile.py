@@ -14,6 +14,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -23,6 +24,9 @@ from . import seriesfile
 CHAPTERS_PER_PART = 50  # the same parts as the reading app's book of the series (opds.py)
 FORMAT = 2  # raised when the files are made differently, so every part is made (and fetched by reading apps) again
 MIN_FREE = 3 * 1024 ** 3  # a book or comic file is not started with less space than this left on the disk
+# while the series server still has chapters queued, an unfinished part is made again at most this often. the
+# queue can sit at hundreds of chapters for days, so "wait until it's empty" meant new chapters never arrived
+BUSY_REMAKE = 3600
 log = logging.getLogger("bookhub")
 
 
@@ -100,17 +104,26 @@ def _path(hub, series_id, part_no, chapters):
     return folder(hub, series_id) / ("part%02d-%s.cbz" % (part_no, stamp))
 
 
+def stamp_of(path):
+    """"part03-1a2b3c4d5e6f.cbz" -> "1a2b3c4d5e6f": names one made copy of a part."""
+    return Path(path).stem.partition("-")[2]
+
+
 def files(hub, info):
     """Each part of a series as a comic file: its name, chapters, and whether it is ready, being made or failed."""
     found = parts(info)
     listed = []
     for part_no, chapters in enumerate(found, 1):
         path = _path(hub, info["id"], part_no, chapters)
+        state = _state(info["id"], part_no, path)
+        # not made with the newest chapters yet, but a shorter copy can still be downloaded meanwhile (ready_file older=True)
+        older = None if state == "ready" or not path.parent.is_dir() else next(iter(sorted(
+            path.parent.glob("part%02d-*.cbz" % part_no), key=lambda file: file.stat().st_mtime, reverse=True)), None)
         listed.append({
             "part": part_no, "title": part_title(info["title"], chapters, part_no, len(found)), "chapters": len(chapters),
-            "first": chapter_name(chapters[0]), "last": chapter_name(chapters[-1]),
-            "state": _state(info["id"], part_no, path),
-            "size": path.stat().st_size if path.is_file() else 0, "error": _failed.get((info["id"], part_no), ""),
+            "first": chapter_name(chapters[0]), "last": chapter_name(chapters[-1]), "state": state, "older": bool(older),
+            "size": path.stat().st_size if path.is_file() else older.stat().st_size if older else 0,
+            "error": _failed.get((info["id"], part_no), ""),
         })
     return listed
 
@@ -153,14 +166,22 @@ def _comicinfo(info, title, part_no, count, starts, pages):
                 escape("Chapters: " + ", ".join(name for _, name in starts)), marks))
 
 
+def record(hub, info, path, chapters):
+    """Tell joined.py about a made part, so a reading app's place in it is understood (and carried over to the
+    next copy of the part). The chapter list comes from the file's own ComicInfo, so it is always what's inside."""
+    from . import joined
+    joined.record(hub, path, "chapters", info["id"], dict(zip(labels(chapters), (chapter["id"] for chapter in chapters))))
+
+
 def build(hub, info, part_no, chapters, count, target):
     """Join one part's chapters into a CBZ. Pictures go in as they are; they are already compressed."""
     scratch = Path(tempfile.mkdtemp())
     unfinished = target.with_name(target.name + ".part")
     try:
         starts, page = [], 0
+        # unique entries (labels): two chapters both called "Notice" must still be told apart by joined.py
         with zipfile.ZipFile(unfinished, "w", zipfile.ZIP_STORED) as cbz:
-            for chapter_no, chapter in enumerate(chapters, 1):
+            for chapter_no, (chapter, label) in enumerate(zip(chapters, labels(chapters)), 1):
                 download = scratch / "chapter.cbz"
                 with hub.series.raw("/api/v1/chapter/%d/download" % chapter["id"], stream=True) as reply, open(download, "wb") as file:
                     for block in reply.iter_content(1 << 20):
@@ -170,8 +191,8 @@ def build(hub, info, part_no, chapters, count, target):
                                    key=seriesfile._natural)
                     if not names:
                         continue
-                    where = "%04d %s" % (chapter_no, re.sub(r'[\\/:*?"<>|]+', " ", chapter_name(chapter)).strip()[:80])
-                    starts.append((page, chapter_name(chapter)))
+                    where = "%04d %s" % (chapter_no, re.sub(r'[\\/:*?"<>|]+', " ", label).strip()[:80])
+                    starts.append((page, label))
                     for picture_no, name in enumerate(names, 1):
                         cbz.writestr("%s/%04d%s" % (where, picture_no, Path(name).suffix.lower()), chapter_zip.read(name))
                         page += 1
@@ -182,30 +203,38 @@ def build(hub, info, part_no, chapters, count, target):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _recorded(hub, path):
+    return hub.con().execute("SELECT 1 FROM joined_books WHERE path=?", (str(path),)).fetchone() is not None
+
+
 def keep_series(hub, info, busy=False):
     """Make the parts of one series that are missing, and drop files whose chapters have changed.
-    While chapters are still downloading (busy), only full parts are made, so the last part is not made
-    again for every chapter that arrives."""
+    While chapters are still downloading (busy), an unfinished part that already has a copy is made again at
+    most every BUSY_REMAKE seconds, so it isn't remade for every chapter that arrives, but still keeps up."""
     found = parts(info)
     wanted = set()
-    older_copies = lambda target, part_no: {file.name for file in target.parent.glob("part%02d-*.cbz" % part_no)}  # noqa: E731
+    older_copies = lambda target, part_no: sorted(target.parent.glob("part%02d-*.cbz" % part_no), key=lambda file: file.stat().st_mtime)  # noqa: E731
     for part_no, chapters in enumerate(found, 1):
         target = _path(hub, info["id"], part_no, chapters)
         wanted.add(target.name)
         if target.is_file():
+            if not _recorded(hub, target):  # made before parts were recorded
+                record(hub, info, target, chapters)
             continue
-        if busy and len(chapters) < CHAPTERS_PER_PART:
-            wanted |= older_copies(target, part_no)  # keep the shorter old copy around until the full one's made
+        older = older_copies(target, part_no) if target.parent.is_dir() else []
+        if busy and len(chapters) < CHAPTERS_PER_PART and older and time.time() - older[-1].stat().st_mtime < BUSY_REMAKE:
+            wanted |= {file.name for file in older}  # keep the shorter old copy around until the longer one's made
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         _making[info["id"]] = part_no
         try:
             room_for(target.parent)
             build(hub, info, part_no, chapters, len(found), target)
+            record(hub, info, target, chapters)
             _failed.pop((info["id"], part_no), None)
         except Exception as exc:  # one busted chapter shouldn't take every other series down with it
             _failed[(info["id"], part_no)] = str(exc)[:200]
-            wanted |= older_copies(target, part_no)  # the older copy stays
+            wanted |= {file.name for file in older}  # the older copy stays
             log.warning("could not make part %d of %s as a comic file: %s", part_no, info["title"], exc)
         finally:
             _making.pop(info["id"], None)
@@ -234,6 +263,8 @@ def keep_all(hub):
                     log.info("deleted the second copies of twice-listed chapters of %s", followed["title"])
             except series.SeriesError as exc:
                 log.warning("could not look at %s on the series server: %s", followed["title"], exc)
+            except Exception as exc:  # an odd answer or a file gone mid-way: the other series still get their turn
+                log.warning("could not keep %s as comic files: %s", followed["title"], exc)
     finally:
         _lock.release()
 

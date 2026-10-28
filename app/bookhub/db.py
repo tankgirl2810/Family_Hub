@@ -238,6 +238,12 @@ def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
+def key_slug(text):
+    """slug() for keys. A name in another alphabet ("Вампиры") keeps its letters instead of coming out as "",
+    which would give every such book the same key, and so the same ratings, tags and cover."""
+    return slug(text) or re.sub(r"[\W_]+", "-", unicodedata.normalize("NFKC", text or "").lower()).strip("-")
+
+
 def clean_isbn(value):
     digits = re.sub(r"[^0-9Xx]", "", value or "")
     return digits.upper() if len(digits) in (10, 13) else ""
@@ -249,16 +255,18 @@ def make_key(title, author, isbn=None):
     if isbn:
         return "isbn:" + isbn
     first_author = re.split(r"\s*(?:&|;|,| and )\s*", author or "")[0]
-    return "ta:%s|%s" % (slug(title), slug(first_author))
+    return "ta:%s|%s" % (key_slug(title), slug(first_author))
 
 
 @functools.lru_cache(maxsize=4096)
 def series_key(name):
     """A series (or set of runs) is tagged and rated as a whole under this key, beside its volumes' own.
     Kept, because the library page asks for the same few hundred series names for every book."""
-    return "series:" + slug(name)
+    return "series:" + key_slug(name)
 
 
 def clean_tag(tag):
-    tag = re.sub(r"\s+", " ", (tag or "")).strip()
+    if not isinstance(tag, str):
+        tag = ""  # a number or list from a hand-made request counts as blank
+    tag = re.sub(r"\s+", " ", tag).strip()
     return tag[:60]

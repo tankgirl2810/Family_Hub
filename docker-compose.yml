@@ -75,6 +75,13 @@ services:
       - JELLYFIN_PORT=${JELLYFIN_PORT:-8096}
       - SUWAYOMI_PORT=${SUWAYOMI_PORT:-4567}
       - KOMGA_PORT=${KOMGA_PORT:-25600}
+      # Komga, the comic server Paperback reads from (docs/18). Family Hub keeps the graphic novels laid out for it.
+      - KOMGA_URL=${KOMGA_URL:-}
+      - KOMGA_USER=${KOMGA_USER:-}
+      - KOMGA_PASS=${KOMGA_PASS:-}
+      - KOMGA_COMICS_DIR=/komga-comics
+      - KOMGA_ACCOUNTS=${KOMGA_ACCOUNTS:-}
+      - COMICS_APP=${COMICS_APP:-readest}
       - GLUETUN_URL=${GLUETUN_URL:-}
       - GLUETUN_API_KEY=${GLUETUN_API_KEY:-}
       - VPN_PROVIDER=${VPN_PROVIDER:-protonvpn}
@@ -117,12 +124,14 @@ services:
       # Read-only views of everything the nightly copy takes, and the disk it goes to.
       - ${STACK_DIR:-./stack}:/stack:ro
       - ${SERIES_PATH:-./stack/series}:/series:ro
-      - ${BACKUP_PATH:-./stack/no-second-disk}:/second-disk
+      - ${BACKUP_PATH:-${STACK_DIR:-./stack}/no-second-disk}:/second-disk
       # Read-only, to show how much room the media disk has left.
       - ${DATA_ROOT:-./stack/data}:/media-root:ro
       # Writable inside these two only: Films and TV to sort deletes spare copies and empty folders here (docs/14).
       - ${DATA_ROOT:-./stack/data}/torrents:/media-root/torrents
       - ${DATA_ROOT:-./stack/data}/unsorted:/media-root/unsorted
+      # The graphic novels, one folder per series, for Komga (a copy: the library itself is never changed).
+      - ${STACK_DIR:-./stack}/komga-comics:/komga-comics
     ports:
       - "${BOOKHUB_PORT:-8090}:8090"
     restart: unless-stopped
@@ -358,6 +367,8 @@ services:
     volumes:
       - ${STACK_DIR:-./stack}/komga-config:/config
       - ${SERIES_PATH:-./stack/series}:/data:ro
+      # The graphic novels, laid out by Family Hub (komga.py)
+      - ${STACK_DIR:-./stack}/komga-comics:/comics:ro
     ports:
       - "${KOMGA_PORT:-25600}:25600"
     restart: unless-stopped

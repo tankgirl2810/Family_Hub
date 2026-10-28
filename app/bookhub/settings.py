@@ -15,6 +15,7 @@ book-data export or backups.
 import copy
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 from . import db, integrations
@@ -258,12 +259,15 @@ def apply(hub):
 
 def clean(name, value):
     """Tidy a submitted value, or raise ValueError with a message for the admin."""
-    value = str(value or "").strip()
+    if isinstance(value, (dict, list)):
+        raise ValueError("That value was not understood.")
+    # no control characters or line breaks: a stray \r would split the .env line and start a new setting
+    value = "".join(char for char in str(value or "") if unicodedata.category(char) not in ("Cc", "Zl", "Zp")).strip()
     if value and FIELDS[name] == "url":
         value = value.rstrip("/")
         if not value.lower().startswith(("http://", "https://")):
             raise ValueError("Addresses start with http:// or https://")
-    if value and FIELDS[name] == "number" and not (value.isdigit() and int(value) > 0):
+    if value and FIELDS[name] == "number" and not (re.fullmatch(r"[0-9]+", value) and int(value) > 0):
         raise ValueError("Enter a whole number.")
     if value and FIELDS[name] == "coordinate":
         try:
@@ -326,7 +330,7 @@ def describe(hub):
 def test(hub, group, values):
     """Try a connection using the saved settings with ``values`` laid over them."""
     trial = copy.copy(hub.config)
-    for name, value in (values or {}).items():
+    for name, value in (values if isinstance(values, dict) else {}).items():
         if name in FIELDS and str(value or "").strip():
             setattr(trial, name, clean(name, value))
     if group == "prowlarr":

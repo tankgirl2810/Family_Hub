@@ -10,7 +10,7 @@ import io
 import textwrap
 
 import requests
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
 from . import catalogues, db
 
@@ -40,6 +40,11 @@ def _jpeg(data):
         picture.load()
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         raise CoverError("That file is not a picture Family Hub can read. Use a JPEG, PNG or WebP.")
+    try:
+        # a phone photo is stored sideways with a note saying "turn me". the JPEG made below drops the note, so turn it now
+        picture = ImageOps.exif_transpose(picture)
+    except Exception:
+        pass  # mangled EXIF: use the picture as it is
     if picture.width < 100 or picture.height < 100:
         raise CoverError("That picture is too small to use as a cover.")
     picture = picture.convert("RGB")

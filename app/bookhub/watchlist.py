@@ -64,12 +64,14 @@ def _film(item, today):
         return "Out now", False
     if out_at:
         return "Out to watch at home from %s" % _nice(out_at), True
+    # old films often have only a cinema date. Radarr calls one released 90 days after it, so trust that
+    # (and the year, when there are no dates at all) before calling a 1968 film "in cinemas now"
+    if status == "released" or (not cinema and (item.get("year") or 9999) < int(today[:4]) - 1):
+        return "Out now", False
     if cinema and cinema > today:
         return "In cinemas from %s" % _nice(cinema), True
     if cinema:
         return "In cinemas now; not out at home yet", True
-    if status == "released":
-        return "Out now", False
     return "Announced", True
 
 

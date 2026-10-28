@@ -20,9 +20,11 @@ import re
 import shutil
 import time
 import zipfile
+import zlib
 from pathlib import Path
 
 import requests
+import urllib3
 
 from . import db
 
@@ -130,7 +132,11 @@ def sync(hub, force=False):
             raise VisualsError("GitHub asked for fewer checks for now; trying again later.")
         if reply.status_code != 200:
             raise VisualsError("GitHub answered %s." % reply.status_code)
-        sha = (reply.json().get("sha") or "")[:40]
+        try:
+            answer = reply.json()
+        except ValueError:
+            answer = {}
+        sha = str((answer.get("sha") if isinstance(answer, dict) else "") or "")[:40]
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise VisualsError("GitHub's answer had no commit in it.")
         ver = sha[:12]
@@ -148,7 +154,8 @@ def _fetch(hub, repo, sha, ver):
         if reply.status_code != 200:
             raise VisualsError("Could not download the repository (%s)." % reply.status_code)
         data = reply.raw.read(MAX_ZIP + 1, decode_content=True)
-    except requests.RequestException as exc:
+    # reading .raw skips requests' own wrapping, so a dropped connection arrives as a urllib3 error
+    except (requests.RequestException, urllib3.exceptions.HTTPError, OSError) as exc:
         raise VisualsError("Could not download the repository: %s" % str(exc)[:120])
     if len(data) > MAX_ZIP:
         raise VisualsError("The repository is too big to download (the limit is 60 MB). Leave node_modules out of it.")
@@ -173,7 +180,11 @@ def _fetch(hub, repo, sha, ver):
             raise VisualsError("The visuals and lib folders are too big (the limit is 30 MB).")
         dest = staging / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(archive.read(info))
+        try:
+            dest.write_bytes(archive.read(info))
+        except (zipfile.BadZipFile, zlib.error, EOFError):
+            shutil.rmtree(staging, ignore_errors=True)
+            raise VisualsError("GitHub's download was damaged; trying again later.")
     if not scripts(staging)[1]:
         shutil.rmtree(staging, ignore_errors=True)
         raise VisualsError("The repository has no visuals/ folder with .js files in it.")

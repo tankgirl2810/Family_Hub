@@ -141,7 +141,6 @@ def notes(hub, env, host="<server address>"):
 
 def build(hub, passphrase, out_dir=None, host="<server address>"):
     """Write the setup file and return its path. The caller deletes it once it has been sent."""
-    import pyzipper
     if len(passphrase or "") < MIN_PASSPHRASE:
         raise SetupError("Use a passphrase of at least %d characters." % MIN_PASSPHRASE)
     from . import settings
@@ -158,6 +157,16 @@ def build(hub, passphrase, out_dir=None, host="<server address>"):
     sources = [("stack/bookhub", Path(config.data_dir))]
     if config.stack_dir and Path(config.stack_dir).is_dir():
         sources += [("stack/" + name, Path(config.stack_dir) / name) for name in secondcopy.SETTINGS if (Path(config.stack_dir) / name).is_dir()]
+    try:
+        _pack(hub, target, passphrase, env, sources, host)
+    except BaseException:
+        target.unlink(missing_ok=True)  # never leave half a zip of passwords lying on the server
+        raise
+    return target
+
+
+def _pack(hub, target, passphrase, env, sources, host):
+    import pyzipper
     count = 0
     with tempfile.TemporaryDirectory() as tmp, pyzipper.AESZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as locked:
         locked.setpassword(passphrase.encode("utf-8"))
@@ -186,7 +195,6 @@ def build(hub, passphrase, out_dir=None, host="<server address>"):
                     count += 1
                 except (OSError, sqlite3.Error):
                     continue  # a file that vanished or is locked; the rest of the setup still counts
-    return target
 
 
 def restore(file, folder, passphrase):
@@ -204,21 +212,23 @@ def restore(file, folder, passphrase):
             locked.read(".env")  # canary read: a wrong passphrase blows up here, before we touch a single file
             if (folder / ".env").is_file():
                 (folder / ".env").replace(folder / ".env.before-restore")
+            restored = 0
             for name in names:
-                if name in ("README.txt", NOTES_NAME):  # for reading in the zip, not for the Family Hub folder
+                if name in ("README.txt", NOTES_NAME) or name.endswith("/"):  # the notes stay in the zip; folders come with their files
                     continue
                 dest = (folder / name).resolve()
                 if folder not in dest.parents:
                     continue  # a sneaky "../../something" name? nope, stays in the folder
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(locked.read(name))
+                restored += 1
     except RuntimeError as exc:
         if "password" in str(exc).lower() or "Bad" in str(exc):
             raise SetupError("The passphrase is not right.")
         raise
     except zipfile.BadZipFile:
         raise SetupError("That file is damaged or is not a setup file.")
-    return len(names) - 1
+    return restored
 
 
 def main(argv):

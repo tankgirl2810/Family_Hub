@@ -10,8 +10,9 @@ is one EPUB with a contents entry for each volume (comicbook.py), so a reading a
 jump around in, from the first volume to the last; the same pages as one CBZ are offered too. Choosing any
 volume for My books brings the whole series.
 
-A series followed chapter by chapter (series.py) can be put in My books as well: it comes as one EPUB with a
-contents entry per chapter, and when new chapters arrive it comes again, longer.
+A series followed chapter by chapter (series.py) can be put in My books as well: it comes as the CBZ parts the
+server keeps (chapterfile.py), with a contents entry per chapter, and when new chapters arrive the last part comes
+again, longer. Only the CBZ is offered: Readest's auto-download picks an EPUB over a CBZ whenever both are there.
 
 A joined series can take minutes to put together, so it is made in the background and kept. Until it is
 ready, My books lists the series without a download (Readest looks again every few minutes) and asking for
@@ -34,7 +35,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, current_app, request, send_file
 
-from . import chapterfile, db, kosync
+from . import chapterfile, db, kinds, kosync
 
 bp = Blueprint("opds", __name__, url_prefix="/opds")
 
@@ -99,14 +100,17 @@ def _reply(root, kind):
     return Response(body, content_type=kind + ";charset=utf-8")
 
 
-def _book_entry(feed, book, hub):
+def _book_entry(feed, book, hub, shared=()):
+    """shared: keys more than one library book has, whose entries get the book's id on their own id too."""
     entry = ET.SubElement(feed, "entry")
     # Titles as Family Hub shows them: "Cherry Magic! · Volume 2", not the file name the volume came with.
     title = book.get("shown_title") or book["title"]
     if book.get("subtitle"):
         title += ": " + book["subtitle"]
     ET.SubElement(entry, "title").text = title.translate(_CONTROL)
-    ET.SubElement(entry, "id").text = "urn:bookhub:book:" + book["key"]
+    # two files can come out as the same book (same title and author, no ISBN), and Atom ids must be unique
+    # or the app folds them into one. Only those get the id added, so nobody else's ids change
+    ET.SubElement(entry, "id").text = "urn:bookhub:book:" + book["key"] + (":%d" % book["id"] if book["key"] in shared else "")
     ET.SubElement(entry, "updated").text = (book["added"] or db.now()[:19]) + "Z"
     # a comic's "author" is sometimes really its story title (calibre.py hides those), so no author then
     for name in (book["authors"] if book.get("shown_author", book["author"]) else []):
@@ -331,27 +335,33 @@ def _chapters_entry(feed, info):
 
 def _chapters_part_entry(feed, info, kept, part_no, count):
     entry = ET.SubElement(feed, "entry")
+    # the comic file as it should be now, or the last one made while the longer one is still on its way
+    path = chapterfile.ready_file(current_app.hub, info, part_no, older=True)[0] if kept else None
     title = chapterfile.part_title(info["title"], kept, part_no, count) if kept else info["title"]
     ET.SubElement(entry, "title").text = title.translate(_CONTROL)
-    # The chapter count (and how the book is made) is part of the id, so each new chapter makes the app fetch the longer book.
-    ET.SubElement(entry, "id").text = "urn:bookhub:chapters:%d:%s%s" % (info["id"], "part%d:" % part_no if count > 1 else "", chapterfile.version(kept))
+    # The id names the exact file on offer, so each longer copy makes the app fetch it again (and "cbz" in it
+    # fetches parts first sent as an EPUB once more, as comics).
+    ET.SubElement(entry, "id").text = "urn:bookhub:chapters:%d:%scbz:%s" % (
+        info["id"], "part%d:" % part_no if count > 1 else "", chapterfile.stamp_of(path) if path else "none")
     ET.SubElement(entry, "updated").text = db.now()
     if info.get("author"):
         ET.SubElement(ET.SubElement(entry, "author"), "name").text = info["author"].translate(_CONTROL)
-    ET.SubElement(entry, "summary", {"type": "text"}).text = (
-        "%d chapters in one book, from %s to %s.%s" % (len(kept), chapterfile.chapter_name(kept[0]), chapterfile.chapter_name(kept[-1]),
-                                                       " New chapters come as a longer copy." if info.get("status") != "Finished" else "")
-        if kept else "No chapters kept yet.").translate(_CONTROL)
+    if not kept:
+        summary = "No chapters kept yet."
+    elif not path:
+        summary = "%d chapters, from %s to %s. Being put together on the server; it comes by itself once ready." % (
+            len(kept), chapterfile.chapter_name(kept[0]), chapterfile.chapter_name(kept[-1]))
+    else:
+        summary = "%d chapters in one comic, from %s to %s.%s" % (
+            len(kept), chapterfile.chapter_name(kept[0]), chapterfile.chapter_name(kept[-1]),
+            " New chapters come as a longer copy, opening where you were." if info.get("status") != "Finished" else "")
+    ET.SubElement(entry, "summary", {"type": "text"}).text = summary.translate(_CONTROL)
     ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/image", "href": "/opds/chapters-cover/%d" % info["id"], "type": "image/jpeg"})
-    if kept:
+    if path:
         # same trick as the series links: Readest skips a link it has seen before (even with a new id), so the
         # version rides along in the link or a grown part would never arrive. (the "missing chapters 81-104" bug)
-        version = "v=" + chapterfile.version(kept)
-        ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/acquisition", "type": MIME["EPUB"],
-                                      "href": "/opds/chapters-book/%d?%s%s" % (info["id"], "part=%d&" % part_no if count > 1 else "", version)})
-        if chapterfile.ready_file(current_app.hub, info, part_no)[0]:  # the comic file the server keeps, once it is made
-            ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/acquisition", "type": MIME["CBZ"], "title": "CBZ",
-                                          "href": "/opds/chapters-file/%d/%d?%s" % (info["id"], part_no, version)})
+        ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/acquisition", "type": MIME["CBZ"],
+                                      "href": "/opds/chapters-file/%d/%d?v=%s" % (info["id"], part_no, chapterfile.stamp_of(path))})
 
 
 def _book_feed(title, path, books, extra="", prepare=False):
@@ -365,13 +375,16 @@ def _book_feed(title, path, books, extra="", prepare=False):
         ET.SubElement(feed, "link", {"rel": "next", "href": href(page + 1), "type": ACQ})
     if page > 1:
         ET.SubElement(feed, "link", {"rel": "previous", "href": href(page - 1), "type": ACQ})
+    seen, shared = set(), set()
+    for book in current_app.hub.library.books():
+        (shared if book["key"] in seen else seen).add(book["key"])
     for book in books[(page - 1) * PAGE:page * PAGE]:
         if "chapters_list" in book:
             _chapters_entry(feed, book)
         elif "volumes" in book:
             _series_entry(feed, book, current_app.hub, prepare)
         else:
-            _book_entry(feed, book, current_app.hub)
+            _book_entry(feed, book, current_app.hub, shared)
     return _reply(feed, ACQ)
 
 
@@ -385,10 +398,11 @@ def root(who):
     # My books, so only books someone actually CHOSE turn up by themselves, not the whole 2000-book library.
     # the title dodges words like "newest" too, because some apps sniff for those as well
     ET.SubElement(feed, "link", {"rel": "http://opds-spec.org/sort/new", "href": "/opds/mine", "type": ACQ, "title": "My books"})
-    mine = len([key for key in hub.devices.shelf(who["id"]) if hub.library.by_key(key)])
+    shelved = [book for book in map(hub.library.by_key, hub.devices.shelf(who["id"])) if book]
+    mine = len(without_comics(hub, shelved) if comics_elsewhere(hub) else shelved)
     for title, href, text in (
         ("My books", "/opds/mine", "%d chosen for %s" % (mine, who["name"])),
-        ("The whole family library", "/opds/all", "%d books, the last added first" % len(hub.library.books())),
+        ("The whole family library", "/opds/all", "%d books, the last added first" % len(_books_here(hub))),
     ):
         entry = ET.SubElement(feed, "entry")
         ET.SubElement(entry, "title").text = title
@@ -399,12 +413,32 @@ def root(who):
     return _reply(feed, NAV)
 
 
+def comics_elsewhere(hub):
+    """True when graphic novels and series by chapter are read in a comic app from Komga (COMICS_APP=paperback),
+    so the book-reading app's My books leaves them out rather than download them a second time."""
+    return hub.config.comics_app == "paperback"
+
+
+def without_comics(hub, books):
+    kind_of = hub.kind_index()
+    return [book for book in books if kind_of.get(book["key"]) != kinds.GRAPHIC]
+
+
+def _books_here(hub):
+    """The library as this catalogue shows it: without graphic novels when they're read from Komga instead,
+    so only one app ever takes them in."""
+    everything = hub.library.books()
+    return without_comics(hub, everything) if comics_elsewhere(hub) else everything
+
+
 @bp.get("/mine")
 @signed_in
 def mine(who):
     hub = current_app.hub
     shelf = hub.devices.shelf(who["id"])
     books = [book for book in (hub.library.by_key(key) for key in sorted(shelf, key=shelf.get, reverse=True)) if book]
+    if comics_elsewhere(hub):
+        return _book_feed("My books", "/opds/mine", _gather(without_comics(hub, books), hub.library.books()), prepare=True)
     # Series followed chapter by chapter that this person put in My books come first.
     return _book_feed("My books", "/opds/mine", _my_chapter_series(hub, who) + _gather(books, hub.library.books()), prepare=True)
 
@@ -412,7 +446,7 @@ def mine(who):
 @bp.get("/all")
 @signed_in
 def everything(who):
-    everything = current_app.hub.library.books()
+    everything = _books_here(current_app.hub)
     books = sorted(everything, key=lambda book: book["added"], reverse=True)
     return _book_feed("The whole family library", "/opds/all", _gather(books, everything))
 
@@ -421,7 +455,7 @@ def everything(who):
 @signed_in
 def search(who):
     query = (request.args.get("q") or "").strip().lower()
-    everything = current_app.hub.library.books()
+    everything = _books_here(current_app.hub)
     haystack = lambda book: " ".join([book["title"], book.get("shown_title", ""), book.get("subtitle", ""),  # noqa: E731
                                       book["author"], book["series"]] + book["tags"]).lower()
     books = [book for book in everything if query and query in haystack(book)]
@@ -768,10 +802,10 @@ def chapters_file(who, series_id, part):
         info = hub.series.detail(series_id)
     except series.SeriesError:
         return "", 404
-    path, title = chapterfile.ready_file(hub, info, part)
+    path, title = chapterfile.ready_file(hub, info, part, older=True)
     if not path:
         return "", 404
-    fetched(hub, who, "chapters:%d:%d" % (series_id, part), chapterfile.version(chapterfile.parts(info)[part - 1]))
+    fetched(hub, who, "chapters:%d:%d" % (series_id, part), chapterfile.stamp_of(path))
     return send_file(path, as_attachment=True, download_name=safe_filename(title, "", "cbz"), mimetype=MIME["CBZ"])
 
 
@@ -784,5 +818,9 @@ def chapters_cover(who, series_id):
         reply = hub.series.raw("/api/v1/manga/%d/thumbnail" % series_id, stream=False)
     except series.SeriesError:
         return "", 404
-    mimetype = reply.headers.get("Content-Type", "image/jpeg").split(";")[0]
-    return Response(reply.content, mimetype=mimetype, headers={"Cache-Control": "max-age=3600"})
+    # the picture comes from a reading site nobody here controls: anything that isn't a plain picture (a web page,
+    # an SVG with a script in it) goes out as a file, never as something the browser runs on Family Hub's address
+    mimetype = reply.headers.get("Content-Type", "image/jpeg").split(";")[0].strip().lower()
+    if not mimetype.startswith("image/") or "svg" in mimetype:
+        mimetype = "application/octet-stream"
+    return Response(reply.content, mimetype=mimetype, headers={"Cache-Control": "max-age=3600", "X-Content-Type-Options": "nosniff"})

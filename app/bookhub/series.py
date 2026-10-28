@@ -36,7 +36,7 @@ SERIES_FIELDS = """id title author status genre unreadCount downloadCount source
   source{displayName} chapters{totalCount} firstUnreadChapter{id name sourceOrder}"""
 CHAPTER_FIELDS = "id name chapterNumber sourceOrder isRead isDownloaded uploadDate scanlator lastPageRead"
 # A copy of a chapter with one of these in its name is the one kept when a site lists a chapter twice.
-EXTRAS = re.compile(r"18\s*\+|\br-?18\b|\buncensored\b|\buncut\b|\bunedited\b|\bmature\b|\bexplicit\b|\bnsfw\b|\bextended\b", re.I)
+EXTRAS = re.compile(r"18\s*\+|\+\s*18\b|\br-?18\b|\buncensored\b|\buncut\b|\bunedited\b|\bmature\b|\bexplicit\b|\bnsfw\b|\bextended\b", re.I)
 
 
 class SeriesError(Exception):
@@ -183,6 +183,8 @@ class Series:
             payload = reply.json()
         except (requests.RequestException, ValueError) as exc:
             raise SeriesError("Could not reach the series server: %s" % exc)
+        if not isinstance(payload, dict):
+            raise SeriesError("The series server gave an answer Family Hub could not read.")
         if payload.get("errors"):
             raise SeriesError("The series server said: %s" % (payload["errors"][0].get("message") or "unknown error")[:300])
         return payload.get("data") or {}
@@ -211,9 +213,12 @@ class Series:
                             config=config, timeout=8)
         except SeriesError as exc:
             return {"configured": True, "ok": False, "error": str(exc)}
-        sources = [source for source in data["sources"]["nodes"] if source["id"] != LOCAL]
+        # something answered, but maybe not Suwayomi (another program on that port): say so rather than crash
+        if not all(isinstance(data.get(part), dict) for part in ("aboutServer", "sources", "settings")):
+            return {"configured": True, "ok": False, "error": "Something answered at that address, but it is not a series server Family Hub knows."}
+        sources = [source for source in data["sources"].get("nodes") or [] if source.get("id") != LOCAL]
         keeps = all(data["settings"].get(setting) == wanted for setting, wanted in KEEP_EVERYTHING.items())
-        return {"configured": True, "ok": True, "version": data["aboutServer"]["version"], "sources": len(sources), "keeps": keeps}
+        return {"configured": True, "ok": True, "version": data["aboutServer"].get("version") or "", "sources": len(sources), "keeps": keeps}
 
     def prepare(self, config=None):
         """Set the series server to download every new chapter of every followed series, as CBZ files."""
@@ -280,6 +285,9 @@ class Series:
             read = sum(chapter["read"] for chapter in kept)
             info.update(chapters=len(kept), read=read, unread=len(kept) - read,
                         downloaded=sum(chapter["downloaded"] for chapter in unique(chapters, among_downloaded=True)[0]))
+            # the server's "first unread" can be a second copy nobody sees (and never reads), so pick it again
+            next_up = next((chapter for chapter in kept if not chapter["read"]), None)
+            info["next"] = {"id": next_up["id"], "name": next_up["name"], "order": next_up["order"]} if next_up else None
         # chapters_list has one copy of each chapter; every_chapter is everything the site lists, twice-listed ones too.
         info.update(description=(data["manga"].get("description") or "")[:3000], following=bool(data["manga"]["inLibrary"]),
                     link=data["manga"].get("realUrl") or "", chapters_list=kept, every_chapter=chapters, doubles=len(dropped))
@@ -308,7 +316,8 @@ class Series:
     def drop_doubles(self, info):
         """Delete the downloaded copies of twice-listed chapters once the copy kept is downloaded. Returns how many.
         Copies not downloaded yet are taken off the download queue (the series server queues every new chapter,
-        second copies too), so they are not downloaded only to be deleted."""
+        second copies too), so they are not downloaded only to be deleted. Copies of a chapter read are marked
+        read too, so the series server's unread counts match."""
         kept, dropped = unique(info.get("every_chapter") or info["chapters_list"])
         waiting = [chapter["id"] for chapter in dropped if not chapter["downloaded"]]
         if waiting:
@@ -316,6 +325,14 @@ class Series:
                 self.gql("mutation($ids: [Int!]!){dequeueChapterDownloads(input:{ids:$ids}){downloadStatus{state}}}", {"ids": waiting})
             except SeriesError:
                 pass  # tried again next time; the deleting below does not depend on it
+        # a hidden copy is never read, so it'd count as unread on the server forever: it follows the copy kept
+        read_numbers = {chapter["number"] for chapter in kept if chapter["read"] and chapter.get("number") is not None}
+        catch_up = [chapter["id"] for chapter in dropped if not chapter["read"] and chapter["number"] in read_numbers]
+        if catch_up:
+            try:
+                self.mark(catch_up, True)
+            except SeriesError:
+                pass  # next time
         # only bin a spare once its replacement is safely downloaded. never leave a chapter with zero copies
         done = {chapter["number"] for chapter in kept if chapter["downloaded"]}
         ids = [chapter["id"] for chapter in dropped if chapter["downloaded"] and chapter["number"] in done]
@@ -360,7 +377,7 @@ class Series:
         def run():
             try:
                 self.rest_finished()
-            except SeriesError:
+            except Exception:  # whatever went wrong, still ask it to look for new chapters
                 pass
             self._quiet("mutation{updateLibrary(input:{}){updateStatus{jobsInfo{isRunning}}}}")
         threading.Thread(target=run, daemon=True).start()

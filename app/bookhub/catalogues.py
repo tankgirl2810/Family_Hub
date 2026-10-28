@@ -240,6 +240,7 @@ def google_books_info(config, book, full=True):
 COMIC_VINE = "https://comicvine.gamespot.com/api"
 COMIC_TAGS = 4  # most-seen characters and themes kept from a series
 _volumes = {}   # (series, hint) -> tags, so forty issues of one series cost one lookup
+RELEASE_TAG = re.compile(r"^(of\s*\d+|digital|c2c|variant|fixed|webrip|web|scans?|hd|\d{3,4}p(x)?|)$", re.I)
 
 
 def comic_series(title):
@@ -248,14 +249,17 @@ def comic_series(title):
     The second value is the first thing in brackets: a publisher or a year.
     """
     title = re.sub(r"\.(cb[zr7c]|pdf|epub)$", "", (title or "").replace("_", " "), flags=re.I)
-    bracket = re.search(r"[\[(]([^\])]*)[\])]", title)
+    brackets = list(re.finditer(r"[\[(]([^\])]*)[\])]", title))
+    bracket = brackets[0] if brackets else None
     name = title[:bracket.start()] if bracket else title
     if not bracket:
         name = re.split(r"\s+#?\d{1,4}\s+-\s+", name + " ")[0]  # "Saga 012 - Chapter Twelve"
     name = re.sub(r"(\s+|^)(#|v(ol(ume)?)?\.?\s*)?\d{1,4}\s*$", "", name.strip(" -"), flags=re.I)  # the issue number
     name = re.sub(r"\s+v(ol(ume)?)?\.?\s*\d{1,2}$", "", name, flags=re.I)  # "Batman v2"
     name = re.sub(r"\s+-\s+", ": ", name).strip(" -:")
-    return name, (bracket.group(1).strip() if bracket else "")
+    # "(of 12)" or "(Digital)" says nothing about which run it is, and would rule out every one
+    hints = [found.group(1).strip() for found in brackets if not RELEASE_TAG.match(found.group(1).strip())]
+    return name, (hints[0] if hints else "")
 
 
 def _comic_vine_get(path, key, params):
