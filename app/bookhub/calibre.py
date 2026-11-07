@@ -182,7 +182,7 @@ class Library:
                     "id": row["id"], "title": row["title"], "path": row["path"], "has_cover": bool(row["has_cover"]),
                     "added": (row["timestamp"] or "")[:19].replace(" ", "T"), "pubdate": (row["pubdate"] or "")[:10],
                     "series_index": row["series_index"], "authors": [], "tags": [], "formats": {},
-                    "synopsis": "", "series": "", "own_series": "", "isbn": "", "publisher": "", "raw_tags": [],
+                    "synopsis": "", "series": "", "own_series": "", "isbn": "", "publisher": "", "language": "", "raw_tags": [],
                     "own_formats": {}, "sizes": {}, "copies": [], "copy_of": None,
                 }
 
@@ -201,6 +201,12 @@ class Library:
                     book["publisher"] = row[1]
             except sqlite3.OperationalError:
                 pass  # a cut-down library without publishers
+            try:  # the first language only ("rus"), for the little badge on cards of books not in English
+                for book, row in link("SELECT l.book, g.lang_code FROM books_languages_link l JOIN languages g ON g.id=l.lang_code "
+                                      "ORDER BY l.item_order DESC"):
+                    book["language"] = row[1]
+            except sqlite3.OperationalError:
+                pass  # a cut-down library without languages
             for book, row in link("SELECT l.book, s.name FROM books_series_link l JOIN series s ON s.id=l.series"):
                 book["series"] = book["own_series"] = row[1]  # own_series: what the library says, before any guess from the name
             for book, row in link("SELECT book, text FROM comments"):

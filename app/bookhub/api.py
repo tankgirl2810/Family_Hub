@@ -20,7 +20,11 @@ import requests
 from flask import Blueprint, Response, current_app, jsonify, request, send_file, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from . import bookfix, calibre, catalogues, visuals, watchlist, covers, db, devices, duplicates, goodreads, integrations, kinds, kosync, looks, media, mediasort, readers, recommend, search, secondcopy, series, settings
+from . import bookfix, calibre, catalogues, visuals, watchlist, covers, db, devices, duplicates, goodreads, integrations, kinds, kosync, looks, media, mediasort, readers, recommend, search, secondcopy, series, settings, tagmerge
+from . import tabletop  # game books: the Tabletop view, nested tags, what each profile hides
+from . import review  # the review queue: the sorter's suggestions, confirmed into the library, and learned rules
+from . import librarymanager  # its refusals, for the duplicates queue
+from . import peek  # a look inside a book's first pages, next to its details
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -966,6 +970,7 @@ def books(who):
         if key not in reading:
             items.append(outside(key, entry["title"], entry["author"], entry["pages"]))
 
+    tabletop.annotate(family_hub, items)  # game, edition, role, product line, language
     public = readers.index(family_hub)
     for item in items:
         item["readers"] = public.get(item["key"])  # what readers at large think; None when nobody knows
@@ -984,7 +989,9 @@ def books(who):
         terms = search.clean(json.loads(request.args.get("terms") or "[]"))
     except ValueError:
         terms = []
-    matches = search.matcher(terms)
+    nested = tabletop.descendants(family_hub.tag_parents())  # asking for "Pathfinder" means "Pathfinder 2e" too
+    matches = search.matcher(terms, nested)
+    tag_and_under = tabletop.under(nested, tag) if tag else set()
 
     def series_tags(item):
         """Tags put on the item's series (or set of runs) as a whole."""
@@ -1011,7 +1018,7 @@ def books(who):
                 return False
         if tag:
             every_tag = [found for scope in scopes for found in item["tags"].get(scope, []) + series_tags(item).get(scope, [])]
-            if not any(found.lower() == tag for found in every_tag):
+            if not any(found.lower() in tag_and_under for found in every_tag):
                 return False
         if terms and not matches(item, series_tags(item)):
             return False
@@ -1029,6 +1036,12 @@ def books(who):
         }.get(shown, True)
 
     items = [item for item in items if keep(item)]
+    if request.args.get("view") == "tabletop":  # every game book, hidden or not, as Game › Edition › Product line
+        items = [item for item in items if tabletop.is_game_book(item)]
+        return jsonify({"books": items, "total": len(items), "tree": tabletop.tree(items), "hidden": tabletop.hidden(family_hub, pid)})
+    hidden_count = 0
+    if request.args.get("feed") == "1" and not (terms or query or tag):  # a search finds hidden books; the feed leaves them out
+        items, hidden_count = tabletop.feed(family_hub, pid, items, nested)
     if shown == "foryou" and pid:
         # Unread library books, best match with what this person has finished and rated first.
         mine = recommend.for_you(family_hub, pid, tags)
@@ -1038,7 +1051,7 @@ def books(who):
                         "taste": {"ready": mine["ready"], "have": mine["have"], "need": mine["need"]}})
     if one_series or collection:  # one series or set, run by run, in reading order
         items.sort(key=lambda item: ((item.get("series") or "").lower(), item.get("series_index") or 0, item["title"].lower()))
-    return jsonify({"books": items, "total": len(items), "series_info": _series_cards(items, tags, ratings)})
+    return jsonify({"books": items, "total": len(items), "series_info": _series_cards(items, tags, ratings), "hidden": hidden_count})
 
 
 def _series_cards(items, tags, ratings):
@@ -1612,10 +1625,54 @@ def tags(who):
                 if scope not in entry["sources"]:
                     entry["sources"].append(scope)
                 entry["keys"].add(key)
-    result = sorted(({"tag": entry["tag"], "source": entry["source"], "sources": entry["sources"], "count": len(entry["keys"])}
+    if merged:
+        tabletop.roll_up(counts, family_hub.tag_parents())
+    result = sorted(({"tag": entry["tag"], "source": entry["source"], "sources": entry["sources"], "count": len(entry["keys"]),
+                      "parent": entry.get("parent", "")}
                      for entry in counts.values()),
                     key=lambda entry: (-entry["count"], entry["tag"].lower()))
     return jsonify({"tags": result[:120]})
+
+
+# ---- game books (tabletop.py): what each profile hides from its own feed, and nesting tags
+
+@bp.get("/me/hidden")
+@profile_only
+def my_hidden(who):
+    """The tags and roles this profile hides from its library feed, and the roles that can be hidden."""
+    return jsonify({"hidden": tabletop.hidden(hub(), who["id"]), "roles": kinds.ROLES})
+
+
+@bp.put("/me/hidden")
+@profile_only
+def my_hidden_set(who):
+    """Replace the list. Hidden books still turn up in searches and in the Tabletop view."""
+    names = (request.get_json(silent=True) or {}).get("hidden")
+    if not isinstance(names, list):
+        return fail("Send the list of tags to hide.")
+    return jsonify({"ok": True, "hidden": tabletop.set_hidden(hub(), who["id"], names)})
+
+
+@bp.get("/admin/tag-parents")
+@admin_only
+def admin_tag_parents(who):
+    parents = hub().tag_parents()
+    return jsonify({"parents": [{"tag": tag, "parent": parent} for tag, parent in sorted(parents.items(), key=lambda pair: (pair[1].lower(), pair[0].lower()))]})
+
+
+@bp.post("/admin/tag-parents")
+@admin_only
+def admin_tag_parent_set(who):
+    """Nest a tag under another; an empty parent un-nests it."""
+    data = request.get_json(silent=True) or {}
+    tag, parent = clean(data.get("tag")), clean(data.get("parent"))
+    if not tag:
+        return fail("Choose the tag to nest.")
+    family_hub = hub()
+    if not family_hub.set_tag_parent(tag, parent):
+        return fail("\"%s\" can't go under \"%s\": that would put it inside itself." % (tag, parent))
+    family_hub.touch()
+    return jsonify({"ok": True})
 
 
 # ----------------------------------------------------------------- stats
@@ -2114,7 +2171,8 @@ def admin_copies_choose(who):
 @admin_only
 def admin_tags(who):
     family_hub = hub()
-    return jsonify(dict(family_hub.machine_tags(), lookups=family_hub.catalogues.progress()))
+    return jsonify(dict(family_hub.machine_tags(), lookups=family_hub.catalogues.progress(),
+                        merged=[merge["tag"] for merge in tagmerge.merges(family_hub.con())]))
 
 
 @bp.post("/admin/tags/rule")
@@ -2128,6 +2186,70 @@ def admin_tag_rule(who):
         return fail("Type the new name for the tag.")
     if not hub().set_tag_rule(data.get("tag"), becomes):
         return fail("Choose a tag first.")
+    return jsonify({"ok": True})
+
+
+# ---- merging tags (tagmerge.py): one spelling into another, across family, book file and community tags
+
+def _merge_request():
+    """(names to merge away, name kept) from the page."""
+    data = request.get_json(silent=True) or {}
+    names = data.get("tags") if isinstance(data.get("tags"), list) else []
+    return [clean(name) for name in names if clean(name)], clean(data.get("keep"))
+
+
+@bp.get("/admin/tags/merges")
+@admin_only
+def admin_tag_merges(who):
+    """Merges made so far, suggested ones, and every tag to pick from."""
+    family_hub = hub()
+    used = tagmerge.usage(family_hub)
+    con = family_hub.con()
+    return jsonify({"merges": tagmerge.merges(con), "suggestions": tagmerge.suggestions(con, used), "tags": tagmerge.all_tags(used)})
+
+
+@bp.post("/admin/tags/merge/preview")
+@admin_only
+def admin_tag_merge_preview(who):
+    names, keep = _merge_request()
+    if not keep:
+        return fail("Choose the name to keep.")
+    return jsonify(tagmerge.preview(tagmerge.usage(hub()), names, keep))
+
+
+@bp.post("/admin/tags/merge")
+@admin_only
+def admin_tag_merge(who):
+    names, keep = _merge_request()
+    if not keep:
+        return fail("Choose the name to keep.")
+    family_hub = hub()
+    changed = tagmerge.merge(family_hub.con(), names, keep)
+    if changed is None:
+        return fail("Choose at least one other tag to merge into \"%s\"." % keep)
+    family_hub.touch()
+    return jsonify({"ok": True, "family": changed})
+
+
+@bp.post("/admin/tags/merge/undo")
+@admin_only
+def admin_tag_merge_undo(who):
+    family_hub = hub()
+    restored = tagmerge.undo(family_hub.con(), clean((request.get_json(silent=True) or {}).get("tag")))
+    if restored is None:
+        return fail("That merge is no longer there.", 404)
+    family_hub.touch()
+    return jsonify({"ok": True, "restored": restored})
+
+
+@bp.post("/admin/tags/merge/dismiss")
+@admin_only
+def admin_tag_merge_dismiss(who):
+    """Don't suggest these tags as one again. The page sends every name in the suggestion."""
+    names, _keep = _merge_request()
+    if len(names) < 2:
+        return fail("Choose the suggestion to dismiss.")
+    tagmerge.dismiss(hub().con(), names)
     return jsonify({"ok": True})
 
 
@@ -2465,6 +2587,46 @@ def admin_duplicates_apply(who):
     return jsonify({"ok": True, "started": len(wanted)})
 
 
+# The same, one set at a time: the copies side by side, keep one and put its details right, or tell them apart.
+
+@bp.get("/admin/duplicates/queue")
+@admin_only
+def admin_duplicates_queue(who):
+    return jsonify(hub().duplicates.queue(request.args.get("key")))
+
+
+@bp.get("/admin/duplicates/cover/<int:book_id>")
+@admin_only
+def admin_duplicates_cover(who, book_id):
+    """The library's own cover of one entry, not Family Hub's, so two copies show their own."""
+    book = _library_book(book_id)
+    path = hub().library.cover_path(book) if book else None
+    if not path:
+        return "", 404
+    return send_file(path, mimetype="image/jpeg", max_age=3600)
+
+
+@bp.post("/admin/duplicates/queue")
+@admin_only
+def admin_duplicates_queue_answer(who):
+    """{"key", "action": "keep", "keep": id, "fields": {...}} or {"key", "action": "apart", "names": {id: {...}}}."""
+    data = request.get_json(silent=True) or {}
+    family_hub = hub()
+    try:
+        if data.get("action") == "keep":
+            done = family_hub.duplicates.keep(data.get("key"), data.get("keep"), data.get("fields"))
+            words = "Kept. The other copy was deleted." if done["cls"] == duplicates.IDENTICAL else "Kept. The other copy is set aside in needs-attention."
+            return jsonify(dict(done, ok=True, message=words))
+        if data.get("action") == "apart":
+            done = family_hub.duplicates.tell_apart(data.get("key"), data.get("names"))
+            return jsonify(dict(done, ok=True, message="Saved as separate books."))
+    except duplicates.Busy as exc:
+        return fail(str(exc), 409)
+    except (ValueError, OSError, sqlite3.Error, librarymanager.ManagerError) as exc:
+        return fail(str(exc))
+    return fail("Say whether to keep a copy or tell them apart.")
+
+
 # ------------------------------------------------------- book details
 # Books whose title or author is a file name or a user name. Changed by the library manager. See bookfix.py.
 
@@ -2505,6 +2667,209 @@ def admin_book_details_apply(who, book_id):
     except bookfix.FixError as exc:
         return fail(str(exc))
     return jsonify(dict(done, message="Now %s by %s." % (done["title"], done["author"])))
+
+
+# ------------------------------------------------------- a look inside
+# The first pages of one library entry (not its copies'), for the details editor and the copies queue. See peek.py.
+
+def _peek_book(book_id):
+    book = hub().library.get(book_id)
+    if not book:
+        raise peek.PeekError("That book is not in the library any more.")
+    return book
+
+
+@bp.get("/admin/books/<int:book_id>/peek")
+@admin_only
+def admin_peek(who, book_id):
+    try:
+        return jsonify(peek.describe(hub().library, _peek_book(book_id)))
+    except peek.PeekError as exc:
+        return fail(str(exc), 404)
+
+
+@bp.get("/admin/books/<int:book_id>/peek.pdf")
+@admin_only
+def admin_peek_pdf(who, book_id):
+    """The first ?pages= pages (3 unless asked; at most 30) as a PDF the browser shows in place."""
+    try:
+        book = _peek_book(book_id)
+        path = peek.file_of(hub().library, book, "PDF")
+        if not path:
+            return fail("This book has no PDF.", 404)
+        data, total = peek.pdf_pages(path, number(request.args.get("pages"), int) or peek.PAGES)
+    except peek.PeekError as exc:
+        return fail(str(exc), 404)
+    response = send_file(io.BytesIO(data), mimetype="application/pdf", max_age=0)
+    response.headers["Content-Disposition"] = "inline"
+    response.headers["X-Pages"] = str(total)
+    return response
+
+
+@bp.get("/admin/books/<int:book_id>/peek/page/<int:number_>.png")
+@admin_only
+def admin_peek_page(who, book_id, number_):
+    """One PDF page as a picture, for marking where the title and author are (peek.py)."""
+    try:
+        path = peek.file_of(hub().library, _peek_book(book_id), "PDF")
+        if not path:
+            return fail("This book has no PDF.", 404)
+        data, _ = peek.pdf_page_picture(path, number_)
+    except peek.PeekError as exc:
+        return fail(str(exc), 404)
+    return send_file(io.BytesIO(data), mimetype="image/png", max_age=3600)
+
+
+@bp.post("/admin/books/<int:book_id>/peek/box")
+@admin_only
+def admin_peek_box(who, book_id):
+    """The text inside a box drawn on a page: {page, box: [left, top, right, bottom] as fractions}."""
+    body = request.get_json(silent=True) or {}
+    try:
+        path = peek.file_of(hub().library, _peek_book(book_id), "PDF")
+        if not path:
+            return fail("This book has no PDF.", 404)
+        page = number(body.get("page"), int)
+        box = peek.clean_box(body.get("box"))
+        if page is None or not box:
+            return fail("Draw a box on a page first.")
+        text = peek.pdf_box_text(path, page, box)
+    except peek.PeekError as exc:
+        return fail(str(exc), 404)
+    return jsonify({"text": text, "title": peek.as_title(text), "authors": peek.as_authors(text), "page": page, "box": box})
+
+
+@bp.get("/admin/books/<int:book_id>/peek/picture/<int:number_>")
+@admin_only
+def admin_peek_picture(who, book_id, number_):
+    try:
+        book = _peek_book(book_id)
+        fmt = peek.pick(peek.own(book))
+        path = peek.file_of(hub().library, book, fmt)
+        if not path:
+            return fail("There is no file to look inside.", 404)
+        data, mime = peek.comic_picture(path, number_)
+    except peek.PeekError as exc:
+        return fail(str(exc), 404)
+    return send_file(io.BytesIO(data), mimetype=mime, max_age=3600)
+
+
+@bp.get("/admin/review/book/<int:book_id>")
+@admin_only
+def admin_review_book(who, book_id):
+    """One library entry as a queue item, whatever the sorter thought of it: "Edit details" from anywhere."""
+    try:
+        return jsonify(dict(hub().review.queue("none", 0), item=hub().review.item_for(book_id)))
+    except review.ReviewError as exc:
+        return fail(str(exc), 404)
+
+
+# ------------------------------------------------------- the review queue
+# The sorter's suggestions, waiting for an admin. Confirming writes through the library manager. See review.py.
+
+@bp.get("/admin/review")
+@admin_only
+def admin_review(who):
+    """One tab of the queue: ?tab=tabletop|books|graphic and ?limit= (how many waiting books to send)."""
+    limit = number(request.args.get("limit"), int) or 40
+    return jsonify(hub().review.queue(request.args.get("tab"), max(1, min(limit, 2000))))
+
+
+@bp.post("/admin/review/ready/<int:rule_id>")
+@admin_only
+def admin_review_write_ready(who, rule_id):
+    """Write every book a learned rule sorted to the library, in the background, after one backup."""
+    family_hub = hub()
+    try:
+        if not family_hub.review.start_ready(current_app._get_current_object(), rule_id, who["id"]):
+            return fail("A batch or a re-sort is already running. Wait for it to finish.", 409)
+    except review.ReviewError as exc:
+        return fail(str(exc))
+    return jsonify({"ok": True, "job": family_hub.review.job})
+
+
+@bp.get("/admin/review/job")
+@admin_only
+def admin_review_job(who):
+    """How a batch or the full re-sort is getting on, without building the whole queue."""
+    return jsonify(hub().review.job)
+
+
+@bp.get("/admin/review/<int:book_id>/credits")
+@admin_only
+def admin_review_credits(who, book_id):
+    try:
+        return jsonify({"authors": hub().review.find_credits(book_id)})
+    except review.ReviewError as exc:
+        return fail(str(exc), 404)
+
+
+@bp.post("/admin/review/<int:book_id>")
+@admin_only
+def admin_review_answer(who, book_id):
+    """{"action": "confirm", "fields": {...}, "new_game": {...}}, {"action": "confirm_all", "batch": ..., "fields": ...}
+    or {"action": "reject"}."""
+    data = request.get_json(silent=True) or {}
+    family_hub = hub()
+    action = data.get("action")
+    fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+    new_game = data.get("new_game") if isinstance(data.get("new_game"), dict) else None
+    try:
+        if action == "reject":
+            family_hub.review.reject(book_id, who["id"])
+            return jsonify({"ok": True, "message": "Left as it is. Family Hub won't suggest that again."})
+        if action == "confirm":
+            done = family_hub.review.confirm(book_id, fields, who["id"], new_game)
+            if not done["done"]:
+                return fail(" ".join(done["problems"]) or "Nothing was changed.")
+            first = done["done"][0]
+            return jsonify(dict(done, ok=True, message="Now %s by %s." % (first["title"], first["author"])))
+        if action == "confirm_all":
+            if not isinstance(data.get("batch"), str):
+                return fail("Say which batch.")
+            if not family_hub.review.start_batch(current_app._get_current_object(), data["batch"], book_id, fields, who["id"], new_game):
+                return fail("A batch or a re-sort is already running. Wait for it to finish.", 409)
+            return jsonify({"ok": True, "job": family_hub.review.job})
+    except review.ReviewError as exc:
+        return fail(str(exc))
+    return fail("Say confirm, confirm_all or reject.")
+
+
+@bp.post("/admin/review/resort")
+@admin_only
+def admin_review_resort(who):
+    """Sort the whole library again in the background; the queue fills as it goes."""
+    family_hub = hub()
+    if not family_hub.review.start_resort(current_app._get_current_object()):
+        return fail("A batch or a re-sort is already running. Wait for it to finish.", 409)
+    return jsonify({"ok": True, "job": family_hub.review.job})
+
+
+@bp.get("/admin/review/rules")
+@admin_only
+def admin_review_rules(who):
+    return jsonify(hub().review.rules())
+
+
+@bp.delete("/admin/review/rules/<int:rule_id>")
+@admin_only
+def admin_review_rule_delete(who, rule_id):
+    if not hub().review.delete_rule(rule_id):
+        return fail("That rule is gone already.", 404)
+    return jsonify({"ok": True})
+
+
+@bp.post("/admin/review/rules/merge")
+@admin_only
+def admin_review_rules_merge(who):
+    ids = (request.get_json(silent=True) or {}).get("ids")
+    if not isinstance(ids, list) or not all(isinstance(rule_id, int) for rule_id in ids):
+        return fail("Say which rules to combine.")
+    try:
+        rule_id = hub().review.merge(ids, who["id"])
+    except review.ReviewError as exc:
+        return fail(str(exc))
+    return jsonify({"ok": True, "rule": rule_id})
 
 
 # ------------------------------------------------------------ films and TV

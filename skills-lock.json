@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "skills": {
+    "agents-md-audit": {
+      "source": "pizzayap/pza-skills",
+      "sourceType": "github",
+      "skillPath": "skills/agents-md-audit/SKILL.md",
+      "computedHash": "7cb199d13b3abe75d674c1e56cd49c0cb0c3479c9e4b8cc7d444d573ac094975"
+    },
+    "agents-md-revise": {
+      "source": "pizzayap/pza-skills",
+      "sourceType": "github",
+      "skillPath": "skills/agents-md-revise/SKILL.md",
+      "computedHash": "20f865cffda8d59c6ff457cd17757fd5d51cb23d716ef9f063a6b433c97f78b5"
+    },
+    "arewedone": {
+      "source": "pizzayap/pza-skills",
+      "sourceType": "github",
+      "skillPath": "skills/arewedone/SKILL.md",
+      "computedHash": "3202dd43b691a0b7c6c69b5f98526dbb6a2dd2b257aaa6dc92309092e6bfff80"
+    },
+    "areyousure": {
+      "source": "pizzayap/pza-skills",
+      "sourceType": "github",
+      "skillPath": "skills/areyousure/SKILL.md",
+      "computedHash": "353079f87f35057b89e45b6961c94050ebb3f0d27458902149bc2839260cf450"
+    },
+    "astra-instruction-audit": {
+      "source": "pizzayap/pza-skills",
+      "sourceType": "github",
+      "skillPath": "skills/astra-instruction-audit/SKILL.md",
+      "computedHash": "a3facb356f40630b835f8313d91f2e2bed34ec9fc9f59ee0260064f7246511aa"
+    },
+    "browser-website-design-clone": {
+      "source": "pizzayap/pza-skills",
+      "sourceType": "github",
+      "skillPath": "skills/browser-website-design-clone/SKILL.md",
+      "computedHash": "7731ea7735ac092a7a5130b4739ae751be813a6a335ffd2e8335fe70f3344dc9"
+    },
+    "mac-space-cleanup": {
+      "source": "pizzayap/pza-skills",
+      "sourceType": "github",
+      "skillPath": "skills/mac-space-cleanup/SKILL.md",
+      "computedHash": "91912fb984279af47a14b3648439c9d275403a58d420e6256dac75e5522d8bc3"
+    }
+  }
+}

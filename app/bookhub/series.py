@@ -11,9 +11,12 @@ Written against Suwayomi-Server v2.4.
 """
 import json
 import re
+import statistics
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -26,6 +29,9 @@ PROFILES_KEY = "series:profiles-off"
 KEEP_EVERYTHING = {
     "downloadAsCbz": True, "autoDownloadNewChapters": True, "autoDownloadNewChaptersLimit": 0,
     "excludeEntryWithUnreadChapters": False, "excludeUnreadChapters": False, "excludeNotStarted": False,
+    # sites behind Cloudflare go through the FlareSolverr beside it on the VPN (flaresolverr-series in docker-compose.yml)
+    "flareSolverrEnabled": True, "flareSolverrUrl": "http://localhost:8191",
+    "flareSolverrTimeout": 120,  # a first check through the VPN can take over the default 60 seconds (seen with MangaFire)
 }
 STATUS = {"ONGOING": "Ongoing", "COMPLETED": "Finished", "PUBLISHING_FINISHED": "Finished", "LICENSED": "Licensed",
           "CANCELLED": "Cancelled", "ON_HIATUS": "Hiatus"}
@@ -113,6 +119,59 @@ def _chapter(chapter):
             "order": chapter["sourceOrder"], "read": bool(chapter.get("isRead")), "downloaded": bool(chapter.get("isDownloaded")),
             "group": chapter.get("scanlator") or "", "page": chapter.get("lastPageRead") or 0,
             "uploaded": int(chapter.get("uploadDate") or 0)}
+
+
+WEEKDAYS = ("Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays")
+LOOK_AGAIN = 3 * 3600   # on the day a chapter is due, look for it every three hours until it turns up
+
+
+def _day(stamp_ms):
+    return datetime.fromtimestamp(stamp_ms / 1000).date()
+
+
+def cadence(chapters, today=None):
+    """How often new chapters come out, from the dates the site says each one went up. Returns
+    {"last": date or None, "every": days or None, "weekday": "Mondays" or None, "next": date or None,
+    "late": bool, "paused": bool}. A few sites give every chapter the same date (the day the series was
+    added there) or none; those say nothing about a schedule, so every, weekday and next stay None."""
+    today = today or date.today()
+    days = sorted({_day(chapter["uploaded"]) for chapter in chapters if chapter.get("uploaded")})
+    found = {"last": days[-1] if days else None, "every": None, "weekday": None, "next": None, "late": False, "paused": False}
+    recent = days[-10:]  # what a series does now, not years ago
+    if len(recent) < 4:
+        return found
+    # a weekly series often gets the odd extra chapter on another day, so the usual weekday is found first
+    weekday, count = Counter(day.weekday() for day in recent).most_common(1)[0]
+    on_that_day = [day for day in recent if day.weekday() == weekday]
+    steps = [(later - earlier).days for earlier, later in zip(on_that_day, on_that_day[1:])]
+    if count / len(recent) >= 0.6 and steps and statistics.median(steps) in (7, 14):
+        every = int(statistics.median(steps))
+        found.update(every=every, weekday=WEEKDAYS[weekday], next=on_that_day[-1] + timedelta(days=every))
+    else:
+        gaps = [(later - earlier).days for earlier, later in zip(recent, recent[1:])]
+        typical = statistics.median(gaps)
+        steady = sum(abs(gap - typical) <= max(1, typical * 0.3) for gap in gaps) / len(gaps)
+        if steady < 0.6:  # all over the place: no point guessing a day
+            return found
+        every = max(1, round(typical))
+        found.update(every=every, next=recent[-1] + timedelta(days=every))
+    while found["next"] < found["last"]:  # an extra chapter came after the usual day
+        found["next"] += timedelta(days=found["every"])
+    grace = max(2, found["every"] // 2)
+    found["late"] = today > found["next"] + timedelta(days=grace)
+    # months past the usual gap: on a break, so stop guessing when the next one comes
+    if (today - found["last"]).days > max(4 * found["every"], 60):
+        found.update(paused=True, next=None, late=False)
+    return found
+
+
+def due_for_a_look(found, today=None):
+    """Is a followed series expected to have a new chapter about now? From the expected day until a couple of
+    days after it; past that the series server's own twice-a-day check is left to find it."""
+    today = today or date.today()
+    if not found["next"]:
+        return False
+    return found["next"] <= today <= found["next"] + timedelta(days=max(2, found["every"] // 2))
 
 
 def _has_title(chapter):
@@ -270,8 +329,15 @@ class Series:
 
     def detail(self, series_id, refresh=False):
         if refresh:
-            self.gql("mutation($id: Int!){fetchMangaAndChapters(input:{id:$id,fetchManga:true,fetchChapters:true}){manga{id}}}",
-                     {"id": series_id}, timeout=120)
+            try:
+                self.gql("mutation($id: Int!){fetchMangaAndChapters(input:{id:$id,fetchManga:true,fetchChapters:true}){manga{id}}}",
+                         {"id": series_id}, timeout=120)
+            except SeriesError as exc:
+                # some sites (AllManga) list a series with no chapters at all, and the server calls that an error.
+                # it is still a series: fetch its details alone and show it with none
+                if "No chapters found" not in str(exc):
+                    raise
+                self.gql("mutation($id: Int!){fetchManga(input:{id:$id}){manga{id}}}", {"id": series_id}, timeout=120)
         data = self.gql("query($id: Int!){manga(id:$id){%s description inLibrary realUrl} chapters(condition:{mangaId:$id}){nodes{%s}}}"
                         % (SERIES_FIELDS, CHAPTER_FIELDS), {"id": series_id})
         if not data.get("manga"):
@@ -291,6 +357,8 @@ class Series:
         # chapters_list has one copy of each chapter; every_chapter is everything the site lists, twice-listed ones too.
         info.update(description=(data["manga"].get("description") or "")[:3000], following=bool(data["manga"]["inLibrary"]),
                     link=data["manga"].get("realUrl") or "", chapters_list=kept, every_chapter=chapters, doubles=len(dropped))
+        found = cadence(kept)
+        info["cadence"] = {key: value.isoformat() if isinstance(value, date) else value for key, value in found.items()}
         return info
 
     def follow(self, series_id):
@@ -381,6 +449,43 @@ class Series:
                 pass
             self._quiet("mutation{updateLibrary(input:{}){updateStatus{jobsInfo{isRunning}}}}")
         threading.Thread(target=run, daemon=True).start()
+
+    def look_when_due(self, now=None, most=4):
+        """Look for new chapters of the followed series that are due one about now (from how often their
+        chapters come out), instead of waiting for the series server's twice-a-day check of everything.
+        At most a few a run, each at most every three hours. Returns the ids looked at."""
+        now = now or time.time()
+        today = datetime.fromtimestamp(now).date()
+        data = self.gql("{mangas(condition:{inLibrary:true}){nodes{id status chapters{nodes{uploadDate}}}}}")
+        looked = []
+        for manga in data["mangas"]["nodes"]:
+            if len(looked) >= most:
+                break
+            if STATUS.get(manga.get("status") or "", "") in DONE:
+                continue
+            found = cadence([{"uploaded": int(chapter.get("uploadDate") or 0)} for chapter in manga["chapters"]["nodes"]], today)
+            key = "series:looked:%d" % manga["id"]
+            if not due_for_a_look(found, today) or now - float(db.kv_get(self.hub.con(), key) or 0) < LOOK_AGAIN:
+                continue
+            db.kv_set(self.hub.con(), key, str(now))  # first, so a site that keeps failing is not asked every run
+            try:
+                self.download(manga["id"], refresh=True)  # followed series keep every chapter
+            except SeriesError:
+                continue  # the site is down; it is tried again in three hours
+            looked.append(manga["id"])
+        return looked
+
+    def update_extensions(self):
+        """Bring the extensions already installed up to date from their store, the way the Update button on
+        the series server's own Extensions page does. It never installs or removes one: which extensions there
+        are is the admin's choice, made there. Returns the names updated."""
+        found = self.gql("mutation{fetchExtensions(input:{}){extensions{pkgName name isInstalled hasUpdate}}}",
+                         timeout=120)["fetchExtensions"]["extensions"]
+        due = [ext for ext in found if ext["isInstalled"] and ext["hasUpdate"]]
+        if due:
+            self.gql("mutation($ids:[String!]!){updateExtensions(input:{ids:$ids, patch:{update:true}}){extensions{pkgName}}}",
+                     {"ids": [ext["pkgName"] for ext in due]}, timeout=600)
+        return [ext["name"] for ext in due]
 
     def _quiet(self, query):
         try:

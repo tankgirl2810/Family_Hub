@@ -115,8 +115,8 @@ or media folders, and the checks happen by themselves.
 
 The byte-for-byte check only catches the very same file. The same book as a different file (another
 edition, an EPUB beside a PDF) is added, and then shown as **one book**. To find and remove such spares
-afterwards: **Admin → Books → Copies of the same book → See the copies**, then **Remove spare copies from
-the library** (guide 8). The library's database is copied first, and spares are set aside rather than
+afterwards: **Admin → Books → Copies of the same book → See the copies**, then work through **Copies to
+sort out** (guide 8). The library's database is copied first, and spares are set aside rather than
 deleted unless they are identical.
 
 When searching for something new, **Discover** marks a result **In library** when you already have it,

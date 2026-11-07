@@ -1,0 +1,82 @@
+{
+  "about": "Tabletop game lines the sorter knows. 'match' finds the game; a name on its own (Pathfinder, Call of Cthulhu) is also a novel's name, so 'needs' lists words one of which must be there too, unless the book came in through a folder named after the game. Each edition's 'tag' is its full name, so '2e' never means two games at once. 'parent' nests a game under a bigger family of games. Patterns are Python regular expressions, matched without regard to case.",
+  "games": [
+    {
+      "tag": "World of Darkness",
+      "match": ["world of darkness", "\\bwod\\b"]
+    },
+    {
+      "tag": "Vampire: The Masquerade", "parent": "World of Darkness",
+      "match": ["vampire.{0,6}the.{0,3}masquerade", "\\bvtm\\b", "clan ?book", "clan novel", "bloodline ?book", "\\bv20\\b(?!\\.\\d| ?\\(\\d{4}\\))", "\\bv5\\b(?!\\.\\d)", "\\bkindred\\b.{0,20}(guide|storyteller)", "vampire.{0,6}the.{0,3}dark ages"],
+      "editions": [
+        {"tag": "Vampire: The Masquerade Dark Ages", "match": ["dark ages"]},
+        {"tag": "Vampire: The Masquerade V20", "match": ["\\bv20\\b(?!\\.\\d| ?\\(\\d{4}\\))", "20th anniversary"]},
+        {"tag": "Vampire: The Masquerade V5", "match": ["\\bv5\\b(?!\\.\\d)", "\\b5 ?ed\\b", "\\b5th ?edition", "fifth edition", "masquerade\\s*v?5\\b"]},
+        {"tag": "Vampire: The Masquerade Revised", "match": ["\\brevised\\b", "\\b3rd edition\\b"]},
+        {"tag": "Vampire: The Masquerade 2nd edition", "match": ["\\b2nd ed(ition)?\\b"]}
+      ]
+    },
+    {
+      "tag": "Werewolf: The Apocalypse", "parent": "World of Darkness",
+      "match": ["werewolf.{0,6}the.{0,3}apocalypse", "\\bw20\\b(?!\\.\\d)", "\\bw5\\b(?!\\.\\d)"],
+      "editions": [
+        {"tag": "Werewolf: The Apocalypse W20", "match": ["\\bw20\\b(?!\\.\\d)", "20th anniversary"]},
+        {"tag": "Werewolf: The Apocalypse W5", "match": ["\\bw5\\b(?!\\.\\d)", "\\b5th ?edition", "fifth edition"]},
+        {"tag": "Werewolf: The Apocalypse Revised", "match": ["\\brevised\\b"]}
+      ]
+    },
+    {
+      "tag": "Hunter: The Reckoning", "parent": "World of Darkness",
+      "match": ["hunter.{0,6}the.{0,3}reckoning", "\\bh5\\b(?!\\.\\d)"],
+      "editions": [
+        {"tag": "Hunter: The Reckoning H5", "match": ["\\b5 ?ed\\b", "\\bh5\\b(?!\\.\\d)", "\\b5th ?edition", "fifth edition"]}
+      ]
+    },
+    {
+      "tag": "Mage: The Ascension", "parent": "World of Darkness",
+      "match": ["mage.{0,6}the.{0,3}ascension", "\\bm20\\b(?!\\.\\d)"],
+      "editions": [
+        {"tag": "Mage: The Ascension M20", "match": ["\\bm20\\b(?!\\.\\d)", "20th anniversary"]},
+        {"tag": "Mage: The Ascension Revised", "match": ["\\brevised\\b"]}
+      ]
+    },
+    {
+      "tag": "D&D",
+      "match": ["dungeons?\\s*(&|and)\\s*dragons", "\\bad&d\\b", "\\bd&d\\b", "\\bdnd\\b", "\\bddal", "adventurers league", "\\b5e\\b", "\\bdm'?s? (guide|screen|rewards)", "dungeon master", "forgotten realms", "\\bdragonlance\\b", "\\bddex", "unearthed arcana", "curse ?of ?strahd", "tyranny ?of ?dragons", "elemental ?evil", "rage ?of ?demons", "tomb ?of ?annihilation", "lost ?mine ?of ?phandelver", "hoard ?(of ?the ?)?dragon ?queen", "\\bhotdq\\b", "out ?of ?the ?abyss", "princes ?of ?the ?apocalypse", "rise ?of ?tiamat", "storm ?king'?s ?thunder"],
+      "editions": [
+        {"tag": "D&D 2024", "match": ["\\b2024\\b", "\\b5\\.5e\\b", "one d&d"]},
+        {"tag": "D&D 5e", "match": ["\\b5e\\b", "5th edition", "fifth edition", "\\bddal", "\\bddex", "adventurers league", "adventure league", "unearthed arcana", "curse ?of ?strahd", "tyranny ?of ?dragons", "elemental ?evil", "rage ?of ?demons", "tomb ?of ?annihilation", "lost ?mine ?of ?phandelver", "hoard ?(of ?the ?)?dragon ?queen", "\\bhotdq\\b", "out ?of ?the ?abyss", "princes ?of ?the ?apocalypse", "rise ?of ?tiamat", "storm ?king'?s ?thunder"]},
+        {"tag": "D&D 3.5e", "match": ["\\b3\\.5e?\\b", "\\bv\\.?3\\.5\\b"]},
+        {"tag": "D&D 3e", "match": ["\\b3e\\b", "3rd edition", "third edition"]},
+        {"tag": "AD&D 2e", "match": ["\\bad&d\\b.{0,30}\\b(2e|2nd)", "advanced dungeons.{0,40}2nd", "\\b2nd edition\\b"]},
+        {"tag": "AD&D 1e", "match": ["\\bad&d\\b", "advanced dungeons"]}
+      ]
+    },
+    {
+      "tag": "Pathfinder",
+      "match": ["pathfinder", "\\bpf ?[12]e?\\b", "\\bpzo ?\\d", "\\bwayfinder\\b"],
+      "needs": ["\\bpf ?[12]", "\\bpzo", "paizo", "pathfinder (rpg|roleplaying|society|tales|adventure|player|core|beginner|bestiary|lost omens|bounty|module|chronicles|flip|pawns|battles|playtest|[12]e?\\b|second|first)", "lost omens", "adventure path", "golarion", "\\bwayfinder\\s*#?\\s*\\d", "\\b(1st|2nd|first|second) edition\\b"],
+      "editions": [
+        {"tag": "Pathfinder 2e", "match": ["\\bpf ?2e?\\b", "pathfinder ?2e?\\b", "2nd edition", "second edition", "\\bremaster", "player core", "gm core", "lost omens", "pzo ?2\\d{3}\\b"]},
+        {"tag": "Pathfinder 1e", "match": ["\\bpf ?1e?\\b", "pathfinder ?1e?\\b", "1st edition", "first edition", "pathfinder (rpg|roleplaying game)", "pzo ?1\\d{3}\\b"]}
+      ]
+    },
+    {
+      "tag": "Starfinder",
+      "match": ["starfinder"],
+      "editions": [
+        {"tag": "Starfinder 2e", "match": ["\\bsf ?2e?\\b", "starfinder ?2e?\\b", "2nd edition", "second edition"]},
+        {"tag": "Starfinder 1e", "match": ["\\bsf ?1e?\\b", "starfinder ?1e?\\b", "1st edition", "first edition"]}
+      ]
+    },
+    {
+      "tag": "Call of Cthulhu",
+      "match": ["call of cthulhu"],
+      "needs": ["\\brpg\\b", "roleplaying", "role-playing", "chaosium", "keeper", "investigator", "\\b\\d(st|nd|rd|th) edition\\b", "sourcebook", "scenario"],
+      "editions": [
+        {"tag": "Call of Cthulhu 7th edition", "match": ["\\b7th ed(ition)?\\b", "\\b7e\\b"]},
+        {"tag": "Call of Cthulhu 6th edition", "match": ["\\b6th ed(ition)?\\b", "\\b6e\\b"]}
+      ]
+    }
+  ]
+}

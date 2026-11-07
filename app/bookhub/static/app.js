@@ -152,7 +152,7 @@ function starMark() {
 }
 // Which section each page belongs to, and the tabs along the top of that section.
 const PAGE_SECTION = { home: 'home', movies: 'movies', downloads: 'downloads', photos: 'photos', files: 'files', admin: 'admin',
-    sort: 'admin', tags: 'admin', copies: 'admin', details: 'admin', watchlist: 'watchlist' };
+    sort: 'admin', tags: 'admin', copies: 'admin', details: 'admin', rules: 'admin', fix: 'admin', watchlist: 'watchlist' };
 function sectionTabs(section) {
   if (section === 'books') {
     const tabs = [['library', 'Library', '#/library']];
@@ -302,7 +302,7 @@ async function route() {
   if (['admin', 'sort', 'tags', 'copies'].includes(page) && !isAdmin()) page = 'home';
   const section = page === 'profiles' ? 'profiles' : (PAGE_SECTION[page] || 'books');
   let tab = { library: 'library', book: 'library', shelf: 'library', series: 'library', read: 'library', dashboard: 'dashboard',
-      mybooks: 'dashboard', devices: 'dashboard', discover: 'discover' }[page];
+      mybooks: 'dashboard', devices: 'dashboard', discover: 'discover', tabletop: 'library' }[page];
   if (section === 'admin') tab = page === 'admin' && parts[1] !== 'books' ? 'hub' : 'books';
   if (section === 'movies') tab = parts[1] === 'search' ? 'search' : 'watch';
   shell(section, tab);
@@ -315,8 +315,8 @@ async function route() {
   if (moved) window.scrollTo(0, 0);
   setMain(el('p', { class: 'small dim', role: 'status', text: 'Loading…' }));
   const pages = { home: pageHome, movies: pageMovies, downloads: pageDownloads, shelf: pageShelf, photos: pageSoon, files: pageSoon, profiles: pageProfiles, library: pageLibrary, book: pageBook,
-    dashboard: pageDashboard, admin: parts[1] === 'books' ? pageBooksAdmin : pageHubAdmin, sort: pageSort, tags: pageTags, copies: pageCopies, details: pageDetails, watchlist: pageWatchlist,
-    discover: pageDiscover, devices: pageDevices, series: pageSeries, read: pageRead, mybooks: pageMyBooks };
+    dashboard: pageDashboard, admin: parts[1] === 'books' ? pageBooksAdmin : pageHubAdmin, sort: pageSort, tags: pageTags, copies: pageCopies, details: pageDetails, rules: pageRules, fix: pageFix, watchlist: pageWatchlist,
+    discover: pageDiscover, devices: pageDevices, series: pageSeries, read: pageRead, mybooks: pageMyBooks, tabletop: pageTabletop };
   const gen = routeGen;
   try { await (pages[page] || pageLibrary)(page === 'admin' ? parts[2] : parts[1], parts[2]); } catch (err) { if (!(err instanceof Stale)) pageFailed(err); }
   // The link that was used has been redrawn, so keyboard and screen reader users would be left at the top of
@@ -1696,7 +1696,7 @@ function bookCard(book, onChange, opts) {
   const fmt = !book.in_library ? (book.kindle ? 'KINDLE' : 'ELSEWHERE') : (book.formats.includes('EPUB') ? 'EPUB' : (book.formats[0] || ''));
   const coverProps = { class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title), title: book.title,
     style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') };
-  const inner = [el('span', { class: 'fmt', text: fmt }), el('span', { class: 't', text: book.title })];
+  const inner = [el('span', { class: 'fmt', text: fmt }), el('span', { class: 't', text: book.title }), langBadge(book)];
   const picture = book.in_library ? el('a', Object.assign({ href: '#/book/' + book.id }, coverProps), inner) : el('div', coverProps, inner);
   // A book this person has finished is shown faded, with a note across it.
   const done = book.status === 'finished' && !isGuest() && !(opts && opts.plain);
@@ -1763,7 +1763,7 @@ function ordered(items, order) {
 }
 
 function groupSeries(books) {
-  const keyOf = (book) => (book.in_library && (book.collection || book.series) ? (book.collection || book.series).toLowerCase() : null);
+  const keyOf = (book) => (book.in_library && book.kind !== 'Tabletop' && (book.collection || book.series) ? (book.collection || book.series).toLowerCase() : null);
   const by = {};
   for (const book of books) { const key = keyOf(book); if (key) (by[key] = by[key] || []).push(book); }
   const out = [], done = new Set();
@@ -1988,6 +1988,7 @@ function pageLibrary(section) {
     ['title', 'author', 'series', 'epub', 'community', 'family', 'mine'].map((dotKey) => el('span', {}, el('span', { class: 'dot',
         'data-k': dotKey, 'aria-hidden': 'true' }), ' ' + (dotKey === 'epub' ? 'Book file' : TERM_LABEL[dotKey]))));
   const seriesBox = el('div', { class: 'stack' });
+  const gamesLink = el('a', { class: 'btn sm', href: '#/tabletop', hidden: true, text: 'Game books by game' });
   const bookKinds = () => appState.kinds.filter((kind) => kind !== GRAPHIC);
   let states = {};  // series on my list (lower-case name) -> where its book for the reading app stands
 
@@ -2012,21 +2013,22 @@ function pageLibrary(section) {
     const tab = tabOf();
     const kinds = kindsNow();
     const all = terms();
-    const data = await api('GET', '/api/books?' + qs({ kinds: kinds.join(','), terms: JSON.stringify(all.map(sent)) }));
-    let shown = ordered(groupSeries(data.books), recall('order', 'title'));
+    const data = await api('GET', '/api/books?' + qs({ kinds: kinds.join(','), terms: JSON.stringify(all.map(sent)), feed: 1 }));
+    let shown = ordered(groupSeries(groupGameBooks(data.books)), recall('order', 'title'));
+    gamesLink.hidden = view.section !== 'books' || !data.books.some((book) => book.kind === 'Tabletop' || book.game);
     if (view.section === 'graphic' && tab === 'series') shown = shown.filter((item) => item.volumes || item.chapter_series);
     if (view.section === 'graphic' && tab === 'oneshots') shown = shown.filter((item) => !item.volumes && !item.chapter_series);
     const info = data.series_info || {};
     fill(grid, ...shown.map((item) => item.chapter_series ? chapterCard(item,
         () => loadBooks().catch(oops)) : item.volumes ? seriesStack(item, info[item.series.toLowerCase()], states[item.series.toLowerCase()],
-        () => loadBooks().catch(oops)) : bookCard(item, () => loadBooks().catch(oops))));
-    const stacks = shown.filter((item) => item.volumes).length;
+        () => loadBooks().catch(oops)) : item.game_group ? gameStack(item) : bookCard(item, () => loadBooks().catch(oops))));
+    const stacks = shown.filter((item) => item.volumes || item.game_group).length;
     const followed = shown.filter((item) => item.chapter_series).length;
-    const books = shown.reduce((total, item) => total + (item.volumes ? item.volumes.length : item.chapter_series ? 0 : 1), 0);
+    const books = shown.reduce((total, item) => total + (item.volumes ? item.volumes.length : item.game_group ? item.items.length : item.chapter_series ? 0 : 1), 0);
     count.textContent = !books && !followed ? (all.length ? 'Nothing matches. Take a term away, or switch one from + to "or".' : !appState.library_available ? '' : 'Nothing here yet.')
       : plural(books, 'book') + (stacks ? ' · ' + plural(stacks, 'series',
           'series') + ' shown as one card each' : '') + (followed ? ' · ' + plural(followed, 'series',
-          'series') + ' followed chapter by chapter' : '');
+          'series') + ' followed chapter by chapter' : '') + (data.hidden ? ' · ' + plural(data.hidden, 'book') + ' you hid (Refine to change)' : '');
   }
   const searchBtn = el('button', { class: 'btn pri', type: 'button', text: 'Search', onclick: () => run() });
   const waiting = el('span', { class: 'small', role: 'status' });
@@ -2095,6 +2097,8 @@ function pageLibrary(section) {
     ...[['+', '+ Must have'], ['-', '− Must not have'], ['or', '∨ Any of these']].map(([key, label]) => el('button', {
       type: 'button', role: 'radio', 'aria-checked': String(addSign === key), text: label,
       onclick: () => { addSign = key; drawSigns(); } })));
+  // a tag with others under it is drawn in one box with them: Pathfinder [1e] [2e]
+  const nestBox = (group, picks) => (picks.length > 1 ? el('span', { class: 'tagnest', role: 'group', 'aria-label': group[0].tag + ' and the tags under it' }, picks) : picks[0]);
   const showSuggestions = debounce(async () => {
     const last = view.draft.replace(/.*\b(?:by|in|not|OR)\s+/i, '').replace(/^[+-]/, '').trim();
     // Words after "by" are an author, not a tag: the list stays as it is.
@@ -2104,11 +2108,12 @@ function pageLibrary(section) {
     const chosen = (tag) => view.chips.findIndex((picked) => picked.fields.length === 1 && picked.fields[0] === 'tag' && picked.value.toLowerCase() === tag.tag.toLowerCase());
     const list = data.tags.slice(0, typing || showAll ? 120 : TOP_TAGS);
     suggest.classList.toggle('all', typing || showAll);
-    fill(suggest, ...(list.length ? list.map((entry) => {
+    fill(suggest, ...(list.length ? nestTags(list).map((group) => nestBox(group, group.map((entry) => {
       const at = chosen(entry);
       const term = at >= 0 ? view.chips[at] : null;
       const { dots, say } = termDots({ sources: entry.sources });
-      return el('button', { class: 'tagpick' + (term && term.sign === '-' ? ' minus' : ''), type: 'button', 'aria-pressed': String(!!term), title: say + ' tag',
+      return el('button', { class: 'tagpick' + (entry.depth ? ' child' : '') + (term && term.sign === '-' ? ' minus' : ''), type: 'button', 'aria-pressed': String(!!term),
+        title: say + ' tag' + (entry.depth ? ': ' + entry.tag : ''),
         'aria-label': (term ? 'Take away' : 'Add, as ' + SIGN_SAY[addSign] + ',') + ' the tag ' + entry.tag + ' (' + plural(entry.count, 'book') + ', ' + say + ')',
         onclick: () => {
           if (term) view.chips.splice(at, 1);
@@ -2118,8 +2123,8 @@ function pageLibrary(section) {
           }
           drawChips(); reload(); showSuggestions();
         } }, term ? el('span', { class: 'sg', text: SIGN_TEXT[term.sign] }) : null,
-        dots, el('span', { class: 'val', text: entry.tag }), el('span', { class: 'n', text: entry.count }));
-    }) : [el('span', { class: 'small dim', text: typing ? 'No tags match "' + last + '".' : 'No tags yet.' })]));
+        dots, el('span', { class: 'val', text: entry.label }), el('span', { class: 'n', text: entry.count }));
+    }))) : [el('span', { class: 'small dim', text: typing ? 'No tags match "' + last + '".' : 'No tags yet.' })]));
     fill(moreTags, !typing && data.tags.length > TOP_TAGS ? el('button', { class: 'btn sm', type: 'button',
         text: showAll ? 'Fewer tags' : 'All tags (' + data.tags.length + ')', 'aria-expanded': String(showAll),
         onclick: () => { showAll = !showAll; showSuggestions(); } }) : null);
@@ -2163,6 +2168,7 @@ function pageLibrary(section) {
   const refine = el('div', { class: 'stack gap10 refine', id: 'lib-refine', hidden: !recall('refine', false) },
     el('div', { class: 'lib-opt' }, el('span', { class: 'lab', text: 'Look in' }), modes),
     el('div', { class: 'lib-opt' }, el('span', { class: 'lab', text: 'Add tags as' }), signRow),
+    isGuest() ? null : hiddenFeedBox(() => loadBooks().catch(oops)),
     colourKey,
     el('details', { class: 'small dim' }, el('summary', { text: 'How to type a search' }),
       el('p', { id: 'search-help',
@@ -2177,7 +2183,7 @@ function pageLibrary(section) {
     pageHead('Library',
         isGuest() ? 'Browse and download. Nothing is tracked for guests.' : 'Every book: the ones on the home server, the ones you have read elsewhere and the ones the family has on Kindle. Add books to My books to have them on your devices.'),
     appState.library_available ? null : el('p', { class: 'bad', text: 'The book library could not be found. Check the CALIBRE_LIBRARY folder in the settings.' }),
-    el('div', { class: 'lib-bar' }, sectionRow, tabRow),
+    el('div', { class: 'lib-bar' }, sectionRow, tabRow, gamesLink),
     el('section', { class: 'panel cut stack lib-search', 'aria-label': 'Search the library' },
       el('div', { class: 'row end', style: 'flex-wrap:nowrap' }, field('Build your search', box, 'wide'), searchBtn),
       el('div', { class: 'lib-tools' }, el('div', { class: 'lib-opt' }, el('span', { class: 'lab', text: 'Sort' }), orderRow), refineToggle),
@@ -2185,6 +2191,278 @@ function pageLibrary(section) {
     seriesBox, count, grid);
   draw();
   loadStates().then(() => loadBooks()).catch(() => { /* the badges are a nicety */ });
+}
+
+// ------------------------------------------------------------- game books
+// Tabletop books (and novels or comics carrying a game's tag) by Game › Edition › Product line; the cards that
+// keep small game books from flooding the library; nested tags in the tag picker; what each person hides.
+// The grouping itself is worked out on the server (tabletop.py); these only draw it.
+
+const ROLE_PLURAL = { Rulebook: 'Rulebooks', Adventure: 'Adventures', 'Player aid': 'Player aids', 'GM aid': 'GM aids' };
+const ROLE_WORD = { Rulebook: 'rulebook', Adventure: 'adventure', 'Player aid': 'player aid', 'GM aid': 'GM aid' };
+const NO_GAME = 'Game not known';
+// the library keeps three-letter codes ("rus"); the badge shows two letters and says the whole name on hover
+const LANGUAGES = { rus: ['RU', 'Russian'], ukr: ['UK', 'Ukrainian'], deu: ['DE', 'German'], ger: ['DE', 'German'], fra: ['FR', 'French'],
+  fre: ['FR', 'French'], spa: ['ES', 'Spanish'], ita: ['IT', 'Italian'], por: ['PT', 'Portuguese'], pol: ['PL', 'Polish'],
+  nld: ['NL', 'Dutch'], dut: ['NL', 'Dutch'], swe: ['SV', 'Swedish'], ces: ['CS', 'Czech'], cze: ['CS', 'Czech'], hun: ['HU', 'Hungarian'],
+  tur: ['TR', 'Turkish'], ell: ['EL', 'Greek'], gre: ['EL', 'Greek'], jpn: ['JA', 'Japanese'], kor: ['KO', 'Korean'], zho: ['ZH', 'Chinese'], chi: ['ZH', 'Chinese'] };
+
+function langBadge(book) {
+  if (!book.language) return null;
+  const [code, name] = LANGUAGES[book.language] || [book.language.slice(0, 3).toUpperCase(), book.language];
+  return el('span', { class: 'lang', title: 'In ' + name, 'aria-label': 'In ' + name, text: code });
+}
+
+// "Pathfinder 2e" under "Pathfinder" reads "2e" (tabletop.short_name does the same on the server)
+function shortTag(tag, parent) {
+  if (parent && tag.toLowerCase().startsWith(parent.toLowerCase()) && tag.length > parent.length) {
+    const rest = tag.slice(parent.length).replace(/^[\s:\-–·]+/, '');
+    if (rest) return rest;
+  }
+  return tag;
+}
+
+const tabletopLink = (focus) => '#/tabletop/' + encodeURIComponent(qs(focus));
+const isMaps = (book) => /\bmaps?\b|flip-?mats?|\btiles?\b/i.test(book.title);
+const isPlayersGuide = (book) => /players?'?s? ?guide/i.test(book.title);
+
+// Small game books shown together in the library: an adventure series (with its player's guide and maps) is one
+// card, and player or GM aids that belong to no series are one card per game, edition and role. Rulebooks and
+// lone adventures stay cards of their own. A "group" of one is just its book.
+function groupGameBooks(books) {
+  const groups = new Map(), out = [];
+  for (const book of books) {
+    const small = book.kind === 'Tabletop' && book.in_library && book.role && book.role !== 'Rulebook';
+    const by = !small ? null : book.game_series ? 'series' : book.role !== 'Adventure' ? 'role' : null;
+    if (!by) { out.push(book); continue; }
+    const key = [by, book.game, book.edition, by === 'series' ? book.game_series : book.role].join('|').toLowerCase();
+    let group = groups.get(key);
+    if (!group) {
+      group = { game_group: true, by, game: book.game, edition: book.edition, role: book.role, items: [], added_at: '',
+        title: by === 'series' ? book.game_series : (book.edition || book.game || 'Game books') + ' · ' + ROLE_PLURAL[book.role], author: '' };
+      groups.set(key, group);
+      out.push(group);
+    }
+    group.items.push(book);
+    if ((book.added_at || '') > group.added_at) group.added_at = book.added_at;
+  }
+  return out.map((item) => (item.game_group && item.items.length < 2 ? item.items[0] : item));
+}
+
+// "6 parts + Player's Guide + maps", or "34 GM aids"
+function gameGroupLine(group) {
+  if (group.by === 'role') return plural(group.items.length, ROLE_WORD[group.role]);
+  const of = (role) => group.items.filter((book) => book.role === role);
+  const adventures = of('Adventure'), players = of('Player aid'), gms = of('GM aid');
+  return [adventures.length ? plural(adventures.length, 'part') : '',
+    players.length === 1 && isPlayersGuide(players[0]) ? "Player's Guide" : players.length ? plural(players.length, 'player aid') : '',
+    gms.length && gms.every(isMaps) ? 'maps' : gms.length ? plural(gms.length, 'GM aid') : ''].filter(Boolean).join(' + ');
+}
+
+function gameStack(group) {
+  const first = group.items.find((book) => book.has_cover) || group.items[0];
+  const focus = group.by === 'role' ? { game: group.game || NO_GAME, edition: group.edition, role: group.role }
+    : { game: group.game || NO_GAME, edition: group.edition, key: group.items[0].key };
+  const href = tabletopLink(focus);
+  const line = gameGroupLine(group);
+  const read = group.items.filter((book) => book.status === 'finished').length;
+  const coverProps = { href, class: 'cover' + (first.has_cover ? ' has-img' : '') + titleSize(group.title), title: group.title,
+    'aria-label': group.title + ', ' + line, style: '--cv:' + coverColor(group.title) + (first.has_cover ? ';background-image:url(' + coverUrl(first) + ')' : '') };
+  return el('div', { class: 'book' },
+    el('div', { class: 'coverwrap stack-of' }, el('a', coverProps, el('span', { class: 'fmt', text: plural(group.items.length, 'book') }),
+      el('span', { class: 't', text: first.has_cover ? '' : group.title }))),
+    el('a', { class: 'card-title', href, title: group.title, text: group.title }),
+    el('div', { class: 'small dim card-line', title: line, text: line }),
+    el('div', { class: 'card-tags' }, el('span', { class: 'lab', text: ['Tabletop', group.by === 'series' ? group.edition || group.game : ''].filter(Boolean).join(' · ') })),
+    isGuest() ? null : el('div', { class: 'small card-line', text: read ? read + ' of ' + group.items.length + ' read' : 'Not started' }),
+    el('div', { class: 'card-rating' }),
+    el('div', { class: 'card-foot' }, el('a', { class: 'btn sm', href, 'aria-label': 'Open ' + group.title, text: 'Open' })));
+}
+
+// The tag picker's list as a tree: each tag followed by the tags nested under it, which read short ("2e").
+function nestTags(list) {
+  const byName = new Map(list.map((entry) => [entry.tag.toLowerCase(), entry]));
+  const kids = new Map();
+  for (const entry of list) {
+    const up = (entry.parent || '').toLowerCase();
+    if (up && byName.has(up)) { if (!kids.has(up)) kids.set(up, []); kids.get(up).push(entry); }
+  }
+  const out = [], seen = new Set();
+  const walk = (entry, depth, parent) => {
+    if (seen.has(entry.tag.toLowerCase())) return;
+    seen.add(entry.tag.toLowerCase());
+    out.push(Object.assign({}, entry, { depth, label: depth ? shortTag(entry.tag, parent) : entry.tag }));
+    for (const kid of (kids.get(entry.tag.toLowerCase()) || []).sort((left, right) => left.tag.localeCompare(right.tag))) walk(kid, depth + 1, entry.tag);
+  };
+  for (const entry of list) if (!entry.parent || !byName.has(entry.parent.toLowerCase())) walk(entry, 0, '');
+  for (const entry of list) walk(entry, 0, '');  // anything a loop left out
+  // back into groups: a tag with others under it wears them in one box
+  const groups = [];
+  for (const entry of out) {
+    if (entry.depth && groups.length) groups[groups.length - 1].push(entry);
+    else groups.push([entry]);
+  }
+  return groups;
+}
+
+// The tags and roles this person hides from their own library feed, in the library's Refine panel.
+function hiddenFeedBox(onChange) {
+  const box = el('div', { class: 'lib-opt' });
+  const choices = el('datalist', { id: 'hide-choices' });
+  const input = el('input', { type: 'text', list: 'hide-choices', maxlength: 60, placeholder: 'A tag, or a role such as GM aid',
+    'aria-label': 'Tag or role to hide from my library', style: 'width:min(280px, 100%)' });
+  let names = [];
+  const save = (next) => api('PUT', '/api/me/hidden', { hidden: next }).then((reply) => { names = reply.hidden; draw(); onChange(); }).catch(oops);
+  const draw = () => fill(box, el('span', { class: 'lab', text: 'Hidden' }),
+    el('div', { class: 'terms', role: 'list', 'aria-label': 'Hidden from my library' }, names.map((name) => el('span', { class: 'term', role: 'listitem' },
+      el('span', { class: 'val', style: 'padding-left:10px', text: name }),
+      el('button', { class: 'x', type: 'button', text: '×', 'aria-label': 'Show ' + name + ' in my library again', onclick: () => save(names.filter((other) => other !== name)) })))),
+    el('form', { class: 'row', onsubmit: (event) => {
+      event.preventDefault();
+      const name = input.value.trim();
+      if (name) { input.value = ''; save(names.concat(name)); }
+    } }, input, choices, el('button', { class: 'btn sm', type: 'submit', text: 'Hide' })),
+    el('span', { class: 'small dim', text: names.length ? 'Hidden books still turn up when you search, and under Game books.' : 'Nothing hidden. Hide a tag or a role to keep those books out of your library list.' }));
+  api('GET', '/api/me/hidden').then((reply) => {
+    names = reply.hidden;
+    draw();
+    return api('GET', '/api/tags?' + qs({ merged: 1, scopes: 'family,epub,community' })).then((tags) => fill(choices,
+      reply.roles.concat(tags.tags.map((tag) => tag.tag)).map((name) => el('option', { value: name }))));
+  }).catch(() => { /* a nicety */ });
+  draw();
+  return box;
+}
+
+// Every game book, by Game › Edition › Product line. Hidden tags still show here.
+async function pageTabletop(focusText) {
+  const focus = new URLSearchParams(decodeURIComponent(focusText || ''));
+  const data = await api('GET', '/api/books?' + qs({ view: 'tabletop' }));
+  const books = data.books;
+  let hiddenNow = (data.hidden || []).slice();
+  const view = { game: focus.get('game') || '', edition: focus.has('edition') ? focus.get('edition') : null,
+    roles: new Set(focus.get('role') ? [focus.get('role')] : []), open: focus.get('key') || '' };
+  const gameRow = el('div', { class: 'tabs', role: 'group', 'aria-label': 'Game' });
+  const editionRow = el('div', { class: 'tabs sm', role: 'group', 'aria-label': 'Edition' });
+  const roleRow = el('div', { class: 'terms', role: 'group', 'aria-label': 'Show only these' });
+  const hideRow = el('div', { class: 'row gap10' });
+  const body = el('div', { class: 'stack gap28' });
+  const shown = (book) => !view.roles.size || view.roles.has(book.role);
+  const isHidden = (name) => hiddenNow.some((tag) => tag.toLowerCase() === name.toLowerCase());
+
+  // Inside an adventure path a part says its number where the author would be.
+  const asPart = (book) => (book.role === 'Adventure' && book.game_index
+    ? Object.assign({}, book, { author: 'Part ' + book.game_index + (book.author && book.author !== 'Unknown' ? ' · ' + book.author : '') }) : book);
+  // after "Add to my books" and the like: the same game and edition again, with that book's line open
+  const refresh = async (key) => {
+    const fresh = await api('GET', '/api/books?' + qs({ view: 'tabletop' }));
+    books.splice(0, books.length, ...fresh.books);
+    data.tree = fresh.tree;
+    view.open = key;
+    draw();
+  };
+  const card = (book) => bookCard(asPart(book), () => refresh(book.key).catch(oops));
+
+  function lineSummary(items) {
+    const count = {};
+    for (const book of items) { const word = ROLE_WORD[book.role] || 'book'; count[word] = (count[word] || 0) + 1; }
+    return Object.entries(count).map(([word, many]) => plural(many, word)).join(', ');
+  }
+  function lineBox(line, openAll) {
+    const items = line.items.map((at) => books[at]).filter(shown);
+    if (!items.length) return null;
+    const holder = el('div', { class: 'shelf' });
+    const draw = () => { if (!holder.childElementCount) fill(holder, items.map(card)); };
+    const box = el('details', { class: 'tt-line', ontoggle: () => { if (box.open) draw(); } },
+      el('summary', {}, el('span', { class: 'tt-name', text: line.name }), el('span', { class: 'small dim', text: lineSummary(items) })), holder);
+    if (openAll || (view.open && items.some((book) => book.key === view.open))) { box.open = true; draw(); }
+    if (view.open && items.some((book) => book.key === view.open)) requestAnimationFrame(() => box.scrollIntoView({ block: 'start' }));
+    return box;
+  }
+  function editionBox(edition, titled, openAll) {
+    const lines = edition.lines.map((line) => lineBox(line, openAll)).filter(Boolean);
+    if (!lines.length) return null;
+    return el('section', { class: 'stack' }, titled ? el('h2', { class: 'tt-edition', text: edition.edition || edition.label }) : null, lines);
+  }
+
+  function hideButton(name) {
+    if (isGuest() || !name) return null;
+    const hidden = isHidden(name);
+    return el('button', { class: 'btn sm', type: 'button', 'aria-pressed': String(hidden),
+      text: hidden ? 'Show ' + name + ' in my library again' : 'Hide ' + name + ' from my library', onclick: async () => {
+        const next = hidden ? hiddenNow.filter((tag) => tag.toLowerCase() !== name.toLowerCase()) : hiddenNow.concat(name);
+        try {
+          hiddenNow = (await api('PUT', '/api/me/hidden', { hidden: next })).hidden;
+          toast(hidden ? name + ' is back in your library.' : name + ' is hidden from your library. It still shows here and when you search.');
+        } catch (err) { oops(err); }
+        draw();
+      } });
+  }
+
+  function draw() {
+    const game = data.tree.find((entry) => entry.game === view.game) || data.tree[0];
+    if (!game) {
+      fill(body, el('p', { class: 'dim', text: 'No game books yet. Books sorted as Tabletop, and novels or comics with a game\'s tag, show here.' }));
+      return;
+    }
+    view.game = game.game;
+    fill(gameRow, data.tree.map((entry) => el('button', { type: 'button', 'aria-pressed': String(entry === game),
+      title: entry.parent ? entry.parent + ' › ' + entry.game : entry.game,
+      onclick: () => { view.game = entry.game; view.edition = null; view.open = ''; draw(); } }, entry.game, el('span', { class: 'tt-n', text: entry.count }))));
+    const edition = view.edition === null ? null : game.editions.find((entry) => entry.edition === view.edition) || null;
+    editionRow.hidden = game.editions.length < 2;
+    fill(editionRow, el('button', { type: 'button', 'aria-pressed': String(!edition), onclick: () => { view.edition = null; draw(); } }, 'All editions'),
+      game.editions.map((entry) => el('button', { type: 'button', 'aria-pressed': String(entry === edition), title: entry.edition || entry.label,
+        onclick: () => { view.edition = entry.edition; draw(); } }, entry.label, el('span', { class: 'tt-n', text: entry.count }))));
+    const scope = edition ? [edition] : game.editions;
+    const counts = {};
+    for (const one of scope) for (const line of one.lines) for (const at of line.items) if (books[at].role) counts[books[at].role] = (counts[books[at].role] || 0) + 1;
+    fill(roleRow, Object.keys(ROLE_PLURAL).filter((role) => counts[role]).map((role) => el('button', { class: 'tagpick', type: 'button',
+      'aria-pressed': String(view.roles.has(role)), 'aria-label': (view.roles.has(role) ? 'Stop showing only ' : 'Show only ') + ROLE_PLURAL[role].toLowerCase(),
+      onclick: () => { if (view.roles.has(role)) view.roles.delete(role); else view.roles.add(role); draw(); } },
+      el('span', { class: 'val', text: ROLE_PLURAL[role] }), el('span', { class: 'n', text: counts[role] }))));
+    fill(hideRow, hideButton(edition ? edition.edition : game.game === NO_GAME ? '' : game.game),
+      view.roles.size === 1 ? hideButton([...view.roles][0]) : null);
+    // a short list opens by itself; so does everything once one role is picked (the feed's "GM aids" card)
+    const lineCount = scope.reduce((total, one) => total + one.lines.length, 0);
+    const parts = scope.map((one) => editionBox(one, scope.length > 1, lineCount <= 2 || view.roles.size > 0)).filter(Boolean);
+    fill(body, parts.length ? parts : [el('p', { class: 'dim', text: 'Nothing here with the roles picked. Pick another, or none to see everything.' })]);
+    view.open = '';
+  }
+
+  setMain(back('#/library', 'Back to the library'),
+    pageHead('Game books', 'Every role-playing game book, by game, edition and product line. Novels and comics set in a game\'s world are here too. Books you hide from your library still show here.'),
+    el('div', { class: 'stack gap10' }, gameRow, editionRow, roleRow, hideRow),
+    body);
+  draw();
+}
+
+// Admin → Tidy tags: putting one tag under another ("Pathfinder 2e" under "Pathfinder"). Asking for the
+// outer tag then finds the books with the inner ones too, and the tag picker shows them as a tree.
+function tagNestPanel() {
+  const box = el('section', { class: 'panel cut' }, head('Nested tags'), el('p', { class: 'small dim', text: 'Loading…' }));
+  const tag = el('input', { type: 'text', maxlength: 60, list: 'nest-choices' });
+  const parent = el('input', { type: 'text', maxlength: 60, list: 'nest-choices' });
+  const choices = el('datalist', { id: 'nest-choices' });
+  const send = (body, done) => api('POST', '/api/admin/tag-parents', body).then(() => { toast(done); tag.value = ''; parent.value = ''; reload(); }).catch(oops);
+  function draw(data) {
+    const byParent = {};
+    for (const pair of data.parents) (byParent[pair.parent] = byParent[pair.parent] || []).push(pair.tag);
+    fill(box, head('Nested tags'),
+      el('p', { class: 'small dim', text: 'Put a tag under another, such as Pathfinder 2e under Pathfinder. Picking the outer tag in a search then finds the books with the inner ones too, and the tag list shows them as a tree. The sorter nests game editions by itself.' }),
+      Object.keys(byParent).length ? el('div', { class: 'list' }, Object.entries(byParent).map(([up, tags]) => el('div', { class: 'row gap8' },
+        el('strong', { text: up }), el('span', { class: 'dim', 'aria-hidden': 'true', text: '›' }),
+        tags.map((name) => el('span', { class: 'term' }, el('span', { class: 'val', style: 'padding-left:10px', text: shortTag(name, up), title: name }),
+          el('button', { class: 'x', type: 'button', text: '×', 'aria-label': 'Take ' + name + ' out from under ' + up,
+            onclick: () => send({ tag: name, parent: '' }, name + ' is no longer under ' + up + '.') })))))) : el('p', { class: 'small dim', text: 'No tags are nested yet.' }),
+      el('form', { class: 'row end', onsubmit: (event) => {
+        event.preventDefault();
+        if (tag.value.trim() && parent.value.trim()) send({ tag: tag.value, parent: parent.value }, tag.value.trim() + ' is now under ' + parent.value.trim() + '.');
+      } }, field('Tag', tag), field('Goes under', parent), choices, el('button', { class: 'btn', type: 'submit', text: 'Nest' })));
+  }
+  const reload = () => api('GET', '/api/admin/tag-parents').then(draw).catch(oops);
+  reload();
+  api('GET', '/api/tags?' + qs({ merged: 1 })).then((tags) => fill(choices, tags.tags.map((entry) => el('option', { value: entry.tag })))).catch(() => {});
+  return box;
 }
 
 // ------------------------------------------------- series by chapter
@@ -2304,6 +2582,26 @@ function clampText(text) {
   return el('div', { class: 'clampbox' }, para, text.length > 240 ? more : null);
 }
 
+// "every week, on Mondays" and when the next one should come, from the dates the site gave each chapter
+function scheduleLine(info) {
+  const plan = info.cadence || {};
+  if (!plan.last) return null;
+  const quiet = Math.round((Date.now() - new Date(plan.last + 'T00:00:00').getTime()) / 86400000);
+  const lastText = 'Newest chapter went up ' + (quiet < 1 ? 'today' : quiet === 1 ? 'yesterday' : plural(quiet, 'day') + ' ago') + ' (' + niceDate(plan.last) + ').';
+  const done = info.status === 'Finished' || info.status === 'Cancelled';
+  const how = plan.weekday ? (plan.every === 14 ? 'every other week' : 'every week') + ', on ' + plan.weekday
+    : plan.every ? 'about ' + (plan.every === 1 ? 'every day' : 'every ' + plural(plan.every, 'day')) : '';
+  const rhythm = !how ? '' : plan.paused ? ' It used to come ' + how + '; nothing since for far longer than that, so it may be on a break.'
+    : ' Usually ' + how + '.';
+  let next = '';
+  if (plan.next && !done) {
+    next = plan.late ? ' The next was due ' + niceDate(plan.next) + ' and has not turned up yet.'
+      : ' Next expected around ' + new Date(plan.next + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) + '.';
+    if (info.following && !plan.late) next += ' Family Hub looks for it that day.';
+  }
+  return el('p', { class: 'small ' + (plan.late || plan.paused ? 'warn' : 'dim'), text: lastText + rhythm + next });
+}
+
 async function pageSeries(id) {
   const info = await api('GET', '/api/series/' + encodeURIComponent(id));
   const again = () => pageSeries(id).catch(oops);
@@ -2318,6 +2616,9 @@ async function pageSeries(id) {
         el('p', { class: 'dim', text: [info.author, info.status, info.source].filter(Boolean).join(' · ') }),
         info.genres.length ? el('div', { class: 'row gap6', 'aria-label': 'Genres on the reading site' }, info.genres.map((genre) => el('span', { class: 'tag', text: genre }))) : null,
         el('p', { text: plural(info.chapters, 'chapter') + ' · ' + info.read + ' read · ' + info.downloaded + ' kept on the server' }),
+        scheduleLine(info),
+        info.chapters ? null : el('p', { class: 'small warn', text: (info.source || 'This site') + ' lists no chapters for this series. '
+          + 'Sites often list the same series twice, one copy empty: go back and try the same title again, or the one from another site.' }),
         info.doubles ? el('p', { class: 'small dim', text: 'The site lists ' + plural(info.doubles,
             'chapter') + ' twice. Only one copy of each is kept: the 18+ or uncensored one when there is one.' }) : null,
         info.status === 'Finished' || info.status === 'Cancelled' ? el('p', { class: 'small dim',
@@ -2360,10 +2661,12 @@ async function pageSeries(id) {
               text: file.state === 'making' ? 'Being put together…' : file.state === 'failed' ? 'Could not be made: ' + file.error : 'Waiting to be put together' }))))) : null,
     seriesOwn(info.title),
     el('section', { class: 'panel cut' }, head('Chapters'),
-      list.length ? el('div', { class: 'scroll' }, el('table', { style: 'min-width:640px' },
-        el('thead', {}, el('tr', {}, ['Chapter', 'Read', 'On the server', ''].map((heading) => el('th', { scope: 'col', text: heading })))),
+      list.length ? el('div', { class: 'scroll' }, el('table', { style: 'min-width:760px' },
+        el('thead', {}, el('tr', {}, ['Chapter', 'Went up', 'Read', 'On the server', ''].map((heading) => el('th', { scope: 'col', text: heading })))),
         el('tbody', {}, list.map((entry) => el('tr', {},
           el('th', { scope: 'row', style: 'font-weight:' + (entry.read ? 400 : 700) }, el('a', { href: '#/read/' + info.id + '/' + entry.order, text: entry.name })),
+          // the date the reading site gives; a few sites give every chapter the day the series was added there
+          el('td', { class: 'dim', text: entry.uploaded ? niceDate(new Date(entry.uploaded).toISOString()) : '' }),
           el('td', { class: entry.read ? 'dim' : '', text: entry.read ? 'Read' : 'Not yet' }),
           el('td', { class: entry.downloaded || info.local ? 'ok' : 'dim', text: entry.downloaded || info.local ? 'Kept' : 'Not yet' }),
           el('td', {}, el('div', { class: 'row' },
@@ -2469,6 +2772,8 @@ async function pageBook(id) {
       appState.can_convert ? null : el('p', { class: 'small dim',
           text: 'The converter is not installed in Family Hub' + (appState.cwa_url ? '; use Convert in the library manager instead.' : '.') })].filter(Boolean));
   }
+  // the details editor, with the book open beside it
+  if (isAdmin()) side.append(el('a', { class: 'btn', href: '#/fix/' + id, text: 'Edit details' }));
   // Things done now and then (and deleting) wait behind More, away from the download buttons.
   const more = [];
   if (canSort()) more.push(coverBox(book, again));
@@ -3277,7 +3582,8 @@ async function pageTags() {
   const again = () => pageTags().catch(oops);
   const rule = (body, msg) => api('POST', '/api/admin/tags/rule', body).then(() => { toast(msg); again(); }).catch(oops);
   const shown = tags.tags.filter((tag) => tag.becomes === null || tag.becomes === undefined);
-  const changed = tags.tags.filter((tag) => tag.becomes !== null && tag.becomes !== undefined);
+  const merged = new Set((tags.merged || []).map((tag) => tag.toLowerCase()));  // merges have their own list, with Undo
+  const changed = tags.tags.filter((tag) => tag.becomes !== null && tag.becomes !== undefined && !merged.has(tag.tag.toLowerCase()));
   const filterBox = el('input', { type: 'search', placeholder: 'Filter', oninput: debounce(() => draw(), 200) });
   const body = el('tbody');
   function draw() {
@@ -3295,7 +3601,7 @@ async function pageTags() {
       { again: again_ }).then((reply) => { toast(reply.started ? 'Looking up tags. This page shows progress when you reopen it.' : 'A lookup is already running.'); again(); }).catch(oops);
   setMain(back('#/admin/books', 'Back to books admin'),
     pageHead('Tidy tags',
-        'Tags that come from book files and from catalogues. Hide the ones that say nothing, or rename two spellings to the same name to merge them. Family tags and personal tags are not listed: change those on the book itself.'),
+        'Tags that come from book files and from catalogues. Hide the ones that say nothing, or rename two spellings to the same name to merge them. Merge tags, below, merges family tags as well. Personal tags are not listed: change those on the book itself.'),
     el('section', { class: 'panel cut' }, head('Community tags from catalogues'),
       el('p', { class: 'small', role: 'status', text: lookupLine(tags.lookups) }),
       tags.lookups.on ? el('div', { class: 'row' },
@@ -3303,6 +3609,8 @@ async function pageTags() {
         el('button', { class: 'btn', type: 'button', disabled: tags.lookups.running, text: 'Ask again about unrecognised books', onclick: () => lookNow(true) })) : null,
       el('p', { class: 'small dim',
           text: 'A book is only recognised when its title and author match a catalogue entry. Books whose details are a file name or a user name will not be; correct them in the library manager, then ask again.' })),
+    tagMergePanel(),
+    tagNestPanel(),
     el('section', { class: 'panel cut' }, head(plural(shown.length, 'tag') + ' in use', field('Filter tags', filterBox)),
       shown.length ? el('div', { class: 'scroll' }, el('table', { style: 'min-width:760px' },
         el('thead', {}, el('tr', {}, ['Tag', 'Books', 'From', 'Change'].map((heading, index) => el('th', { scope: 'col', class: index === 1 ? 'num' : '', text: heading })))), body))
@@ -3318,6 +3626,126 @@ async function pageTags() {
           text: 'Found in book files and left out automatically: ISBNs, dates, publishers, adverts and whole sentences. They are still in the files; Family Hub just does not show them.' }),
       el('div', { class: 'row gap8' }, tags.removed.map((entry) => el('span', { class: 'tag small dim', text: entry.tag.length > 60 ? entry.tag.slice(0, 60) + '…' : entry.tag })))) : null);
   draw();
+}
+
+// ---- Merging tags, on the Tidy tags page: two spellings become one, across family, book file and community
+// tags. Suggestions Family Hub spotted itself, a picker for merging by hand, and the merges made so far.
+function mergeSentence(preview) {
+  if (!preview.books) return 'No books carry ' + (preview.names.length === 1 ? 'that tag' : 'those tags') + ' yet. Merging still catches it in future.';
+  return plural(preview.books, 'book') + ' change' + (preview.books === 1 ? 's' : '')
+    + (preview.already ? '; ' + preview.already + ' already ' + (preview.already === 1 ? 'has' : 'have') + ' "' + preview.keep + '"' : '') + '.';
+}
+
+function tagMergePanel() {
+  const box = el('section', { class: 'panel cut' }, head('Merge tags'), el('p', { class: 'small dim', text: 'Loading…' }));
+  const reload = () => api('GET', '/api/admin/tags/merges').then(draw).catch(oops);
+
+  // ask first, saying what will happen, then merge
+  async function merge(names, keep) {
+    const preview = await api('POST', '/api/admin/tags/merge/preview', { tags: names, keep });
+    if (!preview.names.length) { toast('Choose at least one other tag to merge into "' + keep + '".', true); return; }
+    const from = preview.names.map((name) => '"' + name + '"').join(', ');
+    if (!window.confirm('Merge ' + from + ' into "' + keep + '"? ' + mergeSentence(preview))) return;
+    await api('POST', '/api/admin/tags/merge', { tags: preview.names, keep });
+    toast('Merged into "' + keep + '".');
+    pageTags().catch(oops);  // the tag list below changes too
+  }
+
+  // a tag to click: solid when it is the name kept
+  const namePick = (entry, kept, onPick) => el('button', { class: 'tagpick', type: 'button', 'aria-pressed': String(kept),
+      title: kept ? 'The name kept' : 'Keep this name instead', onclick: onPick },
+    kept ? el('span', { class: 'sg', 'aria-hidden': 'true', text: '✓' }) : null, el('span', { class: 'val', text: entry.tag }),
+    el('span', { class: 'n', text: entry.books }));
+
+  function suggestion(item) {
+    let keep = item.keep;
+    const line = el('div', { class: 'col gap8' });
+    function drawOne() {
+      const others = item.names.map((entry) => entry.tag).filter((tag) => tag !== keep);
+      fill(line,
+        el('div', { class: 'row gap8' }, item.names.map((entry) => namePick(entry, entry.tag === keep, () => { keep = entry.tag; drawOne(); }))),
+        el('div', { class: 'row gap8' },
+          el('button', { class: 'btn', type: 'button', text: 'Merge into "' + keep + '"', onclick: () => merge(others, keep).catch(oops) }),
+          el('button', { class: 'btn', type: 'button', text: 'Not the same',
+              onclick: () => api('POST', '/api/admin/tags/merge/dismiss', { tags: item.names.map((entry) => entry.tag) })
+                .then(() => { toast('Will not suggest those again.'); reload(); }).catch(oops) })));
+    }
+    drawOne();
+    return line;
+  }
+
+  function byHand(tags) {
+    const known = new Map(tags.map((entry) => [entry.tag.toLowerCase(), entry]));
+    const listId = 'mergetags' + Math.random().toString(36).slice(2, 7);
+    const options = el('datalist', { id: listId }, tags.map((entry) => el('option', { value: entry.tag })));
+    const adder = el('input', { type: 'search', list: listId, maxlength: 60, placeholder: 'Start typing a tag', autocomplete: 'off' });
+    const keepBox = el('input', { type: 'text', maxlength: 60, placeholder: 'Or type a new name' });
+    const picked = [];
+    let keep = '';
+    const chips = el('div', { class: 'row gap8' });
+    const status = el('p', { class: 'small', role: 'status' });
+    const go = el('button', { class: 'btn', type: 'button', disabled: true, text: 'Merge', onclick: () => merge(picked, keepName()).catch(oops) });
+    const keepName = () => keepBox.value.trim() || keep;
+    const preview = debounce(() => {
+      const name = keepName();
+      const from = picked.filter((tag) => tag !== name);
+      if (!name || !from.length) { status.textContent = picked.length ? 'Click the name to keep, or type a new one.' : ''; go.disabled = true; return; }
+      api('POST', '/api/admin/tags/merge/preview', { tags: from, keep: name }).then((reply) => {
+        status.textContent = mergeSentence(reply) + (reply.new_name ? ' "' + name + '" is a new name.' : '');
+        go.textContent = 'Merge into "' + name + '"';
+        go.disabled = false;
+      }).catch(oops);
+    }, 250);
+    function drawPicked() {
+      fill(chips, picked.map((tag) => {
+        const entry = known.get(tag.toLowerCase()) || { tag, books: 0 };
+        return el('span', { class: 'row', style: 'gap:2px' },
+          namePick(entry, !keepBox.value.trim() && tag === keep, () => { keep = tag; keepBox.value = ''; drawPicked(); }),
+          el('button', { class: 'btn', type: 'button', text: '×', 'aria-label': 'Take ' + tag + ' out',
+              onclick: () => { picked.splice(picked.indexOf(tag), 1); if (keep === tag) keep = picked[0] || ''; drawPicked(); } }));
+      }));
+      preview();
+    }
+    function add() {
+      const typed = adder.value.trim();
+      const tag = (known.get(typed.toLowerCase()) || { tag: typed }).tag;
+      if (!tag || picked.some((other) => other === tag)) { adder.value = ''; return; }
+      picked.push(tag);
+      // the most used one is kept unless you say otherwise
+      if (!keep || (known.get(tag.toLowerCase()) || { books: 0 }).books > (known.get(keep.toLowerCase()) || { books: 0 }).books) keep = tag;
+      adder.value = '';
+      drawPicked();
+    }
+    adder.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); add(); } });
+    adder.addEventListener('change', () => { if (known.has(adder.value.trim().toLowerCase())) add(); });  // picked from the list
+    keepBox.addEventListener('input', () => drawPicked());
+    return el('div', { class: 'col gap8' },
+      el('h3', { class: 'small', style: 'margin:8px 0 0', text: 'Merge by hand' }),
+      el('div', { class: 'row end' }, field('Tags to merge', adder), options,
+        el('button', { class: 'btn', type: 'button', text: 'Add', onclick: add }), field('Name to keep', keepBox)),
+      chips, status, el('div', { class: 'row' }, go));
+  }
+
+  function draw(data) {
+    fill(box, head('Merge tags'),
+      el('p', { class: 'small dim', text: 'Two spellings of one tag become one. Family tags are changed on every book, and any added later under the old name get the new one. '
+        + 'Book file and community tags are shown under the new name; the files are not changed. Personal tags are never touched.' }),
+      data.suggestions.length ? [el('h3', { class: 'small', style: 'margin:8px 0 0', text: 'These look like the same tag' }),
+        el('p', { class: 'small dim', text: 'Spellings that differ only by capitals, a plural, a hyphen or "&". The number is how many books carry each. The ticked one is kept: click another to keep that instead.' }),
+        el('div', { class: 'list' }, data.suggestions.slice(0, 30).map(suggestion))] : null,
+      byHand(data.tags),
+      data.merges.length ? [el('h3', { class: 'small', style: 'margin:8px 0 0', text: 'Merged so far' }),
+        el('p', { class: 'small dim', text: 'Undo puts the old name back on the family tags that had it when you merged. Tags added since then keep the new name, and nesting stays as it is now.' }),
+        el('div', { class: 'list' }, data.merges.map((entry) => el('div', { class: 'row between' },
+          el('span', {}, el('strong', { text: entry.tag }), el('span', { class: 'small dim', text: ' becomes "' + entry.becomes + '" · merged ' + (entry.created || '').slice(0, 10)
+            + (entry.restorable ? '' : ' · undo stops the renaming only') })),
+          el('button', { class: 'btn', type: 'button', text: 'Undo', 'aria-label': 'Undo merging ' + entry.tag,
+              onclick: () => api('POST', '/api/admin/tags/merge/undo', { tag: entry.tag })
+                .then((reply) => { toast(reply.restored ? '"' + entry.tag + '" is back on ' + plural(reply.restored, 'book') + '.' : 'Stopped merging "' + entry.tag + '".'); pageTags().catch(oops); })
+                .catch(oops) }))))] : null);
+  }
+  reload();
+  return box;
 }
 
 function fileSize(bytes) { return bytes > 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' KB'; }
@@ -3409,8 +3837,446 @@ async function pageDetails() {
       + '(and Google Books, when its key is saved). Saving changes the title and author in the library through the library manager, after a copy of the library database. '
       + 'Reading progress, tags and ratings stay with the book. Afterwards, Copies of the same book may find more spare copies.'),
     data.blocked ? el('p', { class: 'bad' }, data.blocked + ' ', el('a', { href: '#/admin', text: 'Open Admin, Hub' })) : null,
+    reviewPanel(),
     el('section', { class: 'panel cut' }, head(plural(data.books.length, 'book') + ' to look at', el('button', { class: 'btn sm', type: 'button', text: 'Look again', onclick: again })),
       data.books.length ? list : el('p', { class: 'small dim', text: 'Every book has a real title and author.' }), more));
+}
+
+// ---------------------------------------------------------------- the review queue
+// The sorter's suggestions (review.py), in tabs by media. Each book shows what confirming would change in the
+// library; Edit opens the details as boxes. Confirming writes through the library manager and saves a learned
+// rule, so the next books like it sort themselves. Skip only hides a book until the page is opened again.
+
+const REVIEW_FIELDS = { title: 'Title', authors: 'Author', series: 'Series', series_index: 'Number', publisher: 'Publisher', tags: 'Tags to add', language: 'Language' };
+let reviewTab = null;
+const reviewSkipped = new Set();
+
+function reviewValue(value) {
+  if (Array.isArray(value)) return value.join(' & ');
+  return value === null || value === undefined || value === '' ? '' : String(value);
+}
+
+// A look inside one library entry, its own file not its copy's (peek.py): a PDF's first pages in the browser's
+// own viewer, an EPUB's opening text or a comic's first pictures, all scrollable, with more pages on request.
+// marker (optional): { labels: {}, pick(field, answer) }. A PDF then gets "Mark on the page": its pages as pictures
+// to drag a box round the title or the author. The box's text goes in the field, and the box is kept in
+// marker.labels so confirming teaches the rule where to read the next book like it.
+const MARK_NAMES = { title: 'Title', authors: 'Author' };
+
+function markPages(base, total, marker, back) {
+  let shown = Math.min(3, total);
+  const strip = el('div', { class: 'pk-page pk-pictures pk-mark', tabindex: '0' });
+  const line = el('span', { class: 'small dim' });
+  const more = el('button', { class: 'btn sm', type: 'button', text: 'Show 5 more pages', onclick: () => { shown = Math.min(shown + 5, total, 30); draw(); } });
+  const pages = [];
+  const pct = (n) => (n * 100).toFixed(2) + '%';
+  const place = (node, box) => Object.assign(node.style, { left: pct(box[0]), top: pct(box[1]), width: pct(box[2] - box[0]), height: pct(box[3] - box[1]) });
+
+  // The kept boxes, each with its name, on whichever page it is on.
+  function drawMarks() {
+    pages.forEach((wrap, n) => {
+      wrap.querySelectorAll('.pk-box.kept').forEach((node) => node.remove());
+      Object.entries(marker.labels).forEach(([field, mark]) => {
+        if (mark.page !== n) return;
+        const node = el('div', { class: 'pk-box kept ' + field }, el('span', { text: MARK_NAMES[field] }));
+        place(node, mark.box);
+        wrap.append(node);
+      });
+    });
+  }
+
+  function addPage(n) {
+    const wrap = el('div', { class: 'pk-sheet' }, el('img', { src: base + '/page/' + n + '.png', alt: 'Page ' + (n + 1), draggable: 'false' }));
+    let start = null;
+    let ghost = null;
+    const at = (event) => {
+      const rect = wrap.getBoundingClientRect();
+      return [Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)), Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))];
+    };
+    wrap.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || event.target.closest('.pk-ask')) return;
+      event.preventDefault();
+      wrap.setPointerCapture(event.pointerId);
+      strip.querySelectorAll('.pk-box.new, .pk-ask').forEach((node) => node.remove());
+      start = at(event);
+      ghost = el('div', { class: 'pk-box new' });
+      place(ghost, [start[0], start[1], start[0], start[1]]);
+      wrap.append(ghost);
+    });
+    wrap.addEventListener('pointermove', (event) => {
+      if (!start) return;
+      const now = at(event);
+      place(ghost, [Math.min(start[0], now[0]), Math.min(start[1], now[1]), Math.max(start[0], now[0]), Math.max(start[1], now[1])]);
+    });
+    wrap.addEventListener('pointerup', (event) => {
+      if (!start) return;
+      const now = at(event);
+      const box = [Math.min(start[0], now[0]), Math.min(start[1], now[1]), Math.max(start[0], now[0]), Math.max(start[1], now[1])];
+      start = null;
+      if (box[2] - box[0] < 0.01 || box[3] - box[1] < 0.005) { ghost.remove(); return; }
+      // What is this box? Asked right under it.
+      const ask = el('div', { class: 'pk-ask', role: 'group', 'aria-label': 'What did you mark?' },
+        ...Object.entries(MARK_NAMES).map(([field, name]) => el('button', { class: 'btn sm', type: 'button', text: 'This is the ' + name.toLowerCase(),
+          onclick: () => use(field) })),
+        el('button', { class: 'btn sm', type: 'button', text: 'Cancel', onclick: () => { ghost.remove(); ask.remove(); } }));
+      Object.assign(ask.style, { left: pct(Math.min(box[0], 0.55)), top: pct(Math.min(box[3], 0.94)) });
+      wrap.append(ask);
+      ask.querySelector('button').focus();
+      const use = async (field) => {
+        ask.querySelectorAll('button').forEach((btn) => { btn.disabled = true; });
+        try {
+          const answer = await api('POST', base + '/box', { page: n, box });
+          if (!answer.text) { toast('There is no text in that box. A scanned page is only a picture, so type it in instead.', true); return; }
+          marker.labels[field] = { page: n, box: answer.box };
+          marker.pick(field, answer);
+          toast(MARK_NAMES[field] + ': ' + (field === 'title' ? answer.title : answer.authors.join(' & ')));
+        } catch (err) { if (!(err instanceof Stale)) oops(err); } finally { ghost.remove(); ask.remove(); drawMarks(); }
+      };
+    });
+    pages.push(wrap);
+    strip.append(wrap);
+  }
+  function draw() {
+    while (pages.length < shown) addPage(pages.length);
+    line.textContent = 'Pages 1–' + shown + ' of ' + total.toLocaleString() + '. Drag a box round the title or the author.';
+    more.hidden = shown >= Math.min(total, 30);
+    drawMarks();
+  }
+  draw();
+  return [strip, el('div', { class: 'row between gap8' }, line, el('div', { class: 'row gap6' }, more,
+    el('button', { class: 'btn sm', type: 'button', text: 'Back to reading', onclick: back })))];
+}
+
+function peekPane(bookId, marker) {
+  const pane = el('div', { class: 'pk', role: 'region', 'aria-label': 'Inside the book' }, el('p', { class: 'small dim', text: 'Opening the book…' }));
+  const base = '/api/admin/books/' + bookId + '/peek';
+  const moreBtn = (label, onclick) => el('button', { class: 'btn sm', type: 'button', text: label, onclick });
+  api('GET', base).then((info) => {
+    if (info.kind === 'pdf') {
+      let pages = Math.min(3, info.pages);
+      const frame = el('iframe', { class: 'pk-page', title: 'The first pages of the book' });
+      const line = el('span', { class: 'small dim' });
+      const more = moreBtn('', () => { pages = Math.min(pages + 10, info.pages, 30); draw(); });
+      const draw = () => {
+        frame.src = base + '.pdf?pages=' + pages + '#navpanes=0&view=FitH';
+        line.textContent = pages >= info.pages ? 'All ' + plural(info.pages, 'page') : 'Pages 1–' + pages + ' of ' + info.pages.toLocaleString();
+        more.hidden = pages >= Math.min(info.pages, 30);
+        more.textContent = 'Show ' + (Math.min(pages + 10, info.pages, 30) - pages) + ' more pages';
+      };
+      draw();
+      // Reading uses the browser's own PDF viewer; marking needs the pages as pictures to draw on.
+      const reading = [frame, el('div', { class: 'row between gap8' }, line, el('div', { class: 'row gap6' }, more,
+        marker ? el('button', { class: 'btn sm pri', type: 'button', text: 'Mark title or author on the page',
+          onclick: () => fill(pane, ...markPages(base, info.pages, marker, () => fill(pane, ...reading))) }) : null))];
+      fill(pane, ...reading);
+    } else if (info.kind === 'text') {
+      let shown = 40;
+      const text = el('div', { class: 'pk-page pk-text', tabindex: '0' });
+      const more = moreBtn('Show more of the text', () => { shown += 60; draw(); });
+      const draw = () => { fill(text, info.paragraphs.slice(0, shown).map((words) => el('p', { text: words }))); more.hidden = shown >= info.paragraphs.length; };
+      draw();
+      fill(pane, text, el('div', { class: 'row between gap8' }, el('span', { class: 'small dim', text: 'The opening of the ' + info.format }), more));
+    } else if (info.kind === 'pictures') {
+      let shown = Math.min(3, info.pages);
+      const strip = el('div', { class: 'pk-page pk-pictures', tabindex: '0' });
+      const line = el('span', { class: 'small dim' });
+      const more = moreBtn('Show 10 more pages', () => { shown = Math.min(shown + 10, info.pages); draw(); });
+      const draw = () => {
+        while (strip.children.length < shown) {
+          const n = strip.children.length;
+          strip.append(el('img', { src: base + '/picture/' + n, alt: 'Page ' + (n + 1), loading: 'lazy' }));
+        }
+        line.textContent = 'Pages 1–' + shown + ' of ' + info.pages.toLocaleString();
+        more.hidden = shown >= info.pages;
+      };
+      draw();
+      fill(pane, strip, el('div', { class: 'row between gap8' }, line, more));
+    } else {
+      fill(pane, el('div', { class: 'pk-page pk-none' }, el('p', { class: 'small dim', text: info.reason })));
+    }
+  }).catch((err) => { if (!(err instanceof Stale)) fill(pane, el('p', { class: 'small bad', text: err.message })); });
+  return pane;
+}
+
+// "Edit details" for one book from anywhere: the same editor as the queue, with the book open beside it.
+async function pageFix(bookId) {
+  if (!isAdmin()) { location.hash = '#/dashboard'; return; }
+  setMain(back('#/book/' + bookId, 'Back to the book'),
+    pageHead('Edit details', 'Look inside the book and put its details right. Saving changes the library entry through the library manager, after a copy of the '
+      + 'library database, and Family Hub remembers how books like it are sorted.'),
+    reviewPanel(Number(bookId)));
+}
+
+function reviewPanel(only) {
+  const box = el('section', { class: 'panel cut' }, head('Sorting suggestions'), el('p', { class: 'small dim', role: 'status', text: 'Reading the sorter’s suggestions…' }));
+  const gen = routeGen;
+  const PAGE = 20;
+  let data = null;
+  let shown = PAGE;
+  const jobArea = el('div', { class: 'stack', style: 'gap:6px', 'aria-live': 'polite' });
+  const list = el('div', { class: 'list' });
+  const tabRow = el('div', { class: 'tabs', role: 'group', 'aria-label': 'Kind of book' });
+  const readyArea = el('div', { class: 'stack' });
+  const more = el('button', { class: 'btn', type: 'button', text: 'Show more', onclick: () => { shown += PAGE; load(); } });
+  // One tab at a time: the queue can be a thousand books long.
+  // only: one book's id, for Edit details. Otherwise one tab at a time: the queue can be a thousand books long.
+  const load = () => (only ? api('GET', '/api/admin/review/book/' + only).then((answer) => Object.assign(answer, { items: [answer.item], ready: [], more: 0 }))
+    : api('GET', '/api/admin/review?' + qs({ tab: reviewTab || '', limit: shown }))).then((answer) => { data = answer; if (!only) reviewTab = answer.tab; draw(); watch(); })
+    .catch((err) => { if (!(err instanceof Stale)) fill(box, head('Sorting suggestions'), el('p', { class: 'small bad', text: err.message })); });
+
+  // A batch or the re-sort is running: show how far it has got, and read the queue again when it ends.
+  function watch() {
+    drawJob();
+    if (!data.job.running) return;
+    const timer = setInterval(async () => {
+      if (gen !== routeGen) { clearInterval(timer); return; }
+      let job;
+      try { job = await api('GET', '/api/admin/review/job'); } catch (err) { clearInterval(timer); return; }
+      data.job = job;
+      drawJob();
+      if (job.running) return;
+      clearInterval(timer);
+      if (job.problems.length) toast(job.problems[0], true);
+      else toast(job.what === 'resort' ? 'The whole library is sorted again.' : plural(job.confirmed || 0, 'book') + ' written to the library.');
+      load();
+    }, 2000);
+  }
+  function drawJob() {
+    const job = data.job;
+    if (!job.running) { fill(jobArea); return; }
+    const words = job.what === 'resort' ? (job.total ? 'Sorting the library again: ' + job.done.toLocaleString() + ' of ' + job.total.toLocaleString() + ' books'
+      : 'Getting ready to sort the library again…') : 'Writing ' + job.done + ' of ' + plural(job.total, 'book') + ' to the library…';
+    fill(jobArea, el('p', { class: 'small', role: 'status', text: words }), bar(job.total ? 100 * job.done / job.total : 2, words));
+  }
+  function resort(event) {
+    if (!window.confirm('Sort every book in the library again? Books whose kind someone chose are left as they are. Reading the first pages of every PDF takes a while; '
+      + 'the suggestions fill in when it is done.')) return;
+    event.currentTarget.disabled = true;
+    api('POST', '/api/admin/review/resort').then((answer) => { data.job = answer.job; watch(); }).catch(oops);
+  }
+
+  // Take answered books off the page at once, then read the tab again (a new rule may have sorted others).
+  function gone(ids) {
+    if (only) { location.hash = '#/book/' + only; return; }
+    data.items = data.items.filter((item) => !ids.includes(item.book_id));
+    drawList();
+    load();
+  }
+  function confirmAll(item, fields) {
+    if (!window.confirm('Confirm all ' + item.batch_size + ' books like this? Each keeps its own title and number; the game, edition, role, kind, publisher, '
+      + 'language and tags you see here go on all of them. The library database is copied first.')) return;
+    api('POST', '/api/admin/review/' + item.book_id, { action: 'confirm_all', batch: item.batch, fields, new_game: item.new_game })
+      .then((answer) => { data.job = answer.job; watch(); }).catch(oops);
+  }
+
+  function itemCard(item, editing) {
+    const card = el('article', { class: 'rv stack', 'aria-label': item.title });
+    const blocked = Boolean(data.blocked);
+    const batchWords = item.batch_size > 1 ? (item.batch_folder ? 'arrived in ' + item.batch_folder : 'are named like “' + item.batch_pattern.replace(/^\^|\$$/g, '')
+      .replace(/\\d\+/g, '#').replace(/\\(.)/g, '$1') + '”') : '';
+    const confirmOne = (fields, btn) => {
+      btn.disabled = true;
+      api('POST', '/api/admin/review/' + item.book_id, { action: 'confirm', fields, new_game: item.new_game }).then((answer) => {
+        toast(answer.message + (answer.problems.length ? ' ' + answer.problems[0] : ''));
+        gone([item.book_id]);
+      }).catch((err) => { btn.disabled = false; oops(err); });
+    };
+    const reject = (btn) => {
+      btn.disabled = true;
+      api('POST', '/api/admin/review/' + item.book_id, { action: 'reject' }).then((answer) => { toast(answer.message); gone([item.book_id]); })
+        .catch((err) => { btn.disabled = false; oops(err); });
+    };
+    const skip = () => { reviewSkipped.add(item.book_id); gone([item.book_id]); };
+    // A greyed-out Confirm says why, right where it is pressed (the panel's own notice can be off screen).
+    const whyOff = () => (blocked ? el('p', { class: 'small bad' }, 'Confirm is off: ' + data.blocked + ' ', el('a', { href: '#/admin', text: 'Open Admin' })) : null);
+
+    // What confirming changes: the new value large, the old one under it.
+    function summary() {
+      const sorted = [item.suggest.kind, item.suggest.role, [item.suggest.game, item.suggest.edition].filter(Boolean).join(' › ')].filter(Boolean).join(', ');
+      fill(card,
+        el('div', { class: 'row between gap8' },
+          el('div', { class: 'stack', style: 'gap:2px;min-width:0;flex:1 1 260px' }, el('strong', { class: 'book', text: item.title }),
+            el('span', { class: 'small dim book', text: (item.author || 'no author') + ' · ' + (item.formats.join(', ') || 'no file') + (item.origin ? ' · from ' + item.origin : '') })),
+          el('a', { class: 'btn sm', href: '#/book/' + item.book_id, text: 'Open' })),
+        item.shares > 1 ? el('p', { class: 'small rv-note', text: 'Shares its title and author with ' + plural(item.shares - 1, 'other entry', 'other entries')
+          + ', so they share one set of tags. Giving it its own title tells them apart.' }) : null,
+        item.why.length ? el('ul', { class: 'small rv-why' }, item.why.map((line) => el('li', { text: line }))) : null,
+        item.changes.length ? el('dl', { class: 'rv-changes' }, item.changes.map((change) => el('div', {},
+          el('dt', { class: 'lab', text: REVIEW_FIELDS[change.field] || change.field }),
+          el('dd', {}, el('span', { class: 'rv-to', text: reviewValue(change.to) }),
+            change.field === 'tags' ? null : el('span', { class: 'small dim', text: change.now === null || change.now === '' ? 'now empty' : 'now ' + reviewValue(change.now) })))))
+          : el('p', { class: 'small dim', text: 'Nothing in the library entry changes; confirming settles how Family Hub sorts it.' }),
+        sorted ? el('p', { class: 'small dim', text: 'Sorted in Family Hub as ' + sorted + '.' }) : null,
+        el('div', { class: 'row gap6' },
+          el('button', { class: 'btn sm pri', type: 'button', text: 'Confirm', disabled: blocked, onclick: (event) => confirmOne(item.suggest, event.currentTarget) }),
+          el('button', { class: 'btn sm', type: 'button', text: 'Edit', onclick: edit }),
+          el('button', { class: 'btn sm', type: 'button', text: 'Not right', title: 'Leave the book as it is and never suggest this for it again', onclick: (event) => reject(event.currentTarget) }),
+          el('button', { class: 'btn sm', type: 'button', text: 'Skip', onclick: skip }),
+          item.batch_size > 1 ? el('button', { class: 'btn sm line2', type: 'button', disabled: blocked || data.job.running, text: 'Confirm all ' + item.batch_size + ' like this',
+            onclick: () => confirmAll(item, item.suggest) }) : null),
+        whyOff(),
+        item.batch_size > 1 ? el('p', { class: 'small dim', text: plural(item.batch_size, 'book') + ' in this batch ' + batchWords + '.' }) : null);
+    }
+
+    // The details as boxes, started from the suggestion.
+    function edit() {
+      const s = item.suggest;
+      const box = (value) => el('input', { type: 'text', value: reviewValue(value) });
+      const inputs = { title: box(s.title), authors: box(s.authors), series: box(s.series), series_index: el('input', { type: 'text', inputmode: 'decimal', value: reviewValue(s.series_index) }),
+        publisher: box(s.publisher), game: box(s.game), edition: box(s.edition), tags: box(s.tags.join(', ')) };
+      const kind = el('select', {}, data.kinds.map((name) => el('option', { value: name, text: name, selected: name === s.kind })));
+      const role = el('select', {}, el('option', { value: '', text: 'None' }), data.roles.map((name) => el('option', { value: name, text: name, selected: name === s.role })));
+      const language = el('select', {}, el('option', { value: '', text: 'Leave as it is' }),
+        data.languages.map((lang) => el('option', { value: lang.code, text: lang.name, selected: lang.code === s.language })));
+      const roleField = field('Role', role);
+      const showRole = () => { roleField.hidden = kind.value !== 'Tabletop'; };
+      kind.addEventListener('change', showRole);
+      showRole();
+      const values = () => ({ title: inputs.title.value, authors: inputs.authors.value, series: inputs.series.value, series_index: inputs.series_index.value,
+        publisher: inputs.publisher.value, game: inputs.game.value, edition: inputs.edition.value, tags: inputs.tags.value,
+        kind: kind.value, role: kind.value === 'Tabletop' ? role.value : '', language: language.value, labels: marker.labels });
+      // Boxes drawn on the pages fill the boxes here, and confirming teaches the rule where to look.
+      const marker = { labels: {}, pick: (field, answer) => {
+        if (field === 'title') inputs.title.value = answer.title;
+        else inputs.authors.value = answer.authors.join(' & ');
+        markedNote.textContent = 'Marked on the page: ' + Object.keys(marker.labels).map((name) => MARK_NAMES[name].toLowerCase()).join(' and ')
+          + '. Confirming teaches Family Hub to read the same places in books like this one.';
+        markedNote.hidden = false;
+      } };
+      const markedNote = el('p', { class: 'small rv-note', hidden: true });
+      const findWriters = el('button', { class: 'btn sm', type: 'button', text: 'Find the writers', onclick: async (event) => {
+        const btn = event.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'Reading the credits…';
+        try {
+          const found = await api('GET', '/api/admin/review/' + item.book_id + '/credits');
+          if (found.authors.length) { inputs.authors.value = found.authors.join(' & '); toast('Found ' + plural(found.authors.length, 'writer') + ' on the credits page.'); }
+          else toast('The first pages name no writers. The publisher is a fine author for a game book.');
+        } catch (err) { oops(err); }
+        btn.textContent = 'Find the writers';
+        btn.disabled = false;
+      } });
+      fill(card,
+        el('strong', { class: 'book', text: item.title }),
+        el('span', { class: 'small dim book', text: (item.formats.join(', ') || 'no file') + (item.origin ? ' · from ' + item.origin : '') }),
+        el('div', { class: 'pk-split' }, peekPane(item.book_id, marker), el('form', { class: 'stack gap10', onsubmit: (event) => { event.preventDefault(); confirmOne(values(), event.submitter || event.target.querySelector('[type=submit]')); } },
+          el('div', { class: 'rv-grid' },
+            field('Title', inputs.title, 'wide'),
+            field('Author (separate with &)', inputs.authors),
+            item.formats.includes('PDF') ? el('div', { class: 'field', style: 'justify-content:flex-end' }, findWriters) : null,
+            field('Series', inputs.series), field('Number in series', inputs.series_index), field('Publisher', inputs.publisher),
+            field('Game', inputs.game), field('Edition', inputs.edition),
+            field('Kind', kind), roleField, field('Language', language),
+            field('Other tags (separate with commas)', inputs.tags, 'wide')),
+          el('p', { class: 'small dim', text: 'The game, edition and role go on the library entry as tags, and become nested family tags here.' }),
+          markedNote,
+          el('div', { class: 'row gap6' },
+            el('button', { class: 'btn sm pri', type: 'submit', text: 'Confirm', disabled: blocked }),
+            item.batch_size > 1 ? el('button', { class: 'btn sm line2', type: 'button', disabled: blocked || data.job.running, text: 'Confirm all ' + item.batch_size + ' like this',
+              onclick: () => confirmAll(item, values()) }) : null,
+            only ? null : el('button', { class: 'btn sm', type: 'button', text: item.media === 'unsorted' ? 'Skip' : 'Cancel', onclick: item.media === 'unsorted' ? skip : summary })),
+          whyOff())));
+      inputs.title.focus();
+    }
+    if (editing) edit(); else summary();
+    return card;
+  }
+
+  // Books a learned rule already sorted: one card per rule, written to the library with one press.
+  function readyCard(group) {
+    const blocked = Boolean(data.blocked) || data.job.running;
+    const books = el('div', { class: 'list' }, group.items.map((item) => {
+      const row = el('div', { class: 'row between gap8' },
+        el('div', { class: 'stack', style: 'gap:2px;min-width:0;flex:1 1 260px' }, el('strong', { class: 'book', text: item.title }),
+          el('span', { class: 'small dim', text: item.changes.map((change) => (REVIEW_FIELDS[change.field] || change.field) + ': ' + reviewValue(change.to)).join('; ') })),
+        el('button', { class: 'btn sm', type: 'button', text: 'Edit', 'aria-label': 'Edit ' + item.title, onclick: () => row.replaceWith(itemCard(item, true)) }));
+      return row;
+    }));
+    const write = (event) => {
+      if (!window.confirm('Write ' + plural(group.count, 'book') + ' to the library? The library database is copied first.')) return;
+      event.currentTarget.disabled = true;
+      api('POST', '/api/admin/review/ready/' + group.rule).then((answer) => { data.job = answer.job; watch(); }).catch(oops);
+    };
+    return el('div', { class: 'rv stack rv-ready' },
+      el('div', { class: 'row between gap8' },
+        el('div', { class: 'stack', style: 'gap:2px;min-width:0;flex:1 1 320px' }, el('strong', { text: 'Ready to write: ' + plural(group.count, 'book') }),
+          el('span', { class: 'small dim', text: group.words })),
+        el('button', { class: 'btn sm pri', type: 'button', disabled: blocked, text: 'Write ' + plural(group.count, 'book') + ' to the library', onclick: write })),
+      el('details', {}, el('summary', { class: 'small', text: 'See the books and what changes' }), books));
+  }
+
+  function drawList() {
+    const items = data.items.filter((item) => !reviewSkipped.has(item.book_id));
+    fill(readyArea, data.ready.map(readyCard));
+    // Unsorted books have no suggestion worth reading first: the top one opens straight in the editor, and
+    // saving or skipping it opens the next
+    fill(list, items.map((item, i) => itemCard(item, only || (reviewTab === 'unsorted' && i === 0))));
+    more.hidden = !data.more;
+    list.hidden = !items.length;
+    empty.hidden = Boolean(items.length || data.ready.length);
+  }
+  const empty = el('p', { class: 'small dim', text: 'Nothing waiting here. New books are sorted as they arrive; Sort the whole library again looks at every book once more.' });
+  function draw() {
+    if (only) {
+      fill(box, head('Details'), data.blocked ? el('p', { class: 'small bad', text: data.blocked }) : null, list);
+      drawList();
+      return;
+    }
+    if (!data.tabs.some((tab) => tab.id === reviewTab)) reviewTab = (data.tabs.find((tab) => tab.count) || data.tabs[0]).id;
+    fill(tabRow, data.tabs.map((tab) => el('button', { type: 'button', 'aria-pressed': String(tab.id === reviewTab), onclick: () => { reviewTab = tab.id; shown = PAGE; load(); } },
+      tab.label, el('span', { class: 'tt-n', text: tab.count.toLocaleString() }))));
+    fill(box,
+      head('Sorting suggestions',
+        el('a', { class: 'btn sm', href: '#/rules', text: data.merges ? 'Learned rules (' + plural(data.merges, 'merge') + ' to look at)' : 'Learned rules' }),
+        el('button', { class: 'btn sm', type: 'button', text: 'Sort the whole library again', disabled: data.job.running, onclick: resort })),
+      el('p', { class: 'small dim', text: 'What the sorter would like to put right, from the folder a book arrived in, its name and its first pages. Books that share a name come first, '
+        + 'then the biggest batches. Confirming changes the library entry through the library manager, after a copy of the library database, and teaches Family Hub '
+        + 'the books like it: they wait under Ready to write until you write them too. Not right leaves the book as it is.' }),
+      data.blocked ? el('p', { class: 'small bad', text: data.blocked }) : null,
+      jobArea, tabRow, readyArea, list, empty, more);
+    drawJob();
+    drawList();
+  }
+  load();
+  return box;
+}
+
+// Learned rules: what confirming and rejecting taught the sorter, in plain words. Rules that say nearly the
+// same thing are offered as one; nothing is combined until an admin says so.
+async function pageRules() {
+  if (!isAdmin()) { location.hash = '#/dashboard'; return; }
+  const data = await api('GET', '/api/admin/review/rules');
+  const again = () => pageRules().catch(oops);
+  const examples = (titles, count) => titles.length ? el('details', { class: 'small' }, el('summary', { text: 'Which books (' + count.toLocaleString() + ')' }),
+    el('p', { class: 'small dim', text: titles.join('; ') + (count > titles.length ? '; and ' + (count - titles.length) + ' more' : '') })) : el('p', { class: 'small dim', text: 'No book in the library matches it now.' });
+  const merges = data.merges.map((offer) => el('div', { class: 'stack gap8' },
+    el('strong', { text: offer.words }),
+    el('p', { class: 'small dim', text: 'Would replace ' + plural(offer.replaces.length, 'rule') + ':' }),
+    el('ul', { class: 'small rv-why' }, offer.replaces.map((words) => el('li', { text: words }))),
+    offer.left_out.length ? el('p', { class: 'small', text: 'Each rule set its own ' + offer.left_out.join(' and ').replace(/_/g, ' ')
+      + '; the combined rule leaves that to the sorter, which reads it from each book’s folder and name.' }) : null,
+    offer.newly_count ? el('p', { class: 'small rv-note', text: 'It would also cover ' + plural(offer.newly_count, 'book') + ' no rule covers now: ' + offer.newly.join('; ')
+      + (offer.newly_count > offer.newly.length ? '; and more' : '') + '.' }) : el('p', { class: 'small dim', text: 'It covers the same books as the rules it replaces.' }),
+    examples(offer.examples, offer.matches),
+    el('div', { class: 'row gap6' }, el('button', { class: 'btn sm pri', type: 'button', text: 'Combine them', onclick: (event) => {
+      event.currentTarget.disabled = true;
+      api('POST', '/api/admin/review/rules/merge', { ids: offer.ids }).then(() => { toast('Combined into one rule.'); again(); }).catch(oops);
+    } }))));
+  const rules = data.rules.map((rule) => el('div', { class: 'stack gap8' },
+    el('div', { class: 'row between gap8' }, el('strong', { style: 'flex:1 1 320px;min-width:0', text: rule.words }),
+      el('button', { class: 'btn sm danger', type: 'button', text: 'Delete', 'aria-label': 'Delete the rule: ' + rule.words, onclick: (event) => {
+        if (!window.confirm('Delete this rule? Books it sorted keep their sort; new ones like them will wait in the queue again.')) return;
+        event.currentTarget.disabled = true;
+        api('DELETE', '/api/admin/review/rules/' + rule.id).then(() => { toast('Rule deleted.'); again(); }).catch(oops);
+      } })),
+    el('p', { class: 'small dim', text: 'From ' + plural(rule.confirmations, 'confirmation') + (rule.note ? ' (' + rule.note + ')' : '') + ', ' + niceDate(rule.created) + '.' }),
+    examples(rule.examples, rule.matches)));
+  setMain(back('#/details', 'Back to fix book details'),
+    pageHead('Learned rules', 'Each time a suggestion is confirmed or turned down, Family Hub remembers it here, and books arriving the same way are sorted by themselves. '
+      + 'Delete a rule to have books like it wait in the queue again.'),
+    merges.length ? el('section', { class: 'panel cut focus' }, head(plural(merges.length, 'set') + ' of rules that could be one'), el('div', { class: 'list' }, merges)) : null,
+    el('section', { class: 'panel cut' }, head(plural(rules.length, 'rule')),
+      rules.length ? el('div', { class: 'list' }, rules) : el('p', { class: 'small dim', text: 'No rules yet. Confirm or turn down a suggestion on Fix book details and it appears here.' })));
 }
 
 function copiesCard(copies) {
@@ -3515,12 +4381,196 @@ function spareCopiesCard(data, again) {
       el('div', { class: 'list', style: 'margin-top:12px' }, data.log.map((entry) => el('div', { class: 'row between' }, el('span', { text: entry.title }),
         el('span', { class: 'small dim', text: ({ identical: 'identical spare removed', duplicate: 'spare set aside and removed',
             merge: 'merged',
-            review: 'your choice' }[entry.action] || entry.action) + (entry.note ? ' (' + entry.note + ' copied)' : '') + ' · ' + niceDate(entry.at) }))))) : null);
+            review: 'your choice', apart: 'not duplicates' }[entry.action] || entry.action)
+          + (entry.note ? (entry.action === 'apart' ? ' (now ' + entry.note + ')' : ' (' + entry.note + ' copied)') : '') + ' · ' + niceDate(entry.at) }))))) : null);
+}
+
+// What the copies say about themselves, as the carousel lists it under each page.
+const DUP_ROWS = [
+  ['Title', (copy) => copy.title],
+  ['Author', (copy) => copy.authors.join(' & ')],
+  ['Series', (copy) => copy.series ? copy.series + (copy.series_index !== null ? ' · ' + copy.series_index : '') : ''],
+  ['Format', (copy) => copy.files.map((file) => file.format).join(', ') + (copy.converted ? ' (converted)' : '')],
+  ['File size', (copy) => copy.files.map((file) => fileSize(file.size)).join(', ')],
+  ['Pages', (copy) => copy.pages ? 'about ' + copy.pages : ''],
+  ['Added', (copy) => niceDate(copy.added)],
+  ['Tags', (copy) => copy.tags.join(', ')],
+  ['Publisher', (copy) => copy.publisher],
+  ['Language', (copy) => (copy.language || '').toUpperCase()],
+  ['ISBN', (copy) => copy.isbn],
+  ['Description', (copy) => copy.synopsis ? plural(copy.synopsis, 'word') : ''],
+];
+
+// The duplicates queue as a carousel the admin drives: a strip of every set along the top (Previous, Next, the
+// arrow keys, or a cover in the strip), and the chosen set's copies laid open like facing pages, front pages
+// left and right, each copy's own details under its page ready to put right. Keep one, or say they are
+// different books, and the carousel moves on to the next set.
+let dupInside = false;  // front pages, or the first few pages of each copy
+
+function dupQueueCard(data, again) {
+  const card = el('section', { class: 'panel cut focus dq cs', 'aria-label': 'Copies to sort out' });
+  const set = data.set;
+  const sets = data.sets;
+  const blocked = Boolean(data.blocked) || data.busy;
+  if (!set) {
+    return fill(card, head('Copies to sort out'), el('p', { class: 'small dim', text: 'Nothing to sort out. Every book is in the library once, or you have said which copies are different books.' }));
+  }
+  const at = Math.max(0, sets.findIndex((entry) => entry.key === set.key));
+  const go = (index) => { const next = sets[(index + sets.length) % sets.length]; if (next && next.key !== set.key) dupGo(next.key, again); };
+  // once this set is settled it leaves the list, so the carousel goes on to whichever came after it
+  const after = (sets[at + 1] || sets[at - 1] || {}).key;
+  const name = (copy) => 'Copy ' + (set.copies.indexOf(copy) + 1);
+  let keep = set.copies.find((copy) => copy.id === set.keep) || set.copies[0];
+
+  // the strip: every set's cover, the one open now marked
+  const strip = el('div', { class: 'cs-strip', role: 'group', 'aria-label': 'Every set of copies' }, sets.map((entry, i) => el('button', {
+    type: 'button', class: 'cs-thumb', 'aria-current': i === at ? 'true' : null, 'aria-label': entry.title + ', ' + plural(entry.copies, 'copy', 'copies'),
+    title: entry.title, onclick: () => go(i) },
+  entry.cover ? el('img', { src: '/api/admin/duplicates/cover/' + entry.cover, alt: '', loading: 'lazy',
+    onerror: (event) => event.currentTarget.replaceWith(el('span', { class: 'cs-thumb-t', text: entry.title })) }) : el('span', { class: 'cs-thumb-t', text: entry.title }),
+  el('span', { class: 'cs-thumb-n', 'aria-hidden': 'true', text: String(entry.copies) }))));
+  requestAnimationFrame(() => { const now = strip.children[at]; if (now) strip.scrollLeft = now.offsetLeft - strip.clientWidth / 2 + now.offsetWidth / 2; });
+
+  // what differs between the copies, field by field, before anyone types
+  const own = (copy) => ({ title: copy.title, authors: copy.authors.join(' & '), series: copy.series || '', series_index: reviewValue(copy.series_index),
+    tags: copy.tags.join(', ') });
+  const differs = {};
+  for (const fieldName of ['title', 'authors', 'series', 'series_index', 'tags']) {
+    differs[fieldName] = new Set(set.copies.map((copy) => own(copy)[fieldName])).size > 1;
+  }
+
+  const pages = set.copies.map((copy) => {
+    const start = own(copy);
+    const inputs = {
+      title: el('input', { type: 'text', value: start.title }), authors: el('input', { type: 'text', value: start.authors }),
+      series: el('input', { type: 'text', value: start.series }), series_index: el('input', { type: 'text', inputmode: 'decimal', value: start.series_index }),
+      tags: el('input', { type: 'text', value: start.tags }) };
+    const from = el('span', { class: 'small dq-from' });
+    const boxed = (label, fieldName, cls) => {
+      const box = field(label, inputs[fieldName], cls);
+      if (differs[fieldName]) box.classList.add('cs-diff');
+      return box;
+    };
+    const front = el('div', { class: 'cs-front' });
+    const keepBtn = el('button', { class: 'btn sm cs-keep', type: 'button', 'aria-label': 'Keep ' + name(copy), onclick: () => { keep = copy; mark(); } });
+    const fate = el('p', { class: 'small cs-fate', 'aria-live': 'polite' });
+    // the facts nobody edits here: format, size, pages, date added and the rest, the differing ones marked
+    const facts = el('dl', { class: 'cs-facts' }, DUP_ROWS.filter(([label]) => !['Title', 'Author', 'Series', 'Tags'].includes(label)).map(([label, show]) => {
+      const values = set.copies.map(show);
+      if (values.every((value) => !value)) return null;
+      return el('div', { class: values.every((value) => value === values[0]) ? '' : 'cs-diff' }, el('dt', { text: label }), el('dd', { text: show(copy) || 'none' }));
+    }));
+    const page = el('article', { class: 'cs-page', 'aria-label': name(copy) },
+      el('div', { class: 'row between gap8' }, el('strong', { text: name(copy) }),
+        el('span', { class: 'row gap8' },
+          copy.files.length ? el('a', { class: 'small', href: '/api/books/' + copy.id + '/download/' + copy.files[0].format, text: 'Download the ' + copy.files[0].format }) : null,
+          el('a', { class: 'small', href: '#/fix/' + copy.id, text: 'Open in the editor' }))),
+      front,
+      el('div', { class: 'rv-grid' }, boxed('Title', 'title', 'wide'), boxed('Author (separate with &)', 'authors', 'wide'),
+        boxed('Series', 'series'), boxed('Number in series', 'series_index'), boxed('Tags (separate with commas)', 'tags', 'wide')),
+      from, facts,
+      el('div', { class: 'stack gap6' }, keepBtn, fate));
+    const values = () => ({ title: inputs.title.value, authors: inputs.authors.value, series: inputs.series.value,
+      series_index: inputs.series_index.value, tags: inputs.tags.value });
+    return { copy, page, front, inputs, keepBtn, fate, from, values };
+  });
+
+  // The copy picked to start with takes what it's missing from whichever copy says more, as a saved keep does.
+  const startWith = pages.find((one) => one.copy === keep);
+  const fullest = set.start;
+  const filled = [];
+  for (const [fieldName, value] of Object.entries({ title: fullest.title, authors: fullest.authors.join(' & '), series: fullest.series || '',
+    series_index: reviewValue(fullest.series_index), tags: fullest.tags.join(', ') })) {
+    if (!startWith.inputs[fieldName].value && value) { startWith.inputs[fieldName].value = value; filled.push(fieldName); }
+  }
+  if (filled.length) startWith.from.textContent = 'Filled in from the other copy: ' + filled.map((fieldName) => ({ title: 'title', authors: 'author', series: 'series', series_index: 'number', tags: 'tags' })[fieldName]).join(', ') + '.';
+
+  // the front pages, or the first few pages, of every copy side by side
+  function drawFronts() {
+    for (const one of pages) {
+      if (dupInside || !one.copy.has_cover) { fill(one.front, peekPane(one.copy.id)); continue; }
+      fill(one.front, el('img', { class: 'cs-cover', src: '/api/admin/duplicates/cover/' + one.copy.id, alt: 'Front page of ' + name(one.copy),
+        onerror: (event) => fill(one.front, peekPane(one.copy.id)) }));
+    }
+    insideBtn.textContent = dupInside ? 'Show the front pages' : 'Show the first pages';
+    insideBtn.setAttribute('aria-pressed', String(dupInside));
+  }
+  const insideBtn = el('button', { class: 'btn sm', type: 'button', onclick: () => { dupInside = !dupInside; drawFronts(); } });
+
+  const keepSave = el('button', { class: 'btn pri dq-go', type: 'button', disabled: blocked });
+  const apartSave = el('button', { class: 'btn', type: 'button', disabled: blocked, text: 'They are different books · save each one',
+    title: 'Every copy stays in the library with the details written under it' });
+  const settle = (btn, body, words) => {
+    btn.disabled = true;
+    api('POST', '/api/admin/duplicates/queue', Object.assign({ key: set.key }, body)).then((answer) => {
+      toast(answer.problem ? answer.problem : (answer.message || words), Boolean(answer.problem), answer.problem ? 8000 : undefined);
+      if (after) dupGo(after, again); else again();
+    }).catch((err) => { btn.disabled = false; oops(err); });
+  };
+  keepSave.addEventListener('click', () => {
+    const chosen = pages.find((one) => one.copy === keep);
+    settle(keepSave, { action: 'keep', keep: keep.id, fields: chosen.values() }, 'Kept ' + name(keep).toLowerCase() + '.');
+  });
+  apartSave.addEventListener('click', () => {
+    const names = {};
+    pages.forEach((one) => { names[one.copy.id] = one.values(); });
+    settle(apartSave, { action: 'apart', names }, 'Saved as separate books.');
+  });
+
+  // picking a copy: its page takes the accent, the others say what becomes of them, the button says it in words
+  function mark() {
+    const outcome = keep.outcome;
+    for (const one of pages) {
+      const kept = one.copy === keep;
+      one.page.classList.toggle('keep', kept);
+      one.keepBtn.setAttribute('aria-pressed', String(kept));
+      one.keepBtn.textContent = kept ? 'Keeping this one' : 'Keep this one';
+      one.fate.textContent = kept ? '' : (outcome.identical ? 'Will be deleted (identical file)' : 'Will be set aside in needs-attention');
+    }
+    keepSave.textContent = 'Keep ' + name(keep).toLowerCase() + ' · ' + outcome.words;
+  }
+
+  fill(card,
+    head('Copies to sort out', el('span', { class: 'small dim', text: (at + 1) + ' of ' + sets.length })),
+    el('div', { class: 'cs-nav' },
+      el('button', { class: 'btn sm', type: 'button', 'data-go': 'prev', disabled: sets.length < 2, text: 'Previous', onclick: () => go(at - 1) }),
+      strip,
+      el('button', { class: 'btn sm', type: 'button', 'data-go': 'next', disabled: sets.length < 2, text: 'Next', onclick: () => go(at + 1) })),
+    el('div', { class: 'row between gap8' },
+      el('div', { class: 'stack', style: 'gap:2px;min-width:0;flex:1 1 320px' }, el('h3', { class: 'book', text: set.title }),
+        el('span', { class: 'small dim', text: plural(set.copies.length, 'copy', 'copies') + (set.author ? ' by ' + set.author : '') + '. Move with the arrow keys when you are not typing.' })),
+      insideBtn),
+    data.blocked ? el('p', { class: 'warn', role: 'status' }, data.blocked + ' ', el('a', { href: '#/admin', text: 'Open Admin, Hub' })) : null,
+    data.busy ? el('p', { class: 'small', role: 'status', text: 'A batch is running below. This waits until it is done.' }) : null,
+    set.why ? el('p', { class: 'small rv-note', text: set.why }) : null,
+    el('div', { class: 'cs-spread' }, pages.map((one) => one.page)),
+    el('p', { class: 'small dim', text: 'Marked boxes and facts are where the copies differ. Keeping one writes its details to the library and deals with the rest; '
+      + 'different books keeps every copy, each with the details under it.' }),
+    el('div', { class: 'row gap6' }, keepSave, apartSave));
+  drawFronts();
+  mark();
+  return card;
+}
+
+// ← and → move the carousel, except while typing in a box
+document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+  if (event.target.closest && event.target.closest('input, textarea, select, [contenteditable], iframe')) return;
+  const btn = document.querySelector('.cs [data-go="' + (event.key === 'ArrowLeft' ? 'prev' : 'next') + '"]');
+  if (btn && !btn.disabled) { event.preventDefault(); btn.click(); }
+});
+
+// Show another set in the queue without reloading the rest of the page.
+function dupGo(key, again) {
+  api('GET', '/api/admin/duplicates/queue' + (key ? '?' + qs({ key }) : '')).then((data) => {
+    const old = document.querySelector('.dq');
+    if (old) old.replaceWith(dupQueueCard(data, again));
+  }).catch((err) => { if (!(err instanceof Stale)) oops(err); });
 }
 
 async function pageCopies() {
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
-  const [copies, spares] = await Promise.all([api('GET', '/api/admin/copies'), api('GET', '/api/admin/duplicates')]);
+  const [copies, spares, queue] = await Promise.all([api('GET', '/api/admin/copies'), api('GET', '/api/admin/duplicates'), api('GET', '/api/admin/duplicates/queue')]);
   const again = () => pageCopies().catch(oops);
   const choose = (key, choice, msg) => api('POST', '/api/admin/copies', { key, choice }).then(() => { toast(msg); again(); }).catch(oops);
   const one = copies.sets.filter((set) => set.together), apart = copies.sets.filter((set) => !set.together);
@@ -3537,7 +4587,9 @@ async function pageCopies() {
   setMain(back('#/admin/books', 'Back to books admin'),
     pageHead('Copies of the same book', 'The library holds ' + copies.entries + ' entries for ' + plural(copies.books,
         'book') + '. Entries with the same title and author are shown as one book. Family Hub changes nothing in the library: every copy stays where it is, and can be downloaded here.'),
-    spareCopiesCard(spares, again),
+    dupQueueCard(queue, again),
+    // the bulk buttons for the clear-cut sets, folded away: the queue above is the usual way through
+    el('details', { class: 'dq-bulk', open: spares.job.running ? true : null }, el('summary', { text: 'Clear-cut sets, all at once' }), spareCopiesCard(spares, again)),
     head('How Family Hub shows them meanwhile'),
     el('section', { class: 'panel cut' }, head(plural(one.length, 'book') + ' shown as one'),
       el('p', { class: 'small dim',

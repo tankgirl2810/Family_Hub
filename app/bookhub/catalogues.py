@@ -405,10 +405,9 @@ class Catalogues:
         row = con.execute("SELECT kind, source FROM book_kind WHERE book_key=?", (book["key"],)).fetchone()
         if row and (row["source"] != "auto" or row["kind"] != kinds.UNSORTED):
             return
-        found = [row["tag"] for row in con.execute("SELECT tag FROM community_tags WHERE book_key=?", (book["key"],))]
-        kind, _ = kinds.guess(book["title"], book["author"], book["series"], book["tags"] + found, book["formats"])
-        if kind != kinds.UNSORTED:
-            self.hub.set_kind(book["key"], kind, source="auto")
+        verdict, origin = self.hub.verdict_for(book, read_pages=False)
+        if verdict["kind"] != kinds.UNSORTED:
+            self.hub.apply_verdict(book["key"], verdict, origin)
             con.commit()
 
     def run(self, limit=None):

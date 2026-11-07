@@ -175,8 +175,74 @@ tag with the number of books carrying it.
 These choices are saved in the daily book-data backup
 ([guide 6](06-your-data-and-backups.md)).
 
-Family tags and your own tags are not on this page. Remove those on the
-book's page with the cross next to the tag.
+Your own tags are not on this page. Remove those, and single family tags, on
+the book's page with the cross next to the tag.
+
+## Tags inside tags
+
+A tag can sit under another: "Pathfinder 1e" and "Pathfinder 2e" under
+"Pathfinder", "Vampire: The Masquerade" under "World of Darkness". Picking
+the outer tag in a search finds the books with any tag under it too, however
+deep. In the tag list under the search box the inner tags sit in one box with
+their outer tag, called by the part that differs: **Pathfinder** [**1e**]
+[**2e**]. An outer tag's number counts the books of every tag under it.
+
+The sorter nests game editions under their game by itself
+([guide 8](08-adding-and-sorting-books.md)). To nest any other tag, or undo
+one, go to **Admin → Books → Tidy tags → Nested tags**: type the tag, what it
+goes under, and press **Nest**; the **×** beside a tag takes it back out. A tag
+can't go inside itself, directly or further down. Nesting is saved in the
+book-data backup.
+
+## Hiding tags from your own library
+
+Anyone with a profile can keep books out of their own library list: press
+**Refine** under the search box, type a tag or a role (**Rulebook**,
+**Adventure**, **Player aid**, **GM aid**) under **Hidden** and press
+**Hide**. Hiding an outer tag hides everything under it, so "Pathfinder 1e"
+hides one edition and "Pathfinder" the whole game. The **×** on a hidden tag
+shows those books again. The count over the books says how many you hid.
+
+It is only your own list: nobody else's changes. Hidden books still turn up
+as soon as you search, and on the **Game books** page, which also has a
+**Hide … from my library** button for the game or edition you are looking at.
+
+## Merging tags
+
+When one thing has two tags ("Yaoi" and "Boy love", "Sci-fi" and "Sci fi"),
+merge them under **Admin → Books → Tidy tags → Merge tags**. One merge covers
+every sort of tag at once:
+
+| Sort | What a merge does |
+|---|---|
+| Family tags | Changed on every book. A book that had both keeps one. A tag added later under the old name, by a person, the sorter or an import, goes on under the new name |
+| Book file and community tags | Shown under the new name, like **Rename**. The files and catalogues are not changed |
+| My tags | Never touched |
+
+If the old tag sat under another tag ("Pathfinder 2e" under "Pathfinder"),
+or had tags under it, the kept name takes its place.
+
+**These look like the same tag** lists tags Family Hub spotted by itself:
+spellings that differ only by capitals, a plural, punctuation, spaces or "&"
+for "and". The number on each is how many books carry it, and the ticked one
+(the most used) is kept: click another to keep that instead. **Merge into …**
+says how many books change and asks before it does anything. **Not the
+same** stops the suggestion coming back. Words that mean the same but are
+spelled differently (Yaoi and BL) are never suggested; merge those by hand.
+
+**Merge by hand**: type a tag in **Tags to merge** (the list shows family,
+book file and community tags) and press **Add**, as many as you like. Click
+the one to keep, or type a new name under **Name to keep**. The line below
+says what will change, for example "12 books change; 3 already have "Boy
+love"".
+
+**Merged so far** lists every merge with **Undo**. Undo puts the old name
+back on the family tags that had it when you merged, and stops the renaming.
+Tags added since then under the old name keep the new one, and nesting stays
+as it is.
+
+Merges, and the suggestions you said no to, are saved in the book-data
+backup ([guide 6](06-your-data-and-backups.md)).
 
 ## Kinds of book
 

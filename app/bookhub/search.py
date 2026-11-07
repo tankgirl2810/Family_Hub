@@ -6,7 +6,7 @@ A term is {"fields": ["title", "author", "series", "tag"], "value": "cafe", "sou
   value   each word found at the start of a word in those fields, in any order, ignoring case, accents and
           punctuation ("saviors" finds "Savior's"); "*" stands for any letters ("mag*" finds magic, magician
           and Magus). With "phrase": true (typed in quotes) the words must come together, in order. A tag
-          must match whole.
+          must match whole, and a tag with others nested under it ("Pathfinder") finds those too.
   sign    "+" the book must match, "-" it must not, "or" one of the "or" terms will do
 
 How they combine: every "+" term must match, except that "+" words of the same kind (two authors) mean
@@ -51,12 +51,15 @@ def clean(terms):
     return cleaned[:40]
 
 
-def matcher(terms):
-    """A function item, series_tags -> bool for these terms (already cleaned)."""
+def matcher(terms, nested=None):
+    """A function item, series_tags -> bool for these terms (already cleaned). nested is {tag in lower case: tags
+    under it} (tabletop.descendants): a tag term finds books with any tag nested under it as well."""
     compiled = []
+    nested = nested or {}
     for term in terms:
         words = [term["value"]] if term["phrase"] else norm(term["value"]).split(" ")
-        loose, whole = [_pattern(word, False) for word in words], _pattern(term["value"], True)
+        loose = [_pattern(word, False) for word in words]
+        whole = [_pattern(tag, True) for tag in {term["value"]} | set(nested.get(term["value"].lower(), ()))]
         # the "kind" is the bucket a + term lands in. picked tags each get their own bucket (all must match),
         # typed words share one per field (so two authors = either one). subtle, but it matters
         kind = (tuple(term["fields"]), term["source"], term["value"].lower() if term["fields"] == ["tag"] else "")
@@ -81,7 +84,7 @@ def matcher(terms):
                 return True
         if "tag" not in term["fields"]:
             return False
-        return any(whole.search(norm(tag)) for tag in tags_of(item, series_tags, term["source"]))
+        return any(pattern and pattern.search(norm(tag)) for tag in tags_of(item, series_tags, term["source"]) for pattern in whole)
 
     def keep(item, series_tags=None):
         series_tags = series_tags or {}

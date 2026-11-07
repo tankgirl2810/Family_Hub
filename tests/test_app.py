@@ -373,8 +373,9 @@ def test_kind_guesses():
     assert guess("A Brief History", tags=["Science", "History"])[0] == "Non-fiction"
     assert guess("Masters of Doom", formats=["PDF"])[0] == "Unsorted"
     assert guess("Star Trek - Deep Space Nine (Malibu) 05", formats=["CBR"]) == ("Graphic novel", ["Star Trek"])
-    assert guess("Clanbook Lasombra - Revised", formats=["PDF"]) == ("Tabletop", ["VTM", "Revised"])
-    assert guess("Corebook", formats=["PDF"], origin="VampireTheMasqueradeV5/Corebook.pdf") == ("Tabletop", ["VTM", "V5"])
+    vtm = ["World of Darkness", "Vampire: The Masquerade"]
+    assert guess("Clanbook Lasombra - Revised", formats=["PDF"]) == ("Tabletop", vtm + ["Vampire: The Masquerade Revised"])
+    assert guess("Corebook", formats=["PDF"], origin="VampireTheMasqueradeV5/Corebook.pdf") == ("Tabletop", vtm + ["Vampire: The Masquerade V5"])
     assert guess("AD&D - Complete Set of 26 Books")[0] == "Tabletop"
     assert guess("Revised Economics", tags=["Economics"]) == ("Non-fiction", [])  # edition tags are for tabletop only
 

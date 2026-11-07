@@ -146,6 +146,25 @@ CREATE TABLE IF NOT EXISTS copy_choices (
 CREATE TABLE IF NOT EXISTS tag_rules (
     tag TEXT PRIMARY KEY COLLATE NOCASE, becomes TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS tag_parents (
+    tag TEXT PRIMARY KEY COLLATE NOCASE, parent TEXT NOT NULL COLLATE NOCASE
+);
+CREATE TABLE IF NOT EXISTS sort_verdicts (
+    book_key TEXT PRIMARY KEY, verdict TEXT NOT NULL, origin TEXT NOT NULL DEFAULT '', updated TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learned_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder TEXT NOT NULL DEFAULT '', pattern TEXT NOT NULL DEFAULT '',
+    sets TEXT NOT NULL DEFAULT '{}', rejects TEXT NOT NULL DEFAULT '{}',
+    confirmations INTEGER NOT NULL DEFAULT 1, note TEXT NOT NULL DEFAULT '', created TEXT NOT NULL, updated TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS game_lines (
+    tag TEXT PRIMARY KEY COLLATE NOCASE, entry TEXT NOT NULL, created TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tag_merges (
+    tag TEXT PRIMARY KEY COLLATE NOCASE, becomes TEXT NOT NULL, created TEXT NOT NULL,
+    history TEXT NOT NULL DEFAULT '[]'
+);
 CREATE TABLE IF NOT EXISTS media_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL, arr_id INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '',
@@ -205,6 +224,7 @@ ADDED_COLUMNS = [
     ("watch", "seen", "TEXT"),                         # keys of found items the person has seen (JSON)
     ("watch", "checked", "TEXT NOT NULL DEFAULT ''"),
     ("watch", "error", "TEXT NOT NULL DEFAULT ''"),
+    ("book_kind", "role", "TEXT NOT NULL DEFAULT ''"),  # a tabletop book's role: Rulebook, Adventure, Player aid, GM aid
 ]
 
 

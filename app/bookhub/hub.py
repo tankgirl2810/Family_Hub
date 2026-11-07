@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 
 from . import (bookfix, calibre, catalogues, covers, db, devices, duplicates, goodreads, intake, kinds, librarymanager, media, mediasort,
-               readers, secondcopy, series, settings, tags)
+               peek, readers, review, secondcopy, series, settings, tabletop, tagmerge, tags)
 
 TAG_WEIGHTS = {"family": 3, "mine": 3, "community": 2, "epub": 1}
 SAME_AUTHOR_WEIGHT = 2
@@ -57,6 +57,7 @@ class Hub:
         self.duplicates = duplicates.Duplicates(self)
         self.sorter = mediasort.Sorter(self)
         self.bookfix = bookfix.BookFix(self)
+        self.review = review.Review(self)  # the review queue and learned rules, see review.py
         self.ingest_stuck = 0  # files the library manager had to be reminded about, last time we looked
         self._backup_lock = threading.Lock()
         self._dirty = False
@@ -204,8 +205,7 @@ class Hub:
         con = self.con()
         self.ensure_meta(book_key)
         if kind == "family":
-            con.execute("INSERT OR IGNORE INTO family_tags(book_key, tag, added_by, created) VALUES(?,?,?,?)",
-                        (book_key, tag, profile_id, db.now()))
+            self.put_family_tag(book_key, tag, profile_id)
         else:
             con.execute("INSERT OR IGNORE INTO personal_tags(book_key, profile_id, tag, created) VALUES(?,?,?,?)",
                         (book_key, profile_id, tag, db.now()))
@@ -222,6 +222,15 @@ class Hub:
                         (book_key, profile_id, tag))
         con.commit()
         self.touch()
+
+    def put_family_tag(self, book_key, tag, added_by=None, merged=None):
+        """The one way a family tag goes on a book (a person, the sorter, an import), so an admin's merges apply
+        to it: a "Yaoi" added after "Yaoi" was merged into "Boy love" goes on as "Boy love". Doesn't commit.
+        Pass `merged` (tagmerge.rules) when putting on many. Returns the name it went on as."""
+        tag = tagmerge.resolve(tag, tagmerge.rules(self.con()) if merged is None else merged)
+        self.con().execute("INSERT OR IGNORE INTO family_tags(book_key, tag, added_by, created) VALUES(?,?,?,?)",
+                           (book_key, tag, added_by, db.now()))
+        return tag
 
     def set_rating(self, book_key, profile_id, rating):
         con = self.con()
@@ -546,7 +555,9 @@ class Hub:
         names = self.profile_names()
         index = self.tag_index()
         # Only kinds a person chose; guesses are made again from the book itself.
-        kind_of = {row["book_key"]: row["kind"] for row in con.execute("SELECT book_key, kind FROM book_kind WHERE source='manual'")}
+        manual = list(con.execute("SELECT book_key, kind, role FROM book_kind WHERE source='manual'"))
+        kind_of = {row["book_key"]: row["kind"] for row in manual}
+        role_of = {row["book_key"]: row["role"] for row in manual if row["role"]}
         books = {}
 
         def entry(key):
@@ -558,7 +569,7 @@ class Hub:
                     "author": owned["author"] if owned else (meta["author"] if meta else ""),
                     "isbn": (owned["isbn"] if owned else (meta["isbn"] if meta else "")) or "",
                     "pages": meta["pages"] if meta else None,
-                    "kind": kind_of.get(key),
+                    "kind": kind_of.get(key), "role": role_of.get(key),
                     "epub_tags": index.get(key, {}).get("epub", []),
                     "community_tags": [], "family_tags": [], "personal_tags": {}, "ratings": {}, "reading": {},
                     "shelves": [],
@@ -589,6 +600,18 @@ class Hub:
             "tag_rules": [{"tag": row["tag"], "becomes": row["becomes"]}
                           for row in con.execute("SELECT tag, becomes FROM tag_rules ORDER BY tag")],
             "copy_choices": self.copy_choices(),
+            "tag_parents": self.tag_parents(),
+            # what each person hides from their own library, by name like everything else here
+            # sets of library entries a person said are different books (entry numbers: same library only)
+            "duplicates_apart": [sorted(ids) for ids in self.duplicates.told_apart()],
+            "hidden_tags": {profile["name"]: names for profile in self.profiles()
+                            for names in [tabletop.hidden(self, profile["id"])] if names},
+            "game_lines": [json.loads(row["entry"]) for row in con.execute("SELECT entry FROM game_lines ORDER BY tag")],
+            "learned_rules": [{"folder": row["folder"], "pattern": row["pattern"], "sets": json.loads(row["sets"] or "{}"),
+                               "rejects": json.loads(row["rejects"] or "{}"), "confirmations": row["confirmations"],
+                               "note": row["note"], "created": row["created"]}
+                              for row in con.execute("SELECT * FROM learned_rules ORDER BY id")],  # see review.py
+            **tagmerge.export(con),  # tag_merges and tag_merge_dismissed
             "books": books,
         }
 
@@ -611,10 +634,42 @@ class Hub:
                 ids[low] = cur.lastrowid
             return ids[low]
 
+        tagmerge.import_merges(con, data)  # before the books, so their family tags arrive merged
+        merged = tagmerge.rules(con)
         for rule in data.get("tag_rules") or []:
             if db.clean_tag(rule.get("tag")):
                 con.execute("INSERT OR IGNORE INTO tag_rules(tag, becomes) VALUES(?,?)",
                             (db.clean_tag(rule["tag"]), db.clean_tag(rule.get("becomes"))))
+        apart = [sorted(entries) for entries in self.duplicates.told_apart()]
+        for entries in data.get("duplicates_apart") or []:
+            # careful: not "ids", that name is the profile lookup pid() uses
+            entries = sorted(int(entry) for entry in entries if str(entry).isdigit())
+            if len(entries) > 1 and entries not in apart:
+                apart.append(entries)
+        db.kv_set(con, "duplicates:apart", json.dumps(apart))
+        for name, names in (data.get("hidden_tags") or {}).items():
+            # only for someone who hides nothing yet: merging fills gaps, it never overwrites a choice
+            if pid(name) and not tabletop.hidden(self, pid(name)):
+                tabletop.set_hidden(self, pid(name), names)
+        for tag, parent in (data.get("tag_parents") or {}).items():
+            if db.clean_tag(tag) and db.clean_tag(parent):
+                con.execute("INSERT OR IGNORE INTO tag_parents(tag, parent) VALUES(?,?)", (db.clean_tag(tag), db.clean_tag(parent)))
+        for entry in data.get("game_lines") or []:
+            if isinstance(entry, dict) and db.clean_tag(entry.get("tag")):
+                con.execute("INSERT OR IGNORE INTO game_lines(tag, entry, created) VALUES(?,?,?)",
+                            (db.clean_tag(entry["tag"]), json.dumps(entry), db.now()))
+        for rule in data.get("learned_rules") or []:
+            # the same folder and name pattern already here keeps what it says; the file's copy is left out
+            if not isinstance(rule, dict) or not isinstance(rule.get("sets", {}), dict) or not isinstance(rule.get("rejects", {}), dict):
+                continue
+            folder, pattern = str(rule.get("folder") or ""), str(rule.get("pattern") or "")
+            if (folder or pattern) and not con.execute("SELECT 1 FROM learned_rules WHERE lower(folder)=lower(?) AND pattern=?",
+                                                       (folder, pattern)).fetchone():
+                con.execute("INSERT INTO learned_rules(folder, pattern, sets, rejects, confirmations, note, created, updated) "
+                            "VALUES(?,?,?,?,?,?,?,?)", (folder, pattern, json.dumps(rule.get("sets") or {}), json.dumps(rule.get("rejects") or {}),
+                                                        rule["confirmations"] if isinstance(rule.get("confirmations"), int) else 1,
+                                                        str(rule.get("note") or ""),
+                                                        str(rule.get("created") or db.now()), db.now()))
         for key, choice in (data.get("copy_choices") or {}).items():
             if choice in (calibre.TOGETHER, calibre.APART):
                 con.execute("INSERT OR IGNORE INTO copy_choices(book_key, choice) VALUES(?,?)", (key, choice))
@@ -624,14 +679,15 @@ class Hub:
         for key, saved in (data.get("books") or {}).items():
             self.ensure_meta(key, saved.get("title") or key, saved.get("author"), saved.get("isbn"), saved.get("pages"), source="import")
             if saved.get("kind") in kinds.KINDS and saved["kind"] != kinds.UNSORTED:
-                con.execute("INSERT OR IGNORE INTO book_kind(book_key, kind, source, updated) VALUES(?,?,'manual',?)",
-                            (key, saved["kind"], db.now()))
+                role = saved.get("role") if saved["kind"] == kinds.TABLETOP and saved.get("role") in kinds.ROLES else ""
+                con.execute("INSERT OR IGNORE INTO book_kind(book_key, kind, source, updated, role) VALUES(?,?,'manual',?,?)",
+                            (key, saved["kind"], db.now(), role))
             for tag in saved.get("community_tags", []):
                 con.execute("INSERT OR IGNORE INTO community_tags(book_key, tag, source) VALUES(?,?,?)",
                             (key, db.clean_tag(tag.get("tag")), tag.get("source") or "import"))
             for tag in saved.get("family_tags", []):
-                con.execute("INSERT OR IGNORE INTO family_tags(book_key, tag, added_by, created) VALUES(?,?,NULL,?)",
-                            (key, db.clean_tag(tag), db.now()))
+                if db.clean_tag(tag):
+                    self.put_family_tag(key, db.clean_tag(tag), merged=merged)
             for name, their_tags in (saved.get("personal_tags") or {}).items():
                 for tag in their_tags if pid(name) else []:
                     con.execute("INSERT OR IGNORE INTO personal_tags(book_key, profile_id, tag, created) VALUES(?,?,?,?)",
@@ -697,15 +753,70 @@ class Hub:
         """{book_key: kind} for every book that has been sorted."""
         return {row["book_key"]: row["kind"] for row in self.con().execute("SELECT book_key, kind FROM book_kind")}
 
-    def set_kind(self, book_key, kind, source="manual"):
-        if kind not in kinds.KINDS:
+    def role_index(self):
+        """{book_key: role} for tabletop books with a role."""
+        return {row["book_key"]: row["role"] for row in self.con().execute("SELECT book_key, role FROM book_kind WHERE role!=''")}
+
+    def set_kind(self, book_key, kind, source="manual", role=None):
+        """Set a book's kind. role (Rulebook, Adventure, ...) only sticks to tabletop books; None keeps the one it has."""
+        if kind not in kinds.KINDS or (role and role not in kinds.ROLES):
             return False
         self.ensure_meta(book_key)
+        if kind != kinds.TABLETOP:
+            role = ""
         self.con().execute(
-            "INSERT INTO book_kind(book_key, kind, source, updated) VALUES(?,?,?,?) "
-            "ON CONFLICT(book_key) DO UPDATE SET kind=excluded.kind, source=excluded.source, updated=excluded.updated",
-            (book_key, kind, source, db.now()))
+            "INSERT INTO book_kind(book_key, kind, source, updated, role) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(book_key) DO UPDATE SET kind=excluded.kind, source=excluded.source, updated=excluded.updated, "
+            "role=CASE WHEN ? IS NULL THEN book_kind.role ELSE excluded.role END",
+            (book_key, kind, source, db.now(), role or "", role))
         return True
+
+    def tag_parents(self):
+        """{tag: parent tag} for nested tags ("Pathfinder 2e" sits under "Pathfinder")."""
+        return {row["tag"]: row["parent"] for row in self.con().execute("SELECT tag, parent FROM tag_parents")}
+
+    def set_tag_parent(self, tag, parent):
+        """Nest a tag under another, or un-nest it (parent None or ""). A tag can't end up inside itself."""
+        tag, parent = db.clean_tag(tag), db.clean_tag(parent or "")
+        if not tag:
+            return False
+        con = self.con()
+        if not parent:
+            con.execute("DELETE FROM tag_parents WHERE tag=?", (tag,))
+            con.commit()
+            return True
+        parents, above = self.tag_parents(), parent
+        seen = {tag.lower()}
+        while above:  # walk up from the new parent; meeting the tag itself means a loop
+            if above.lower() in seen:
+                return False
+            seen.add(above.lower())
+            above = next((up for child, up in parents.items() if child.lower() == above.lower()), None)
+        con.execute("INSERT INTO tag_parents(tag, parent) VALUES(?,?) ON CONFLICT(tag) DO UPDATE SET parent=excluded.parent",
+                    (tag, parent))
+        con.commit()
+        return True
+
+    def game_lines(self):
+        """The tabletop game lines the sorter knows: gamelines.json plus any an admin confirmed."""
+        extra = []
+        for row in self.con().execute("SELECT entry FROM game_lines"):
+            try:
+                extra.append(json.loads(row["entry"]))
+            except ValueError:
+                continue
+        return kinds.load_game_lines(extra) if extra else kinds.GAME_LINES
+
+    def learned_rules(self):
+        """What an admin taught the sorter, in the shape kinds.sort_book takes."""
+        rules = []
+        for row in self.con().execute("SELECT * FROM learned_rules ORDER BY id"):
+            try:
+                sets, rejects = json.loads(row["sets"] or "{}"), json.loads(row["rejects"] or "{}")
+            except ValueError:
+                continue
+            rules.append({"id": row["id"], "folder": row["folder"], "pattern": row["pattern"], "sets": sets, "rejects": rejects})
+        return rules
 
     def _origins(self):
         """Where delivered files came from, to recover the folder a book arrived in.
@@ -720,8 +831,88 @@ class Hub:
             by_name[db.slug(Path(row["name"]).stem)] = row["origin"]
         return by_size, by_name
 
-    def sort_new_books(self, limit=None):
-        """Guess a kind and franchise tags for library books not looked at yet."""
+    def _origin_of(self, book, origins):
+        by_size, by_name = origins
+        origin = by_name.get(db.slug(book["title"]), "")
+        if by_size:
+            for fmt in book["formats"]:
+                path = self.library.file_path(book, fmt)
+                try:
+                    size = path.stat().st_size if path else None
+                except OSError:  # the library manager moved it since we looked
+                    size = None
+                if size is not None and (fmt.lower(), size) in by_size:
+                    return by_size[(fmt.lower(), size)]
+        return origin
+
+    def verdict_for(self, book, origins=None, lines=None, learned=None, read_pages=True):
+        """(verdict, origin): everything kinds.sort_book can tell about a library book."""
+        con = self.con()
+        origin = self._origin_of(book, origins or self._origins())
+        found = [row["tag"] for row in con.execute("SELECT tag FROM community_tags WHERE book_key=?", (book["key"],))]
+        args = dict(title=book["title"], author=book["author"], series=book["series"], tags=book["tags"],
+                    formats=book["formats"], origin=origin, catalogue_tags=found,
+                    learned=self.learned_rules() if learned is None else learned,
+                    game_lines=self.game_lines() if lines is None else lines)
+        verdict = kinds.sort_book(**args)
+        if read_pages and kinds.needs_pages(verdict, book["formats"]):
+            path = self.library.file_path(book, "PDF")
+            pages = bookfix.pdf_text(path) if path else ""
+            if pages:
+                verdict = kinds.sort_book(pages=pages, **args)
+        if read_pages:
+            self._read_marked_places(book, verdict, args["learned"])
+        return verdict, origin
+
+    def _read_marked_places(self, book, verdict, learned):
+        """A learned rule that marked where the title and author are on a page (review.py) reads the same places
+        in this book's PDF. Nothing changes when the places are empty here, e.g. a scanned book."""
+        marks = {}
+        by_id = {rule.get("id"): rule for rule in learned}
+        for rule_id in verdict["learned"]:  # matched widest first, so the last with marks is the closest fit
+            rule = by_id.get(rule_id) or {}
+            if (rule.get("sets") or {}).get("labels"):
+                marks = rule["sets"]["labels"]
+        path = self.library.file_path(book, "PDF") if marks and "PDF" in book["formats"] else None
+        if not path:
+            return
+        found = peek.read_labels(path, marks)
+        if found.get("title") and peek.as_title(found["title"]):
+            verdict["title"] = peek.as_title(found["title"])
+            verdict["sources"]["title"] = "marked"
+        if found.get("authors") and peek.as_authors(found["authors"]):
+            verdict["marked_authors"] = peek.as_authors(found["authors"])
+            verdict["sources"]["authors"] = "marked"
+
+    def apply_verdict(self, book_key, verdict, origin=""):
+        """Put a verdict on a book: its kind and role (as the sorter's), its game tags with their nesting, and the
+        verdict itself for the review queue. Tags the sorter added before and no longer thinks right are taken off;
+        tags people added are never touched."""
+        con = self.con()
+        self.set_kind(book_key, verdict["kind"], source="auto", role=verdict["role"])
+        before = con.execute("SELECT verdict FROM sort_verdicts WHERE book_key=?", (book_key,)).fetchone()
+        try:
+            stale = set(json.loads(before["verdict"]).get("tags") or []) if before else set(kinds.OLD_AUTO_TAGS)
+        except ValueError:
+            stale = set()
+        # an admin's tag merges apply to the sorter's tags too, old and new, so a merged one isn't seen as stale
+        merged = tagmerge.rules(con)
+        wanted = {tagmerge.resolve(tag, merged).lower() for tag in verdict["tags"]}
+        for tag in {tagmerge.resolve(tag, merged) for tag in stale}:
+            if tag.lower() not in wanted:
+                con.execute("DELETE FROM family_tags WHERE book_key=? AND tag=? AND added_by IS NULL", (book_key, tag))
+        for tag in verdict["tags"]:
+            self.put_family_tag(book_key, tag, merged=merged)
+        for tag, parent in verdict["parents"].items():
+            tag, parent = tagmerge.resolve(tag, merged), tagmerge.resolve(parent, merged)
+            if tag.lower() != parent.lower():
+                con.execute("INSERT OR IGNORE INTO tag_parents(tag, parent) VALUES(?,?)", (tag, parent))
+        con.execute("INSERT INTO sort_verdicts(book_key, verdict, origin, updated) VALUES(?,?,?,?) "
+                    "ON CONFLICT(book_key) DO UPDATE SET verdict=excluded.verdict, origin=excluded.origin, updated=excluded.updated",
+                    (book_key, json.dumps(verdict), origin, db.now()))
+
+    def sort_new_books(self, limit=None, read_pages=True):
+        """Guess a kind, role and game tags for library books not looked at yet."""
         con = self.con()
         sorted_by = {row["book_key"]: (row["kind"], row["source"]) for row in con.execute("SELECT book_key, kind, source FROM book_kind")}
         # A book whose file the library manager has not filed yet waits: without its format a comic looks unsorted.
@@ -729,32 +920,31 @@ class Hub:
         todo = [book for book in self.library.books() if book["formats"] and (
             book["key"] not in sorted_by
             or (sorted_by[book["key"]] == (kinds.UNSORTED, "auto") and set(book["formats"]) <= kinds.COMIC_FORMATS))]
-        if not todo:
+        return self._sort(todo[:limit], read_pages)
+
+    def resort_books(self, limit=None, read_pages=True, progress=None):
+        """Sort again every library book the sorter sorted (a person's choice of kind is left alone), with the
+        latest game lines and learned rules. Returns how many were looked at. progress(done, total) is told as
+        it goes (the review page's "Sort the whole library again" shows it)."""
+        con = self.con()
+        chosen = {row["book_key"] for row in con.execute("SELECT book_key FROM book_kind WHERE source!='auto'")}
+        todo = [book for book in self.library.books() if book["formats"] and book["key"] not in chosen]
+        return self._sort(todo[:limit], read_pages, progress)
+
+    def _sort(self, books, read_pages, progress=None):
+        if not books:
             return 0
-        by_size, by_name = self._origins()
-        done = 0
-        for book in todo[:limit]:
-            origin = by_name.get(db.slug(book["title"]), "")
-            if by_size:
-                for fmt in book["formats"]:
-                    path = self.library.file_path(book, fmt)
-                    try:
-                        size = path.stat().st_size if path else None
-                    except OSError:  # the library manager moved it since we looked
-                        size = None
-                    if size is not None and (fmt.lower(), size) in by_size:
-                        origin = by_size[(fmt.lower(), size)]
-                        break
-            kind, found_tags = kinds.guess(book["title"], book["author"], book["series"], book["tags"],
-                                           book["formats"], origin)
-            self.set_kind(book["key"], kind, source="auto")
-            for tag in found_tags:
-                con.execute("INSERT OR IGNORE INTO family_tags(book_key, tag, added_by, created) VALUES(?,?,NULL,?)",
-                            (book["key"], tag, db.now()))
-            done += 1
-        con.commit()
+        origins, lines, learned = self._origins(), self.game_lines(), self.learned_rules()
+        for done, book in enumerate(books, 1):
+            verdict, origin = self.verdict_for(book, origins, lines, learned, read_pages)
+            self.apply_verdict(book["key"], verdict, origin)
+            if done % 25 == 0:
+                self.con().commit()  # a whole-library re-sort takes minutes; don't hold the database that long
+            if progress:
+                progress(done, len(books))
+        self.con().commit()
         self.touch()
-        return done
+        return len(books)
 
 
 def _guarded(app, what, job):
@@ -797,6 +987,20 @@ def chores_due(hub, app, tick):
             app.logger.warning("could not put finished series aside: %s", exc)
         chapterfile.start(hub, app)
 
+    def series_extensions():  # sources stop working when their site changes, until their extension is updated
+        if not hub.series.configured:
+            return
+        updated = hub.series.update_extensions()
+        if updated:
+            app.logger.info("updated series extensions: %s", ", ".join(updated))
+
+    def series_due():  # a series that comes out on Mondays is looked at on Mondays, not only twice a day
+        if not hub.series.configured:
+            return
+        looked = hub.series.look_when_due()
+        if looked:
+            app.logger.info("looked for due chapters of series %s", ", ".join(map(str, looked)))
+
     def second_copy():  # once a day, after today's book-data file is written
         if secondcopy.due(hub):
             secondcopy.start(hub, app)
@@ -819,6 +1023,8 @@ def chores_due(hub, app, tick):
     always("could not nudge the library manager", nudge_stuck)
     always("could not sort new books", lambda: hub.sort_new_books(limit=500))
     every(10, 5, "could not keep the chapter series as comic files", chapter_series)
+    every(360, 13, "could not update the series extensions", series_extensions)  # 13 minutes after start-up, then every six hours
+    every(30, 17, "could not look for chapters that are due", series_due)
     # a book download whose sharers have all gone is swapped for a copy someone is sharing
     always("could not look at stuck book downloads", lambda: bookswap.run(hub))
     every(10, 3, "could not match Goodreads books that arrived", lambda: goodreads.reconcile(hub))

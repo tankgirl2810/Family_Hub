@@ -33,7 +33,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
-from flask import Blueprint, Response, current_app, request, send_file
+from flask import Blueprint, Response, current_app, has_app_context, request, send_file
 
 from . import chapterfile, db, kinds, kosync
 
@@ -100,8 +100,9 @@ def _reply(root, kind):
     return Response(body, content_type=kind + ";charset=utf-8")
 
 
-def _book_entry(feed, book, hub, shared=()):
-    """shared: keys more than one library book has, whose entries get the book's id on their own id too."""
+def _book_entry(feed, book, hub, shared=(), roles=None):
+    """shared: keys more than one library book has, whose entries get the book's id on their own id too.
+    roles: {book_key: role} of game books, put in as a category ("Adventure") so a reading app can show it."""
     entry = ET.SubElement(feed, "entry")
     # Titles as Family Hub shows them: "Cherry Magic! · Volume 2", not the file name the volume came with.
     title = book.get("shown_title") or book["title"]
@@ -119,6 +120,9 @@ def _book_entry(feed, book, hub, shared=()):
         ET.SubElement(entry, "summary", {"type": "text"}).text = book["synopsis"][:2000].translate(_CONTROL)
     for tag in book["tags"]:
         ET.SubElement(entry, "category", {"term": tag, "label": tag})
+    role = (roles or {}).get(book["key"])
+    if role and role not in book["tags"]:
+        ET.SubElement(entry, "category", {"term": role, "label": role})
     if book["has_cover"] or hub.covers.path(book["key"]):  # the library's cover, or one chosen in Family Hub
         href = "/opds/cover/%d" % book["id"]
         ET.SubElement(entry, "link", {"rel": "http://opds-spec.org/image", "href": href, "type": "image/jpeg"})
@@ -183,8 +187,12 @@ def _volumes(name, everything):
     return volumes
 
 
-def _gather(books, everything):
-    """The volumes of a comic series become one item, placed where the first of them came in the list."""
+def _gather(books, everything, kind_of=None):
+    """The volumes of a comic series become one item, placed where the first of them came in the list.
+    Game books are never joined: a deck of spell cards in CBZ files is a set of handouts, not a comic to read
+    through, so each stays its own entry."""
+    if kind_of is None:
+        kind_of = current_app.hub.kind_index() if has_app_context() else {}
     # The library sorted by series once, rather than searched again for every comic in the list.
     by_series = {}
     for book in everything:
@@ -192,7 +200,7 @@ def _gather(books, everything):
     items, done, single = [], set(), set()
     for book in books:
         name = (book.get("series") or "").strip()
-        if name and _comic(book) and name.lower() not in single:
+        if name and _comic(book) and name.lower() not in single and kind_of.get(book["key"]) != kinds.TABLETOP:
             if name.lower() in done:
                 continue
             volumes = _volumes(name, by_series.get(name.lower(), []))
@@ -378,13 +386,14 @@ def _book_feed(title, path, books, extra="", prepare=False):
     seen, shared = set(), set()
     for book in current_app.hub.library.books():
         (shared if book["key"] in seen else seen).add(book["key"])
+    roles = current_app.hub.role_index()  # once for the page, not once a book
     for book in books[(page - 1) * PAGE:page * PAGE]:
         if "chapters_list" in book:
             _chapters_entry(feed, book)
         elif "volumes" in book:
             _series_entry(feed, book, current_app.hub, prepare)
         else:
-            _book_entry(feed, book, current_app.hub, shared)
+            _book_entry(feed, book, current_app.hub, shared, roles)
     return _reply(feed, ACQ)
 
 

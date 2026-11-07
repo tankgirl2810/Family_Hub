@@ -1,4 +1,5 @@
 """More tests for the modules behind the routes: background chores, outside services that answer oddly."""
+import datetime
 import time
 from datetime import date
 
@@ -199,3 +200,111 @@ def test_something_else_answering_as_the_series_server_is_reported_not_crashed(a
     with app.app_context():
         found = app.hub.series.status()
     assert found["ok"] is False and "not a series server" in found["error"]
+
+
+def test_installed_series_extensions_are_kept_up_to_date(app, monkeypatch):
+    asked = []
+
+    def fake_gql(self, query, variables=None, config=None, timeout=0):
+        asked.append((query, variables))
+        if "fetchExtensions" in query:
+            return {"fetchExtensions": {"extensions": [
+                {"pkgName": "eu.kanade.mangafire", "name": "MangaFire", "isInstalled": True, "hasUpdate": True},
+                {"pkgName": "eu.kanade.webtoons", "name": "Webtoons.com", "isInstalled": True, "hasUpdate": False},
+                {"pkgName": "eu.kanade.other", "name": "Not installed", "isInstalled": False, "hasUpdate": True}]}}
+        return {"updateExtensions": {"extensions": []}}
+
+    monkeypatch.setattr(series.Series, "gql", fake_gql)
+    with app.app_context():
+        assert app.hub.series.update_extensions() == ["MangaFire"]
+        # only what is installed and out of date; nothing is installed or removed
+        assert asked[1][1] == {"ids": ["eu.kanade.mangafire"]} and "update:true" in asked[1][0]
+        asked.clear()
+        monkeypatch.setattr(series.Series, "gql", lambda self, query, variables=None, config=None, timeout=0: (
+            asked.append(query) or {"fetchExtensions": {"extensions": []}}))
+        assert app.hub.series.update_extensions() == [] and len(asked) == 1  # nothing out of date: no update asked for
+        due = [what for what, _ in hub_module.chores_due(app.hub, app, 13)]
+        assert "could not update the series extensions" in due
+        assert "could not update the series extensions" not in [what for what, _ in hub_module.chores_due(app.hub, app, 14)]
+
+
+def test_a_series_a_site_lists_with_no_chapters_still_opens(app, monkeypatch):
+    asked = []
+
+    def fake_gql(self, query, variables=None, config=None, timeout=0):
+        asked.append(query.split("{")[1].split("(")[0])
+        if "fetchMangaAndChapters" in query:
+            raise series.SeriesError("The series server said: Exception while fetching data (/fetchMangaAndChapters) : No chapters found")
+        if "fetchManga(" in query:
+            return {"fetchManga": {"manga": {"id": 9}}}
+        return {"manga": {"id": 9, "title": "Solo Leveling: Ragnarok", "inLibrary": False, "chapters": {"totalCount": 0}},
+                "chapters": {"nodes": []}}
+
+    monkeypatch.setattr(series.Series, "gql", fake_gql)
+    with app.app_context():
+        info = app.hub.series.detail(9)
+    assert info["title"] == "Solo Leveling: Ragnarok" and info["chapters"] == 0 and info["chapters_list"] == []
+    assert "fetchManga" in asked  # its details were still fetched
+
+
+def test_other_series_server_errors_still_say_so(app, monkeypatch):
+    def fake_gql(self, query, variables=None, config=None, timeout=0):
+        if "fetchMangaAndChapters" in query:
+            raise series.SeriesError("The series server said: HTTP error 522")
+        return {"manga": {"id": 9, "title": "x", "inLibrary": False}, "chapters": {"nodes": []}}
+
+    monkeypatch.setattr(series.Series, "gql", fake_gql)
+    with app.app_context():
+        try:
+            app.hub.series.detail(9)
+            raise AssertionError("a site that is down should not look like an empty series")
+        except series.SeriesError as exc:
+            assert "522" in str(exc)
+
+
+def _ms(day):
+    return int(datetime.datetime(day.year, day.month, day.day, 12).timestamp() * 1000)
+
+
+def _chapters(*days):
+    return [{"uploaded": _ms(day)} for day in days]
+
+
+def test_how_often_a_series_comes_out_is_read_from_its_upload_dates():
+    from datetime import date
+    # Fridays, with the odd extra chapter on a Tuesday (seen on MangaFire)
+    weekly = _chapters(date(2026, 10, 2), date(2026, 10, 6), date(2026, 10, 9), date(2026, 10, 16), date(2026, 10, 20),
+                       date(2026, 10, 23), date(2026, 10, 30), date(2026, 11, 6))
+    found = series.cadence(weekly, today=date(2026, 11, 7))
+    assert found["weekday"] == "Fridays" and found["every"] == 7 and found["next"] == date(2026, 11, 13)
+    assert not found["late"] and not series.due_for_a_look(found, date(2026, 11, 12))
+    assert series.due_for_a_look(found, date(2026, 11, 13)) and series.due_for_a_look(found, date(2026, 11, 16))
+    assert series.cadence(weekly, today=date(2026, 11, 20))["late"]
+    assert series.cadence(weekly, today=date(2027, 3, 1))["paused"]  # months of nothing: on a break, no guess
+    # every chapter given the same date (the day the site added the series): no schedule at all
+    batch = series.cadence(_chapters(*[date(2026, 2, 4)] * 30), today=date(2026, 11, 7))
+    assert batch["last"] == date(2026, 2, 4) and batch["every"] is None and batch["next"] is None
+    # every three days, any weekday
+    steady = series.cadence(_chapters(*[date(2026, 10, 1) + datetime.timedelta(days=3 * n) for n in range(8)]), today=date(2026, 10, 23))
+    assert steady["weekday"] is None and steady["every"] == 3 and steady["next"] == date(2026, 10, 25)
+    assert series.cadence([], today=date(2026, 11, 7))["last"] is None
+
+
+def test_a_followed_series_is_looked_at_when_its_chapter_is_due(app, monkeypatch):
+    from datetime import date
+    mondays = [{"uploadDate": str(_ms(date(2026, 10, 5) + datetime.timedelta(weeks=n)))} for n in range(6)]  # last: 9 Nov
+    asked = []
+
+    def fake_gql(self, query, variables=None, config=None, timeout=0):
+        return {"mangas": {"nodes": [{"id": 1, "status": "ONGOING", "chapters": {"nodes": mondays}},
+                                     {"id": 2, "status": "COMPLETED", "chapters": {"nodes": mondays}}]}}
+
+    monkeypatch.setattr(series.Series, "gql", fake_gql)
+    monkeypatch.setattr(series.Series, "download", lambda self, series_id, refresh=False: asked.append((series_id, refresh)) or 0)
+    monday = datetime.datetime(2026, 11, 16, 9).timestamp()
+    with app.app_context():
+        assert app.hub.series.look_when_due(now=monday - 86400) == []  # Sunday: not due yet
+        assert app.hub.series.look_when_due(now=monday) == [1] and asked == [(1, True)]  # finished series left alone
+        assert app.hub.series.look_when_due(now=monday + 3600) == []  # looked an hour ago
+        assert app.hub.series.look_when_due(now=monday + 4 * 3600) == [1]
+        assert "could not look for chapters that are due" in [what for what, _ in hub_module.chores_due(app.hub, app, 17)]

@@ -17,7 +17,7 @@ TIMEOUT = 120
 TOKEN_RE = (re.compile(r'name="csrf_token"[^>]*value="([^"]+)"'), re.compile(r'value="([^"]+)"[^>]*name="csrf_token"'))
 # Fields the library manager can change one at a time: Family Hub's name for each -> the library manager's.
 FIELDS = {"synopsis": "comments", "tags": "tags", "series": "series", "series_index": "series_index", "publisher": "publishers",
-          "title": "title", "authors": "authors"}
+          "title": "title", "authors": "authors", "languages": "languages"}  # languages by English name: "Russian"
 
 
 class ManagerError(Exception):

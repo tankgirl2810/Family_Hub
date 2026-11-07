@@ -1,5 +1,7 @@
 """Run with:  python -m bookhub            (uses the folders in your settings)
           python -m bookhub --demo     (builds a small sample library first)
+          python -m bookhub --resort-library
+                                       (sorts the whole library again, once, then stops; see review.py)
 """
 import argparse
 import os
@@ -12,7 +14,12 @@ def main():
     parser.add_argument("--demo-dir", default="./demo", help="where the sample library and data go")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--resort-library", action="store_true",
+                        help="sort every library book again (reads PDFs' first pages), fill the review queue, then stop")
     args = parser.parse_args()
+    if args.resort_library:
+        # a one-off run next to the real server: its background jobs must not start a second time
+        os.environ["BACKGROUND_JOBS"] = "false"
 
     if args.demo:
         from . import demo
@@ -29,6 +36,9 @@ def main():
     if args.port:
         config.port = args.port
     app = create_app(config)
+    if args.resort_library:
+        resort_library(app)
+        return
     if args.demo:
         from . import demo
         with app.app_context():
@@ -42,6 +52,18 @@ def main():
         serve(app, host=args.host, port=config.port, threads=8)
     except ImportError:
         app.run(host=args.host, port=config.port)
+
+
+def resort_library(app):
+    """Sort the whole library again, saying how far it has got. The queue on Fix book details fills with it."""
+    def say(done, total):
+        if done % 50 == 0 or done == total:
+            print("Sorted %d of %d books" % (done, total), flush=True)
+
+    with app.app_context():
+        looked = app.hub.review.resort(progress=say)
+        waiting = len(app.hub.review.items())
+    print("Done: %d books sorted again, %d waiting in the review queue." % (looked, waiting))
 
 
 if __name__ == "__main__":

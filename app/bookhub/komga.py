@@ -128,7 +128,8 @@ def _same(source, target):
 
 def sync_files(hub):
     """Bring the folder in line with the library: copy what's new or changed, remove what's gone.
-    (copied, removed). Never touches anything outside the folder."""
+    (copied, removed). Never touches anything outside the folder. A book that is no longer a graphic novel (a
+    card deck or map pack sorted to Tabletop) is "gone" too: its copy leaves, the library's file stays."""
     root = hub.config.komga_comics_dir
     if not root or not root.is_dir():
         return 0, 0

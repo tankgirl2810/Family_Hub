@@ -391,3 +391,126 @@ a.ink:hover { text-decoration-color: var(--accent); }
   .shelf { grid-template-columns: repeat(auto-fill, minmax(min(136px, 100%), 1fr)); gap: 22px 14px; }
   .shelf .book .btn { max-width: 100%; white-space: normal; text-align: center; line-height: 1.2; padding-block: 6px; }
 }
+
+/* Game books (tabletop.py). The language badge sits in a cover's corner, small, in the page's own ink so it reads
+   over any cover art. A nested tag's children sit in one box with it in the tag picker: Pathfinder [1e] [2e]. */
+.cover .lang { position: absolute; top: 8px; right: 8px; padding: 3px 5px; border: 1px solid var(--ink); background: var(--bg);
+  color: var(--ink); font: 600 10px/1 var(--font-body); letter-spacing: .08em; }
+.tagnest { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--line); }
+.tagnest > .tagpick:first-child { border-color: var(--ink); }
+.tagpick.child { min-height: 26px; padding: 0 8px; font-size: 12px; border-style: dashed; }
+.tagpick.child[aria-pressed="true"] { border-style: solid; }
+/* The Tabletop view: game and edition tabs with their counts, then each product line as a fold-out shelf. */
+.tabs .tt-n { margin-left: 8px; font-size: 11px; opacity: .7; }
+.tt-edition { margin: 0; }
+.tt-line { border-top: 1px solid var(--line2); }
+.tt-line > summary { justify-content: space-between; gap: 6px 16px; flex-wrap: wrap; padding: 10px 0; color: var(--ink); }
+.tt-line > summary .tt-name { font-family: var(--font-display); font-size: 18px; font-weight: 600; }
+.tt-line > summary:hover .tt-name { color: var(--accent); }
+.tt-line[open] > summary { margin-bottom: 8px; }
+.tt-line > .shelf { padding-bottom: 20px; }
+
+/* The review queue on Fix book details: what confirming changes, new value over the old, then the buttons. */
+.rv { gap: 10px; }
+.rv-changes { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 230px), 1fr)); gap: 10px 20px; margin: 0;
+  padding: 10px 0 10px 14px; border-left: 3px solid var(--accent); }
+.rv-changes > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rv-changes dd { margin: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.rv-to { font-size: 15px; font-weight: 600; color: var(--ink); }
+.rv-why { margin: 0; padding-left: 18px; display: grid; gap: 2px; color: var(--warn); }
+.rv-note { color: var(--accent); }
+.rv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); gap: 12px 16px; align-items: end; }
+.rv-grid > .field.wide { grid-column: 1 / -1; }
+.tt-line > summary .tt-name::before { content: "+"; display: inline-block; width: 1.1em; color: var(--dim); font-weight: 400; }
+.tt-line[open] > summary .tt-name::before { content: "−"; }
+/* Books a learned rule sorted, waiting for one press to be written to the library. */
+.rv-ready { padding: 12px 14px; border: 1px solid var(--accent); }
+.rv-ready .list { margin-top: 10px; }
+
+/* The duplicates queue on the Copies page: one column per copy. A row whose copies differ gets the accent stripe
+   (as the review queue's changes do) and ink; a row where they match is one greyed line. The copy being kept is
+   the one lit column, and each other copy says under its cover what becomes of it. */
+.dq-table { min-width: 480px; table-layout: fixed; }
+.dq-table thead th { vertical-align: top; text-transform: none; letter-spacing: 0; font-size: 14px; border-bottom: 1px solid var(--line2); }
+.dq-table thead td { width: 120px; border-bottom: 1px solid var(--line2); }
+.dq-table tbody th { width: 120px; vertical-align: top; color: var(--dim); font-weight: 400; border-bottom: 1px dashed var(--line); }
+.dq-table tbody td { vertical-align: top; overflow-wrap: anywhere; }
+.dq-table tr.same td { color: var(--dim); }
+.dq-table tr.diff th { color: var(--ink); box-shadow: inset 3px 0 var(--accent); }
+.dq-table tr.diff td { color: var(--ink); font-weight: 600; }
+.dq-table .keep { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.dq-table thead th.keep { box-shadow: inset 0 3px var(--accent); }
+.dq-cover { display: block; width: 84px; height: 120px; object-fit: cover; background: var(--panel2); }
+.dq-nocover { display: flex; align-items: center; justify-content: center; border: 1px dashed var(--line2); color: var(--dim); font-size: 11px; }
+.dq-fate { color: var(--warn); min-height: 1.2em; }
+.dq-from { color: var(--accent); }
+.dq .btn[aria-pressed="true"] { --bd: var(--accent); color: var(--accent); }
+.dq-go { white-space: normal; text-align: left; }
+.dq-bulk > summary { font-weight: 600; }
+
+/* ---- a look inside a book (peekPane): the pages themselves, on paper, beside the details */
+.pk { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.pk-page { display: block; width: 100%; height: min(72vh, 760px); border: 1px solid var(--paper-edge); background: var(--paper); color: #1d1b16; }
+.pk-text { overflow-y: auto; padding: 22px 26px; font-family: Georgia, "Iowan Old Style", serif; font-size: 15px; line-height: 1.6; }
+.pk-text p { margin: 0 0 0.9em; max-width: 62ch; }
+.pk-pictures { overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 10px; }
+.pk-pictures img { width: 100%; height: auto; display: block; }
+.pk-none { display: grid; place-items: center; height: auto; min-height: 160px; padding: 20px; text-align: center; }
+.pk-none p { color: #4a463d; }
+.pk-page:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* marking where the title and author are (markPages): drag a box on a page picture */
+.pk-sheet { position: relative; cursor: crosshair; user-select: none; touch-action: none; box-shadow: 0 1px 3px rgba(0, 0, 0, .18); }
+.pk-box { position: absolute; border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); pointer-events: none; }
+.pk-box.title { border-color: var(--c-title); background: color-mix(in srgb, var(--c-title) 16%, transparent); }
+.pk-box.authors { border-color: var(--c-author); background: color-mix(in srgb, var(--c-author) 16%, transparent); }
+.pk-box span { position: absolute; left: -2px; bottom: 100%; padding: 1px 6px; font: 600 11px/1.4 system-ui, sans-serif; color: #1d1b16; background: var(--c-title); white-space: nowrap; }
+.pk-box.authors span { background: var(--c-author); }
+.pk-ask { position: absolute; z-index: 2; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; cursor: default;
+  background: var(--panel, #fff); border: 1px solid var(--paper-edge); box-shadow: 0 4px 14px rgba(0, 0, 0, .22); }
+/* the editor: the book on the left, its details on the right; stacked on a narrow screen */
+.pk-split { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+/* Pinned beside the pages, but never taller than the window: a pinned form taller than the window made the browser
+   scroll the page on every key pressed, to keep the caret in view, and the page crept downwards. It scrolls itself. */
+.pk-split > form { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; overscroll-behavior: contain; padding: 2px 6px 2px 2px; }
+@media (max-width: 900px) { .pk-split { grid-template-columns: 1fr; } .pk-split > form { position: static; max-height: none; overflow: visible; } .pk-page { height: 60vh; } }
+/* copies side by side: each column gets room for its pages */
+.dq-table:has(.dq-inside) { min-width: 720px; }
+.dq-inside td { min-width: 280px; }
+.dq-inside .pk-page { height: min(60vh, 620px); }
+
+/* ---- copies as a carousel (dupQueueCard): a strip of every set, and the chosen set laid open like a book */
+.cs-nav { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.cs-strip { display: flex; gap: 8px; overflow-x: auto; padding: 6px 2px 10px; scroll-snap-type: x proximity; }
+.cs-thumb { position: relative; flex: 0 0 auto; width: 56px; height: 78px; padding: 0; border: 1px solid var(--line2); background: var(--panel2);
+  cursor: pointer; scroll-snap-align: center; overflow: hidden; }
+.cs-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: .62; }
+.cs-thumb-t { display: block; padding: 4px; font-size: 9px; line-height: 1.2; color: var(--dim); overflow: hidden; height: 100%; text-align: left; }
+.cs-thumb-n { position: absolute; right: 2px; bottom: 2px; min-width: 16px; padding: 0 3px; font-size: 10px; background: var(--bg); color: var(--ink); }
+.cs-thumb:hover img, .cs-thumb:focus-visible img { opacity: 1; }
+.cs-thumb[aria-current="true"] { border: 2px solid var(--accent); }
+.cs-thumb[aria-current="true"] img { opacity: 1; }
+.cs-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* the spread: two copies face each other across a gutter; three or more scroll sideways, two at a time */
+.cs-spread { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(300px, 1fr); overflow-x: auto; scroll-snap-type: x mandatory;
+  border: 1px solid var(--line2); }
+.cs-page { display: flex; flex-direction: column; gap: 12px; padding: 16px; min-width: 0; scroll-snap-align: start; }
+.cs-page + .cs-page { border-left: 1px solid var(--line2); }
+.cs-page.keep { box-shadow: inset 0 3px 0 var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.cs-front { display: grid; place-items: center; min-height: 200px; background: var(--paper); border: 1px solid var(--paper-edge); }
+.cs-front .pk { width: 100%; }
+.cs-front .pk-page { border: 0; }
+.cs-cover { display: block; width: 100%; height: min(58vh, 520px); object-fit: contain; }
+/* the fold: each front page darkens a little toward the gutter, like facing pages of an open book */
+.cs-page:nth-child(odd) .cs-front { box-shadow: inset -18px 0 22px -20px rgba(0, 0, 0, .55); }
+.cs-page:nth-child(even) .cs-front { box-shadow: inset 18px 0 22px -20px rgba(0, 0, 0, .55); }
+.cs-diff input { border-color: var(--accent); }
+.cs-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+.cs-facts > div { display: contents; }
+.cs-facts dt { color: var(--dim); }
+.cs-facts dd { margin: 0; overflow-wrap: anywhere; }
+.cs-facts .cs-diff dt, .cs-facts .cs-diff dd { color: var(--accent); }
+.cs-fate { color: var(--warn); min-height: 1.2em; }
+@media (max-width: 700px) { .cs-spread { grid-auto-columns: 88%; } .cs-nav { grid-template-columns: 1fr 1fr; } .cs-strip { grid-column: 1 / -1; order: -1; } }
+@media (prefers-reduced-motion: no-preference) { .cs-strip, .cs-spread { scroll-behavior: smooth; } }
+.cs-front .pk > .row { padding: 6px 8px; background: var(--panel); }
+.cs-page.keep .cs-keep { border-color: var(--accent); color: var(--accent); }

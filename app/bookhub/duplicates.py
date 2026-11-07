@@ -13,8 +13,13 @@ each set of entries that share a title and author:
 "Set aside" means the spare's files are copied to needs-attention/_duplicates
 before the entry is removed, so nothing but byte-identical files is ever lost.
 The library's database is copied before every batch.
+
+The page works through the sets one at a time, as a queue (see "the queue" below): the copies side by side, a
+person picks the one to keep and puts its title, author, series and tags right, and the others go by the rules
+above. Copies a person says are different books each get their own name and are never suggested again.
 """
 import hashlib
+import json
 import re
 import shutil
 import sqlite3
@@ -23,7 +28,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from . import calibre, db, librarymanager
+from . import bookfix, calibre, catalogues, db, librarymanager, review
 
 SIMILAR = 0.10
 SET_ASIDE = "_duplicates"
@@ -170,7 +175,9 @@ class Duplicates:
                 "converted": bool(epub) and made_by_calibre(Path(self.hub.config.library_dir) / epub)}
 
     def plans(self):
-        found = [plan for plan in (self.plan(group) for group in self.hub.library.sets()) if plan]
+        apart = self.told_apart()
+        found = [plan for plan in (self.plan(group) for group in self.hub.library.sets())
+                 if plan and not self._was_told_apart(plan["books"], apart)]
         found.sort(key=lambda plan: plan["title"].lower())
         return found
 
@@ -235,8 +242,10 @@ class Duplicates:
         finally:
             con.close()
 
-    def carry_out(self, wanted, keep=None):
-        """Do one set. ``wanted`` is the plan the admin saw; it is worked out afresh and must still match."""
+    def carry_out(self, wanted, keep=None, identical_goes=False):
+        """Do one set. ``wanted`` is the plan the admin saw; it is worked out afresh and must still match.
+        With ``identical_goes`` (the queue), a spare a person chose against is deleted outright when its files
+        are byte for byte the kept one's, as the rules say; otherwise a person's choice always sets spares aside."""
         hub = self.hub
         hub.library.refresh()
         group = next((found for found in hub.library.sets() if found["key"] == wanted["key"]), None)
@@ -248,7 +257,8 @@ class Duplicates:
             if keep not in by_id:
                 raise ValueError("That entry is no longer in the library.")
             givers = [book for book in group["books"] if book["id"] != keep]
-            now.update(cls=REVIEW, keep=keep, remove=[book_id for book_id in by_id if book_id != keep],
+            same = identical_goes and all(self._same_files(by_id[keep], book) for book in givers)
+            now.update(cls=IDENTICAL if same else REVIEW, keep=keep, remove=[book_id for book_id in by_id if book_id != keep],
                        copy=self._copies(details(by_id[keep]), givers))
         # the library could have shifted since the admin looked. if the plan isn't the same now, bail
         elif (now["cls"], now["keep"], sorted(now["remove"])) != (wanted["cls"], wanted["keep"], sorted(wanted["remove"])) \
@@ -318,3 +328,262 @@ class Duplicates:
 
     def log(self, limit=30):
         return [dict(row) for row in self.hub.con().execute("SELECT * FROM duplicate_log ORDER BY id DESC LIMIT ?", (limit,))]
+
+    # ------------------------------------------------------------ the queue
+    # One set at a time, side by side. A person picks the copy to keep and puts its details right; the spare goes
+    # by the rules at the top of this file. Or they say the copies are different books and give each its own name.
+
+    def told_apart(self):
+        """Sets a person said are different books, as [{entry ids}]. They are never suggested again."""
+        return [set(ids) for ids in json.loads(db.kv_get(self.hub.con(), "duplicates:apart") or "[]")]
+
+    @staticmethod
+    def _was_told_apart(books, apart):
+        ids = {book["id"] for book in books}
+        return any(ids <= group for group in apart)
+
+    def page_count(self, book):
+        """Pages in an entry's main file (EPUB, then PDF, then CBZ), or None. Remembered per file."""
+        fmt = next((fmt for fmt in ("EPUB", "PDF", "CBZ") if fmt in book["own_formats"]), None)
+        if not fmt:
+            return None
+        path = self._file(book, fmt)
+        try:
+            stamp = path.stat()
+        except OSError:
+            return None
+        key = (str(path), stamp.st_size, int(stamp.st_mtime))
+        if key not in _pages:
+            _pages[key] = _count_pages(path, fmt)
+        return _pages[key]
+
+    def queue(self, key=None):
+        """The sets still to look at (the ones only a person can decide first), and the chosen one side by side."""
+        plans = self.plans()
+        plans.sort(key=lambda plan: plan["cls"] != REVIEW)  # sort() keeps the title order within each
+        current = next((plan for plan in plans if plan["key"] == key), plans[0] if plans else None)
+        return {"blocked": self.ready(), "busy": self.job["running"], "set_aside": "needs-attention/" + SET_ASIDE,
+                "sets": [{"key": plan["key"], "title": plan["title"], "cls": plan["cls"], "copies": len(plan["books"]),
+                          "cover": plan["books"][0]["id"] if plan["books"] else None} for plan in plans],
+                "counts": {cls: sum(1 for plan in plans if plan["cls"] == cls) for cls in AUTOMATIC + (REVIEW,)},
+                "set": self.compare(current) if current else None}
+
+    def compare(self, plan):
+        """One set as the queue shows it: every copy's details, what happens to the others for each copy a
+        person could keep, and the kept copy's details to start from."""
+        group = next((found for found in self.hub.library.sets() if found["key"] == plan["key"]), None)
+        by_id = {book["id"]: book for book in group["books"]} if group else {}
+        books = [by_id[entry["id"]] for entry in plan["books"] if entry["id"] in by_id]
+        copies = []
+        for entry in plan["books"]:
+            book = by_id.get(entry["id"])
+            if not book:
+                continue
+            others = [other for other in books if other is not book]
+            copies.append({"id": book["id"], "title": book["title"], "authors": book["authors"], "author": book["author"],
+                           "series": book["own_series"], "series_index": book["series_index"] if book["own_series"] else None,
+                           "files": entry["files"], "converted": entry["converted"], "pages": self.page_count(book),
+                           "added": entry["added"], "tags": book["raw_tags"], "publisher": book["publisher"],
+                           "language": book["language"], "has_cover": book["has_cover"], "isbn": book["isbn"],
+                           "synopsis": len(book["synopsis"].split()), "outcome": self._outcome(book, others)})
+        return {"key": plan["key"], "title": plan["title"], "author": plan["author"], "cls": plan["cls"], "why": plan["why"],
+                "keep": plan["keep"], "copies": copies, "start": self.prefill(books, plan["keep"])}
+
+    def _outcome(self, keeper, others):
+        """What happens to the other copies if this one is kept, in the words the button uses."""
+        identical = all(self._same_files(keeper, other) for other in others)
+        many = len(others) > 1
+        spare = ("the other %d copies" % len(others)) if many else "the other copy"
+        if identical:
+            words = "%s %s identical and will be deleted" % (spare, "are" if many else "is")
+        else:
+            words = "%s will be set aside in needs-attention" % spare
+        # the editor already shows the title, author, series and tags; these come across unseen
+        across = [step["label"] for step in self._copies(details(keeper), others) if step["field"] in ("synopsis", "publisher")]
+        return {"identical": identical, "words": words, "across": across}
+
+    @staticmethod
+    def prefill(books, keep_id):
+        """The kept copy's details to start from, field by field from whichever copy says more. Ties go to the
+        copy Family Hub would keep. Tags from every copy."""
+        order = sorted(books, key=lambda book: book["id"] != keep_id)  # max() keeps the first of equals
+        title = max(order, key=lambda book: (not bookfix.FILE_LIKE.search(book["title"]), len(book["title"].strip())))
+        author = max(order, key=lambda book: (catalogues.author_known(book["author"]) and not bookfix.username_like(book["author"]),
+                                              len(book["authors"]), len(book["author"])))
+        series = max(order, key=lambda book: (bool(book["own_series"]), book["series_index"] is not None))
+        tags = []
+        for book in order:
+            tags += [tag for tag in book["raw_tags"] if tag.lower() not in [known.lower() for known in tags]]
+        return {"title": title["title"], "authors": author["authors"], "series": series["own_series"],
+                "series_index": series["series_index"] if series["own_series"] else None, "tags": tags,
+                "from": {"title": title["id"], "authors": author["id"], "series": series["id"]}}
+
+    def _clean(self, fields):
+        try:
+            return review.Review.clean_fields(fields)
+        except review.ReviewError as exc:
+            raise ValueError(str(exc))
+
+    def _begin(self):
+        """Check the library manager is there, take the lock and copy the library's database. Caller releases."""
+        blocked = self.ready()
+        if blocked:
+            raise ValueError(blocked)
+        if not self._lock.acquire(blocking=False):
+            raise Busy("A batch is already running. Wait for it to finish.")
+        try:
+            self.backup()
+        except (OSError, sqlite3.Error) as exc:
+            self._lock.release()
+            raise ValueError("The library's database could not be copied first, so nothing was changed: %s" % exc)
+
+    def keep(self, key, keep_id, fields):
+        """Keep one copy of a set with the details a person gave it. The others go by the rules; then the new
+        details are written, all after one copy of the library's database. Returns what was done."""
+        fields = self._clean(fields)
+        plan = next((found for found in self.plans() if found["key"] == key), None)
+        if not plan:
+            raise ValueError("These entries are no longer in the library as a set.")
+        if keep_id not in [entry["id"] for entry in plan["books"]]:
+            raise ValueError("That entry is not part of this set.")
+        self._begin()
+        try:
+            done = self.carry_out(plan, keep_id, identical_goes=True)
+            problem = ""
+            try:
+                self._put_details(self.hub.library.get(keep_id), key, fields)
+            except (ValueError, librarymanager.ManagerError) as exc:
+                # the spare has gone by now, so this is said, not undone. Fix book details can finish it
+                problem = "The other copy was dealt with, but the new details did not go in: %s" % exc
+        finally:
+            self._lock.release()
+        self.hub.touch()
+        kept = self.hub.library.get(keep_id)
+        return {"cls": done["cls"], "set_aside": done["set_aside"], "problem": problem,
+                "title": kept["shown_title"] if kept else fields["title"]}
+
+    def _put_details(self, book, old_key, fields):
+        """Send the kept copy's new title, authors, series and tags to the library manager, only what changed,
+        then move Family Hub's records to its new name."""
+        if not book:
+            raise ValueError("The kept entry is not in the library any more.")
+        self._send(book, fields)
+        self.hub.library.refresh(force=True)
+        fixed = self.hub.library.get(book["id"])
+        if not fixed or fixed["title"] != fields["title"]:
+            raise ValueError("The library manager did not make the change. Does its account have permission to edit books?")
+        self._follow(old_key, fixed, move=True)
+
+    @staticmethod
+    def _changed(book, fields):
+        """Which of title, authors, series, number and tags differ from the library entry."""
+        found = []
+        if fields["title"] != book["title"]:
+            found.append("title")
+        if " & ".join(fields["authors"]) != book["author"]:
+            found.append("authors")
+        if fields["series"] != book["own_series"]:
+            found.append("series")
+        if fields["series"] and fields["series_index"] is not None and (
+                fields["series"] != book["own_series"] or float(book["series_index"] or 0) != float(fields["series_index"])):
+            found.append("series_index")
+        if sorted(tag.lower() for tag in fields["tags"]) != sorted(tag.lower() for tag in book["raw_tags"]):
+            found.append("tags")
+        return found
+
+    def _send(self, book, fields):
+        """Only what changed, to the library manager."""
+        manager = self.hub.manager
+        for name in self._changed(book, fields):
+            if name == "authors":
+                # Calibre splits authors on "&", so an "&" inside a name would make two people out of one
+                manager.set_field(book["id"], "authors", " & ".join(person.replace("&", "and") for person in fields["authors"]))
+            elif name == "series_index":
+                manager.set_field(book["id"], "series_index", str(fields["series_index"]))
+            elif name == "tags":
+                # the whole list, so a tag taken off in the editor comes off the entry too
+                manager.set_field(book["id"], "tags", ", ".join(tag.replace(",", " ") for tag in fields["tags"]))
+            else:
+                manager.set_field(book["id"], name, fields[name])
+
+    def _follow(self, old_key, fixed, move):
+        """Family Hub's records go with a renamed entry: moved, or copied when other entries keep the old name."""
+        hub, con = self.hub, self.hub.con()
+        if move or fixed["key"] == old_key:
+            hub.bookfix.rekey(old_key, fixed["key"], fixed)
+            return
+        hub.ensure_meta(fixed["key"], fixed["title"], fixed["author"])
+        con.execute("INSERT OR IGNORE INTO family_tags(book_key, tag, added_by, created) "
+                    "SELECT ?, tag, added_by, created FROM family_tags WHERE book_key=?", (fixed["key"], old_key))
+        con.execute("INSERT OR IGNORE INTO book_kind(book_key, kind, source, updated, role) "
+                    "SELECT ?, kind, source, updated, role FROM book_kind WHERE book_key=?", (fixed["key"], old_key))
+        con.commit()
+
+    def tell_apart(self, key, names):
+        """Say a set's copies are different books. Each gets the details a person gave it ({id: {"title",
+        "authors", and if given "series", "series_index", "tags"}}), written by the library manager, and Family
+        Hub remembers never to suggest them again."""
+        group = next((found for found in self.hub.library.sets() if found["key"] == key), None)
+        if not group:
+            raise ValueError("These entries are no longer in the library as a set.")
+        names = {str(book_id): value for book_id, value in (names or {}).items()}
+        renamed = []
+        for book in group["books"]:
+            given = names.get(str(book["id"])) or {}
+            fields = self._clean({"title": given.get("title") or book["title"], "authors": given.get("authors") or book["authors"],
+                                  "series": given.get("series", book["own_series"]),
+                                  "series_index": given.get("series_index", book["series_index"] if book["own_series"] else None),
+                                  "tags": given.get("tags", book["raw_tags"])})
+            if self._changed(book, fields):
+                renamed.append((book, fields))
+        ids = sorted(book["id"] for book in group["books"])
+        if renamed:
+            self._begin()
+            try:
+                for book, fields in renamed:
+                    self._send(book, fields)
+            finally:
+                self._lock.release()
+            self.hub.library.refresh(force=True)
+            stayed = any(book["key"] == key for book in self.hub.library.all_books() if book["id"] in ids)
+            for number, (book, fields) in enumerate(renamed):
+                fixed = self.hub.library.get(book["id"])
+                if not fixed or fixed["title"] != fields["title"]:
+                    raise ValueError("The library manager did not make the change. Does its account have permission to edit books?")
+                # the last one renamed takes the records with it, unless a copy kept the old name
+                self._follow(key, fixed, move=not stayed and number == len(renamed) - 1)
+        con = self.hub.con()
+        apart = [sorted(found) for found in self.told_apart() if not found <= set(ids)] + [ids]
+        db.kv_set(con, "duplicates:apart", json.dumps(apart))
+        # any that still share a name are shown as separate books too
+        keys = {}
+        for book in self.hub.library.all_books():
+            if book["id"] in ids:
+                keys[book["key"]] = keys.get(book["key"], 0) + 1
+        for shared, count in keys.items():
+            if count > 1:
+                self.hub.set_copy_choice(shared, calibre.APART)
+        con.execute("INSERT INTO duplicate_log(at, book_key, title, action, kept, removed, note) VALUES(?,?,?,?,?,?,?)",
+                    (db.now(), key, group["books"][0]["title"], "apart", None, "", ", ".join(fields["title"] for _, fields in renamed)))
+        con.commit()
+        self.hub.touch()
+        return {"renamed": len(renamed)}
+
+
+class Busy(Exception):
+    pass
+
+
+_pages = {}  # (path, size, mtime) -> pages
+
+
+def _count_pages(path, fmt):
+    if fmt == "EPUB":
+        return calibre.estimate_pages(path)
+    if fmt == "CBZ":
+        return calibre.count_pictures(path)
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(str(path)).pages) or None
+    except Exception:  # encrypted, damaged or not really a PDF: no count, no crash
+        return None

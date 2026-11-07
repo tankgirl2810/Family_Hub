@@ -355,6 +355,23 @@ services:
       - ${STACK_DIR:-./stack}/suwayomi:/home/suwayomi/.local/share/Tachidesk
     restart: unless-stopped
 
+  # Gets the series server past Cloudflare's "checking your browser" pages ("Cloudflare bypass currently
+  # disabled"). A second one, not Prowlarr's: Cloudflare's pass only works from the address that earned it,
+  # and the series server goes out through the VPN, so this one does too. The series server finds it at
+  # http://localhost:8191 (they share the VPN's network); Family Hub switches it on there.
+  flaresolverr-series:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2
+    container_name: flaresolverr-series
+    profiles: ["series"]
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - LOG_LEVEL=info
+    restart: unless-stopped
+
   # Serves the chapters to reading apps (Tachimanga on an iPad), with an
   # account and read marks for each person. It only reads the chapters.
   komga:

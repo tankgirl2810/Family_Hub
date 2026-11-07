@@ -99,6 +99,84 @@ the real title. Afterwards, **Copies of the same book** may find more spare
 copies, since books that only differed by a file name now share a real
 title.
 
+### Sorting suggestions
+
+The same page opens with **Sorting suggestions**: books the sorter would
+like to put right, in three tabs, **Tabletop**, **Books** and **Graphic
+novels & manga**. A book waits here only when there is something to say:
+a cleaner title ("PF 2E - Core Rulebook" becomes "Core Rulebook"), a real
+author or publisher, a series and its number, game and edition tags, clues
+that disagree (the folder says 1st edition, the first pages say second), or
+a game Family Hub does not know yet. A book that is simply unsorted, with
+nothing to go on, is left alone.
+
+Each book shows what confirming would change, the new value over the old.
+
+- **Confirm** writes the title, author, series and number, publisher,
+  language and tags (the game, edition and role go on as tags) into the
+  library through the library manager, after a copy of the library
+  database, as above. Reading, ratings and tags follow the book to its new
+  name. The kind stays in Family Hub only.
+- **Edit** opens every detail as a box first. For a game book the author
+  can be the publisher (Paizo, White Wolf, Wizards of the Coast); **Find the
+  writers** reads the credits on the first pages of a PDF.
+- **Not right** leaves the book as it is and never suggests the same thing
+  for it again.
+- **Skip** hides it until the page is opened again.
+- **Confirm all like this** does the same for every book in the batch:
+  books that arrived in the same folder, or are named alike when the folder
+  is not known. Each keeps its own title and number.
+
+Books that share a title and author come first. The library shows them as
+copies of one book, so they share one set of tags until one is given its
+own title. After them come the biggest batches.
+
+When the top folder names a game nobody has told Family Hub about
+("Shadowrun 6e/..."), the suggestion offers it as a new game: Shadowrun,
+edition Shadowrun 6e. Confirming adds it to the games the sorter knows, and
+later books in that folder sort themselves.
+
+**Sort the whole library again** looks at every book once more, reading the
+first pages of PDFs, which takes a while for a big library; the bar shows
+how far it has got. Books whose kind someone chose are left as they are. On
+the server it can also be run once from the command line:
+
+```bash
+docker exec -e BACKGROUND_JOBS=false bookhub python -m bookhub --resort-library
+```
+
+### Unsorted books and Edit details
+
+Books the sorter could not place at all wait under the **Unsorted** tab,
+whether or not it has a guess. The first one opens straight in the editor:
+**the book on the left** (a PDF's first pages, an EPUB's opening, or a
+comic's first pictures, which you can scroll through, with **Show 10 more
+pages** for more) and **its details on the right**. Put in what it is and
+press **Confirm**, or **Skip**; the next book opens.
+
+Any book can be opened the same way: on the book's page an admin has
+**Edit details**. It is the same editor, for books the sorter was happy
+with too.
+
+### Learned rules
+
+Every confirm and every **Not right** is remembered as a rule, listed in
+plain words under **Learned rules**, for example "Anything arriving in
+Pathfinder/2nd Edition/Society → Pathfinder › Pathfinder 2e, Adventure".
+Books arriving the same way, then and later, are sorted by the rule in
+Family Hub straight away. Their library entries are not changed until you
+say so: they wait at the top of the tab as **Ready to write**, one card per
+rule, and **Write N books to the library** writes them all (after one copy
+of the library database), so the details reach every reading app. Open the
+list to see each book's changes, or **Edit** any one first. Each rule says how many confirmations it came from and which books it
+matches; **Delete** removes it, and books like it wait in the queue again.
+
+When several rules say nearly the same thing (nine Society seasons, each
+its own rule), the page suggests one rule instead, with the books it would
+cover and anything that would change. Rules are only combined when you
+press **Combine them**. Rules and the games you added are in the book-data
+file and its backups ([guide 6](06-your-data-and-backups.md)).
+
 ## The same book twice
 
 The library manager makes a new entry for every file it is given. Give it a
@@ -133,8 +211,40 @@ the other copies on the book's own page too.
 
 ### Removing spare copies
 
-The same page has a card, **Remove spare copies from the library**. It sorts
-every set into one of four kinds:
+The same page starts with **Copies to sort out**, a carousel you move
+through yourself.
+
+- Along the top is a strip of every set's cover, with how many copies each
+  has. **Previous** and **Next**, the arrow keys (when you are not typing in
+  a box), or a cover in the strip move to another set.
+- The set's copies lie open side by side like the pages of a book: each
+  copy's front page, large. **Show the first pages** turns them into each
+  copy's first few pages, scrollable, with **Show 10 more pages**; press it
+  again for the front pages. That's how two files with one name (three
+  different cert sheets, say) are told apart.
+- Under each page are that copy's own title, author, series and number, and
+  tags, ready to change, then its format, size, pages, date added and the
+  rest. Boxes and facts where the copies differ are marked. The copy picked
+  to start with fills its empty boxes from whichever copy says more, and says
+  so. **Open in the editor** opens one copy on its own.
+- Press **Keep this one** under the copy you want. Under the others the page
+  says what becomes of them.
+- The save button says what will happen before you press it, for example
+  **Keep copy 2 · the other copy is identical and will be deleted** or
+  **... the other copy will be set aside in needs-attention**. One copy of the
+  library's database is made first, then the spare goes by the rules below,
+  then the kept copy's details are written. Its tags are replaced by the list
+  in the box, so a tag you take off comes off. The carousel moves on to the
+  next set.
+- **They are different books · save each one** is for copies that are not
+  the same book (three `Maps.pdf` by the same person, say). Every copy stays
+  in the library with the title, author, series, number and tags written
+  under it, and Family Hub never suggests them as copies again, even if they
+  end up with the same name.
+
+The sets only you can decide come first. The bulk buttons for the clear-cut
+sets are still there, folded away under **Clear-cut sets, all at once**. That
+card sorts every set into one of four kinds:
 
 | Kind | How Family Hub tells | What the button does |
 |---|---|---|
@@ -146,14 +256,14 @@ every set into one of four kinds:
 Each of the first three has a button for the whole kind and, under **See the
 sets**, one for each set. Every button asks before it acts.
 
-For the sets that need you: download each file from its link if you want to
-compare, then press **Keep this one**. If they turn out to be different
-books, press **They are different books** and they leave the list.
+For the sets that need you, the queue above is the easier way: open each
+file from its link if you want to compare, then keep one, or press **Not
+duplicates**.
 
 What keeps this safe:
 
 - **Set aside, not deleted.** A spare is only deleted outright when the kept
-  file is identical. Every other spare has its files copied to
+  file is identical, whichever copy you keep. Every other spare has its files copied to
   `needs-attention/_duplicates` first, with its cover and details file.
   Empty that folder yourself when you are satisfied.
 - **A copy of the library's database first.** One is written to
@@ -291,6 +401,39 @@ one button beside each run): comics (CBZ and CBR)
 are joined into one CBZ that reads straight through in any comic reader;
 other books come as one ZIP with each volume's own file inside. Each part
 can still be downloaded on its own.
+
+## Game books
+
+Role-playing game books come in many small pieces: adventures in parts,
+maps, pawns, character sheets. So that they don't fill the Library, the small
+ones are put together on cards:
+
+- An adventure series is one card: "Age of Ashes", "6 parts + Player's
+  Guide + maps".
+- Player aids and GM aids that belong to no series are one card for each game,
+  edition and role: "Pathfinder 2e · GM aids", "34 GM aids".
+- Rulebooks, and adventures that stand alone, keep a card each.
+
+**Open** on such a card goes to the **Game books** page at those books. That
+page (**Game books by game** at the top of the Library) shows every game
+book by game, then edition, then product line: the folders the books arrived
+in ("Adventure Paths › Age of Ashes", "Lost Omens"), else their series, else
+a shelf for their role. Click a product line to open it. Inside, the core
+books come first, then general player's guides, then other rulebooks; an
+adventure path's parts are in order, each card saying "Part 3", followed by
+its Player's Guide and maps. Novels and comics set in a game's world are
+under the game too. **Rulebooks**, **Adventures**, **Player aids** and **GM
+aids** show only those; pick none to see everything.
+
+A book that is not in English has a small badge in the corner of its cover
+("RU" for Russian), from the language the library has for it or the one its
+title is written in.
+
+Card decks and map packs used to be sorted as graphic novels. Once sorted to
+Tabletop they leave the comic server's copy of the graphic novels at its
+next update ([guide 18](18-comics-in-paperback.md)); the library's own files
+are not touched. Reading apps get them one by one, never joined into one
+comic, with their role (Adventure, GM aid...) as a category.
 
 ## Kinds of book
 

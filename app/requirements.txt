@@ -3,4 +3,5 @@ waitress>=3.0,<4
 requests>=2.31,<3
 pillow>=10.1,<12
 pypdf>=5.0,<7
+pypdfium2>=4.30,<6
 pyzipper>=0.3.6,<1

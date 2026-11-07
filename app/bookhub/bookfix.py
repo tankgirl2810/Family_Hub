@@ -135,6 +135,22 @@ def _pdf_clues(path):
     return isbns, title, author
 
 
+def pdf_text(path, pages=3):
+    """The text of a PDF's first pages, where the credits name the game and edition. "" when it can't be read."""
+    from pypdf import PdfReader
+    try:
+        reader = PdfReader(str(path))
+        found = []
+        for page in reader.pages[:pages]:
+            try:
+                found.append(page.extract_text() or "")
+            except Exception:  # one bad page; the next may still say
+                continue
+        return " ".join(found)[:20000]
+    except Exception:  # not really a PDF, encrypted, or broken beyond reading
+        return ""
+
+
 class BookFix:
     def __init__(self, hub):
         self.hub = hub
