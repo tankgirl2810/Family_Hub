@@ -3063,6 +3063,13 @@ def test_visuals_run_in_a_sealed_frame_with_their_libraries(app, client):
     assert v == {"version": "builtin", "place": {"name": "Home", "lat": 51.5, "lon": -0.12}}
 
 
+def test_the_font_can_be_used_inside_the_sealed_visuals_frame(client):
+    # the frame's origin is "null", so without this header the browser refuses the font in there
+    font = client.get("/static/fonts/archivo-normal-latin.woff2")
+    assert font.status_code == 200 and font.headers["Access-Control-Allow-Origin"] == "*"
+    assert "Access-Control-Allow-Origin" not in client.get("/static/app.js").headers
+
+
 def test_new_visuals_are_picked_up_from_github(app, client, monkeypatch):
     import io
     import zipfile
