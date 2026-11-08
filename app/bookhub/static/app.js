@@ -2027,6 +2027,24 @@ function pageLibrary(section) {
   const tabOf = () => recall('tab-' + view.section, 'all');
   const grid = el('div', { class: 'shelf' });
   const count = el('div', { class: 'dim', role: 'status' });
+  // Pick one for me: a book from the ones on screen that is in the library and not started, brought into view.
+  let pickable = [], picked = null;
+  const pickNote = el('p', { class: 'small pick-note', role: 'status' });
+  const pickBtn = el('button', { class: 'btn sm', type: 'button', hidden: true, text: 'Pick one for me', onclick: () => pickOne() });
+  function pickOne() {
+    const choices = pickable.filter(([, card]) => card !== picked);
+    if (!choices.length) return;
+    const [book, card] = choices[Math.floor(Math.random() * choices.length)];
+    if (picked) { picked.classList.remove('picked'); picked.querySelector('.readnote.pick')?.remove(); }
+    picked = card;
+    card.classList.add('picked');
+    // said on the cover too, since on a phone the sentence above is scrolled out of sight
+    card.querySelector('.coverwrap').append(el('span', { class: 'readnote going pick', 'aria-hidden': 'true', text: 'Picked for you' }));
+    card.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    pickBtn.textContent = 'Pick another';
+    fill(pickNote, 'From the ' + plural(pickable.length, 'book') + ' here you have not started: ',
+      el('a', { href: '#/book/' + book.id, text: book.title }), book.author ? ' by ' + book.author + '.' : '.');
+  }
   const orderRow = el('div', { class: 'tabs sm', role: 'radiogroup', 'aria-label': 'Order the books' });
   const sectionRow = el('div', { class: 'tabs', role: 'group', 'aria-label': 'Part of the library' });
   const tabRow = el('div', { class: 'tabs sm', role: 'group', 'aria-label': 'Kind of book' });
@@ -2072,6 +2090,12 @@ function pageLibrary(section) {
     fill(grid, ...shown.map((item) => item.chapter_series ? chapterCard(item,
         () => loadBooks().catch(oops)) : item.volumes ? seriesStack(item, info[item.series.toLowerCase()], states[item.series.toLowerCase()],
         () => loadBooks().catch(oops)) : item.game_group ? gameStack(item) : bookCard(item, () => loadBooks().catch(oops))));
+    pickable = shown.map((item, index) => [item, grid.children[index]])
+      .filter(([item]) => !item.volumes && !item.game_group && !item.chapter_series && item.in_library && item.status !== 'finished' && item.status !== 'reading');
+    picked = null;
+    pickBtn.hidden = pickable.length < 2;
+    pickBtn.textContent = 'Pick one for me';
+    pickNote.textContent = '';
     const stacks = shown.filter((item) => item.volumes || item.game_group).length;
     const followed = shown.filter((item) => item.chapter_series).length;
     const books = shown.reduce((total, item) => total + (item.volumes ? item.volumes.length : item.game_group ? item.items.length : item.chapter_series ? 0 : 1), 0);
@@ -2238,7 +2262,7 @@ function pageLibrary(section) {
       el('div', { class: 'row end', style: 'flex-wrap:nowrap' }, field('Build your search', box, 'wide'), searchBtn),
       el('div', { class: 'lib-tools' }, el('div', { class: 'lib-opt' }, el('span', { class: 'lab', text: 'Sort' }), orderRow), refineToggle),
       refine, chipsRow, suggest, moreTags, waiting),
-    seriesBox, count, grid);
+    seriesBox, el('div', { class: 'row between lib-count' }, count, pickBtn), pickNote, grid);
   draw();
   loadStates().then(() => loadBooks()).catch(() => { /* the badges are a nicety */ });
 }
