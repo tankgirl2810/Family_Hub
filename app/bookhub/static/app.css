@@ -52,6 +52,14 @@ a.cover { text-decoration: none; }
 .readnote { position: absolute; left: 0; right: 0; top: 42%; padding: 6px 4px; text-align: center; background: rgba(0, 0, 0, .78);
   color: #f6f3ec; font-size: 12px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; pointer-events: none; }
 .readnote.going { top: 30%; background: var(--accent); color: var(--accent-ink); }
+/* Library, Pick one for me (readnote.pick is the band on its cover): the picked book is lifted off the shelf and ringed in the accent. */
+.lib-count { align-items: center; }
+.pick-note:empty { display: none; }
+.book.picked .coverwrap { outline: 2px solid var(--accent); outline-offset: 5px; }
+@media (prefers-reduced-motion: no-preference) {
+  .book.picked .coverwrap { animation: picked-lift .7s cubic-bezier(.16, 1, .3, 1) both; }
+  @keyframes picked-lift { 0% { transform: none; outline-color: transparent; } 45% { transform: translateY(-14px) rotate(-1.2deg); } 100% { transform: translateY(-6px); } }
+}
 img.thumb { width: 40px; height: 56px; object-fit: cover; background: var(--panel2); flex: none; }
 .pages { display: flex; flex-direction: column; align-items: center; margin: 0 -16px; }
 .pages img { display: block; width: 100%; max-width: 900px; height: auto; min-height: 120px; background: var(--panel); }
@@ -593,12 +601,3 @@ th, td, .list > * { border-color: color-mix(in srgb, var(--line2) 45%, var(--lin
 .kd-steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; max-width: 72ch; }
 .kd-steps li::marker { font-weight: 700; }
 .kd-file { max-width: 100%; }
-
-/* Library, Pick one for me: the picked book is lifted off the shelf and ringed in the accent. */
-.lib-count { align-items: center; }
-.pick-note:empty { display: none; }
-.book.picked .coverwrap { outline: 2px solid var(--accent); outline-offset: 5px; }
-@media (prefers-reduced-motion: no-preference) {
-  .book.picked .coverwrap { animation: picked-lift .7s cubic-bezier(.16, 1, .3, 1) both; }
-  @keyframes picked-lift { 0% { transform: none; outline-color: transparent; } 45% { transform: translateY(-14px) rotate(-1.2deg); } 100% { transform: translateY(-6px); } }
-}
