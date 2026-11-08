@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import zipfile
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,22 @@ def test_restricted_profile(client):
     login(client, "Nan")
     assert client.get("/api/discover/search?q=austen").status_code == 403
     assert client.post("/api/profiles", json={"name": "X"}).status_code == 403
+
+
+def test_finishing_a_book_says_where_it_comes_in_the_year(client):
+    login(client, "You")
+    emma = book_id(client, "Emma")  # not started by You; You have finished 9 this year
+    done = client.post("/api/books/%d/reading" % emma, json={"status": "finished"}).get_json()
+    assert done["finished"] == {"count": 10, "year": date.today().year, "name": None}
+    # pressing Finished again is not another book
+    assert "finished" not in client.post("/api/books/%d/reading" % emma, json={"status": "finished"}).get_json()
+    # reading on, or a place set, says nothing
+    assert "finished" not in client.post("/api/books/%d/reading" % book_id(client, "Dracula"), json={"status": "reading"}).get_json()
+    # an admin recording someone else's finish hears whose count it is
+    nan = next(p["id"] for p in client.get("/api/state").get_json()["profiles"] if p["name"] == "Nan")
+    client.post("/api/books/%d/reading" % emma, json={"profile_id": nan, "status": "none"})
+    theirs = client.post("/api/books/%d/reading" % emma, json={"profile_id": nan, "status": "finished"}).get_json()["finished"]
+    assert theirs["name"] == "Nan" and theirs["count"] >= 1
 
 
 def test_personal_and_admin_stats(client):
