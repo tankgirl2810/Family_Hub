@@ -201,7 +201,7 @@ FRAME = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Visual</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&display=swap">
+<link rel="stylesheet" href="/static/fonts/archivo.css">
 <style>
   html,body{margin:0;background:var(--bg,transparent);overflow:hidden}
   canvas{display:block;width:100%%;height:auto}

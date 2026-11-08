@@ -19,7 +19,7 @@ LOOKS_DIR = Path(__file__).parent / "static" / "looks"
 class Design(NamedTuple):
     id: str
     name: str
-    fonts: str     # the Google Fonts address
+    fonts: str     # the font stylesheet's address
     schemes: list  # [(scheme id, name)], the first is the fallback
     piece: dict    # the set piece's words
     sep: str       # what goes between bits of the strip
@@ -27,7 +27,7 @@ class Design(NamedTuple):
 
 DESIGNS = [
     Design("minimalist", "Minimalist Family Hub",
-     "https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&display=swap",
+     "/static/fonts/archivo.css",  # served by Family Hub, so the look holds with no internet
      [("dark", "Dark"), ("light", "Light"), ("paper", "Paper"), ("blueprint", "Blueprint")],
      {"title": "Scope", "state": "Online", "transition": "Screen-change scan"},
      " / "),
