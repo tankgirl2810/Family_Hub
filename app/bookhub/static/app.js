@@ -319,6 +319,13 @@ function shell(section, tab) {
       const tabBox = current.getBoundingClientRect(), navBox = nav.getBoundingClientRect();
       if (tabBox.right > navBox.right - 16) nav.scrollLeft = tabBox.left - navBox.left - 16;
     }
+    // Tabs past the edge fade out on that side, so a cut-off row reads as "there is more this way".
+    const edges = () => {
+      const more = nav.scrollWidth - nav.clientWidth;
+      nav.dataset.more = more <= 1 ? '' : (nav.scrollLeft > 1 ? 'left ' : '') + (nav.scrollLeft < more - 1 ? 'right' : '');
+    };
+    nav.addEventListener('scroll', edges, { passive: true });
+    edges();
   }
 }
 
@@ -1419,8 +1426,8 @@ async function pageHome() {
     setPiece(appState.look),
     watchNews,
     isGuest() ? null : latestMedia,
-    el('section', { class: 'panel cut' }, head('Latest books', el('span', { class: 'small dim', text: plural(home.books_month,
-        'book') + ' added this month' }), el('a', { class: 'btn sm', href: '#/library', text: 'Open books' })),
+    el('section', { class: 'panel cut' }, head('Latest books', el('span', { class: 'small dim', text: home.books_month ? plural(home.books_month,
+        'book') + ' added this month' : 'Nothing new this month' }), el('a', { class: 'btn sm', href: '#/library', text: 'Open books' })),
       books.length ? el('div', { class: 'reel' }, books) : el('p', { class: 'small dim', text: 'No books in the library yet.' })));
 }
 
