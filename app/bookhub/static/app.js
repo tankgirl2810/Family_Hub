@@ -102,6 +102,15 @@ function toast(message, isError, ms) {
   later();
 }
 const oops = (err) => { if (!(err instanceof Stale)) toast(err.message, true); };
+// "1st", "2nd", "3rd", "11th", "22nd"
+const ordinal = (n) => n + ([, 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || [, 'st', 'nd', 'rd'][n % 100] || 'th');
+// A book just finished: where it comes in the year. The first, and every tenth, get a word more.
+function finishedToast(done, title) {
+  if (!done) return toast('Marked finished.');
+  const whose = done.name ? done.name + "'s" : 'your';
+  const extra = done.count === 1 ? ' The first of the year.' : done.count % 10 === 0 ? ' A shelf of ' + done.count + ' now.' : '';
+  toast((title ? title + ': ' : 'Finished: ') + whose + ' ' + ordinal(done.count) + ' book of ' + done.year + '.' + extra, false, 5000);
+}
 const qs = (params) => Object.entries(params).filter(([, value]) => value !== '' && value !== null && value !== undefined)
   .map(([key, value]) => encodeURIComponent(key) + '=' + encodeURIComponent(value)).join('&');
 // waits until you STOP typing for ms before calling fn, so the search box doesn't fire on every keystroke
@@ -2901,7 +2910,8 @@ async function pageBook(id) {
                   text: shelf.on ? 'In ' + shelf.name + "'s books ✓" : 'Add to ' + shelf.name + "'s books", onclick: () => setShelf(id, !shelf.on,
                   { id: shelf.profile_id, name: shelf.name }).then(again).catch(oops) })),
             shelf.devices.map((device) => deviceLine(device, id, again))),
-          field('Reading status for ' + shelf.name, el('select', { onchange: (event) => post('/reading', { profile_id: shelf.profile_id, status: event.target.value }) },
+          field('Reading status for ' + shelf.name, el('select', { onchange: (event) => api('POST', '/api/books/' + id + '/reading',
+              { profile_id: shelf.profile_id, status: event.target.value }).then((got) => { if (got.finished) finishedToast(got.finished, book.title); again(); }).catch(oops) },
             [['none', 'Not started'], ['reading', 'Reading'], ['finished', 'Finished']].map(([key, label]) => el('option', { value: key, text: label, selected: shelf.status === key })))))))));
     }
     const waiting = book.shelf.devices.concat(...(book.family_shelves || []).map((person) => person.devices)).some((device) => device.state === 'queued');
@@ -2915,7 +2925,8 @@ async function pageBook(id) {
       el('div', { class: 'row end', role: 'group', 'aria-label': 'Reading status' },
         el('button', { class: 'chip', type: 'button', 'aria-pressed': String(book.status === 'none'), text: 'Not started', onclick: () => post('/reading', { status: 'none' }) }),
         el('button', { class: 'chip', type: 'button', 'aria-pressed': String(book.status === 'reading'), text: 'Reading', onclick: () => post('/reading', { status: 'reading' }) }),
-        el('button', { class: 'chip', type: 'button', 'aria-pressed': String(book.status === 'finished'), text: 'Finished', onclick: () => post('/reading', { status: 'finished' }) }),
+        el('button', { class: 'chip', type: 'button', 'aria-pressed': String(book.status === 'finished'), text: 'Finished',
+          onclick: () => api('POST', '/api/books/' + id + '/reading', { status: 'finished' }).then((got) => { if (got.finished) finishedToast(got.finished, book.title); again(); }).catch(oops) }),
         el('div', { class: 'field', style: 'max-width:140px' }, el('label', { class: 'lab', for: 'pct', text: 'My place (%)' }), Object.assign(pct, { id: 'pct' })),
         el('button', { class: 'btn', type: 'button', text: 'Set my place', onclick: () => post('/reading', { percent: Number(pct.value) }) }))));
   }
@@ -3335,7 +3346,10 @@ function kindlePanel() {
       : book.status === 'reading' ? 'Reading' : 'Not started';
     const days = book.days.length ? 'Read on ' + book.days.map(shortDay).join(', ')
       : book.status === 'reading' ? 'Started before ' + shortDay(book.first_seen) + '; no reading since' : '';
-    const mark = (finished) => api('POST', '/api/me/kindle/' + book.asin + '/finished', { finished }).then((got) => { toast(finished ? 'Marked finished.' : 'Marked not finished.'); draw(got); }).catch(oops);
+    const mark = (finished) => api('POST', '/api/me/kindle/' + book.asin + '/finished', { finished }).then((got) => {
+      if (finished) finishedToast(got.finished, book.title); else toast('Marked not finished.');
+      draw(got);
+    }).catch(oops);
     return el('div', { class: 'row between gap8' },
       el('div', { class: 'stack gap4 grow' },
         el('strong', { class: 'wrap', text: book.title }),

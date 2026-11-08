@@ -59,7 +59,11 @@ def test_finished_is_pressed_and_the_book_is_in_the_library_search(client):
     assert listed["A Girl Like Her"]["kindle"] and not listed["A Girl Like Her"]["in_library"]
     assert listed["Desire in His Blood"]["status"] == "reading"
 
-    shelf = client.post("/api/me/kindle/B0BN96R1M5/finished", json={"day": "2026-11-07"}).get_json()["books"]
+    reply = client.post("/api/me/kindle/B0BN96R1M5/finished", json={"day": "2026-11-07"}).get_json()
+    shelf = reply["books"]
+    # it says where the book comes in the year (as Finished on a library book does), but only when that day is this year
+    assert ("finished" in reply) == (date.today().year == 2026)
+    assert "finished" not in client.post("/api/me/kindle/B000000002/finished", json={"day": "2020-05-01"}).get_json()
     done = next(book for book in shelf if book["asin"] == "B0BN96R1M5")
     assert done["status"] == "finished" and done["finished"] == "2026-11-07"
     # a later file does not undo it

@@ -894,13 +894,17 @@ def kindle_finished(who, asin):
     if book is None:
         return fail("That book is not in your Kindle library here.", 404)
     day = data.get("day") if isinstance(data.get("day"), str) and re.match(r"^\d{4}-\d{2}-\d{2}$", data.get("day") or "") else None
+    was = next((row["status"] for row in hub().reading_rows(who["id"]) if row["book_key"] == book["key"]), None)
     if data.get("finished", True):
         hub().save_reading(who["id"], book["key"], status="finished", source="manual", finished=day or (book["days"][-1] if book["days"] else None),
                            device="Kindle", title=book["title"], author=book["author"])
     else:
         hub().save_reading(who["id"], book["key"], status="reading" if book["position"] > 1 else "none", source="manual",
                            device="Kindle", title=book["title"], author=book["author"])
-    return jsonify(kindle.library(hub(), who["id"]))
+    reply = kindle.library(hub(), who["id"])
+    if data.get("finished", True) and was != "finished":
+        reply.update(finished_this_year(hub(), who, who, book["key"]))
+    return jsonify(reply)
 
 
 @bp.get("/me/shelf")
@@ -1564,8 +1568,24 @@ def set_reading(who, book_id):
     percent = number(data.get("percent"))
     if percent is None and data.get("percent") not in (None, ""):
         return fail("The percent read should be a number.")
-    hub().save_reading(target["id"], book["key"], status=status, percent=percent, source="manual")
-    return jsonify({"ok": True})
+    family_hub = hub()
+    was = next((row["status"] for row in family_hub.reading_rows(target["id"]) if row["book_key"] == book["key"]), None)
+    family_hub.save_reading(target["id"], book["key"], status=status, percent=percent, source="manual")
+    reply = {"ok": True}
+    if status == "finished" and was != "finished":
+        reply.update(finished_this_year(family_hub, target, who, book["key"]))
+    return jsonify(reply)
+
+
+def finished_this_year(family_hub, target, who, book_key):
+    """Where a book just finished comes in the year: "your 10th book of 2026", or "Nan's 4th" when an admin records it.
+    Nothing for a book finished on a day in another year: it is not part of this year's count."""
+    year = str(date.today().year)
+    rows = family_hub.reading_rows(target["id"])
+    if not any(row["book_key"] == book_key and (row["finished"] or "").startswith(year) for row in rows):
+        return {}
+    count = sum(1 for row in rows if row["status"] == "finished" and (row["finished"] or "").startswith(year))
+    return {"finished": {"count": count, "year": int(year), "name": None if target["id"] == who["id"] else target["name"]}}
 
 
 @bp.post("/books/<int:book_id>/shelf")
