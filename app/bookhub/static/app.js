@@ -3165,7 +3165,7 @@ function yearShelf(stats) {
       : el('span', { class: 'spine away', role: 'img', tabindex: '0', style: look, title: label, 'aria-label': label }, spine));
   });
   return el('section', { class: 'panel cut' }, head('Your ' + stats.year + ' shelf', books.length ? el('span', { class: 'small dim', text: plural(books.length, 'spine') }) : null),
-    books.length ? el('div', { class: 'shelf', role: 'list', 'aria-label': 'Books finished in ' + stats.year + ', in order' },
+    books.length ? el('div', { class: 'yearshelf', role: 'list', 'aria-label': 'Books finished in ' + stats.year + ', in order' },
       slots)
       : el('p', { class: 'small dim', text: 'Nothing on the shelf yet. Each book you finish this year stands here, in the order you finished them.' }),
     books.length ? el('p', { class: 'small dim', text: 'Longer books stand thicker. Striped spines were read outside the family library.' }) : null);

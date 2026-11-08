@@ -594,10 +594,10 @@ th, td, .list > * { border-color: color-mix(in srgb, var(--line2) 45%, var(--lin
 .kd-steps li::marker { font-weight: 700; }
 .kd-file { max-width: 100%; }
 
-/* Your year's shelf on the dashboard (yearShelf): spines stand on planks; a row that fills wraps onto the next plank. */
-.shelf { --row: 152px; display: flex; flex-wrap: wrap; align-items: flex-end; align-content: flex-start; gap: 0 3px; padding: 0 6px;
+/* Your year's shelf on the dashboard (yearShelf; not .shelf, which is the library's grid of cards): spines stand on planks; a row that fills wraps onto the next plank. */
+.yearshelf { --row: 152px; display: flex; flex-wrap: wrap; align-items: flex-end; align-content: flex-start; gap: 0 3px; padding: 0 6px;
   background: repeating-linear-gradient(to bottom, transparent 0 calc(var(--row) - 5px), var(--ink) calc(var(--row) - 5px) calc(var(--row) - 1px), transparent calc(var(--row) - 1px) var(--row)); }
-.shelf .slot { height: var(--row); padding-bottom: 5px; display: flex; align-items: flex-end; gap: 3px; }
+.yearshelf .slot { height: var(--row); padding-bottom: 5px; display: flex; align-items: flex-end; gap: 3px; }
 .spine { position: relative; display: flex; justify-content: center; width: var(--w); height: var(--h); padding: 14px 0 8px; overflow: hidden;
   background: linear-gradient(90deg, rgb(0 0 0 / .32), transparent 22%, rgb(255 255 255 / .07) 48%, transparent 70%, rgb(0 0 0 / .38)), var(--cv);
   color: #f2f1ec; text-decoration: none; border-radius: 2px 2px 0 0; }
