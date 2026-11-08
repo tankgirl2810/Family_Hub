@@ -150,6 +150,19 @@ def test_personal_and_admin_stats(client):
     assert {f["name"] for f in a["family"]} == {"You", "Partner", "Nan"}
 
 
+def test_the_year_shelf_has_every_book_finished_this_year_oldest_first(client):
+    login(client, "You")
+    s = client.get("/api/stats/me").get_json()
+    shelf = s["shelf"]
+    assert len(shelf) == s["read_year"] == 9  # every one, not the eight of "recently finished"
+    assert [book["finished"] for book in shelf] == sorted(book["finished"] for book in shelf)
+    assert sum(1 for book in shelf if book["in_library"]) == s["read_library"]
+    assert all(book["id"] for book in shelf if book["in_library"]) and not any(book["id"] for book in shelf if not book["in_library"])
+    assert set(shelf[0]) == {"title", "author", "pages", "finished", "id", "in_library", "graphic"}
+    # a filter narrows the trend, never the shelf
+    assert len(client.get("/api/stats/me?kind=author&value=Charlotte%20Bronte").get_json()["shelf"]) == 9
+
+
 def test_graphic_novels_read_are_counted_apart_from_books(app, client):
     login(client, "You")
     before = client.get("/api/stats/me").get_json()

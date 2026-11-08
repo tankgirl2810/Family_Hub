@@ -3143,6 +3143,36 @@ function barList(title, rows, color) {
       : el('p', { class: 'small dim', text: 'Nothing yet this year.' }));
 }
 
+// The year as a shelf: one spine per finished book, left to right in the order they were finished, a month's
+// bookend between months. Thicker spines for longer books; books read elsewhere carry the trend chart's stripes.
+function yearShelf(stats) {
+  const books = stats.shelf || [];
+  const longest = Math.max(1, ...books.map((book) => book.pages || 0));
+  let month = 0;
+  const slots = books.map((book) => {
+    // a month's bookend travels with its first book, so a row never ends on a bookend with nothing after it
+    const finished = Number((book.finished || '').slice(5, 7));
+    const bookend = finished && finished !== month ? el('span', { class: 'bookend', 'aria-hidden': 'true', text: MONTHS[finished - 1] }) : null;
+    if (bookend) month = finished;
+    // 18 to 56 pixels across, by page count against the year's longest; an unknown length stands in the middle
+    const width = book.pages ? Math.round(18 + 38 * Math.sqrt(book.pages / longest)) : 30;
+    const label = book.title + (book.author ? ', ' + book.author : '') + (book.finished && book.finished.length === 10 ? ', finished ' + niceDate(book.finished) : '')
+      + (book.in_library ? '' : ', read elsewhere');
+    const look = '--cv:' + coverColor(book.title) + ';--w:' + width + 'px;--h:' + (100 + (titleHash(book.title) % 33)) + 'px';
+    const spine = [el('span', { class: 'spine-t', text: book.title })];
+    return el('span', { role: 'listitem', class: 'slot' }, bookend, book.id
+      ? el('a', { class: 'spine', href: '#/book/' + book.id, style: look, title: label, 'aria-label': label }, spine)
+      : el('span', { class: 'spine away', role: 'img', tabindex: '0', style: look, title: label, 'aria-label': label }, spine));
+  });
+  return el('section', { class: 'panel cut' }, head('Your ' + stats.year + ' shelf', books.length ? el('span', { class: 'small dim', text: plural(books.length, 'spine') }) : null),
+    books.length ? el('div', { class: 'shelf', role: 'list', 'aria-label': 'Books finished in ' + stats.year + ', in order' },
+      slots)
+      : el('p', { class: 'small dim', text: 'Nothing on the shelf yet. Each book you finish this year stands here, in the order you finished them.' }),
+    books.length ? el('p', { class: 'small dim', text: 'Longer books stand thicker. Striped spines were read outside the family library.' }) : null);
+}
+
+function titleHash(title) { let hash = 7; for (const char of title || '') hash = (hash * 33 + char.charCodeAt(0)) >>> 0; return hash; }
+
 async function pageDashboard() {
   const view = { kind: '', value: '', metric: 'books' };
   const base = await api('GET', '/api/stats/me');
@@ -3219,6 +3249,7 @@ async function pageDashboard() {
       tile('Read this month', base.read_month, plural(base.month_books, 'book') + ' · ' + plural(base.month_graphic, 'graphic novel volume'), 'Nothing finished yet this month.'),
       tile('Pages read this year', base.pages_year.toLocaleString(), base.pages_unknown ? plural(base.pages_unknown, 'book') + ' without a page count' : 'From finished books'),
       tile('Authors read this year', base.authors_year, '', 'No named authors yet; books with an unknown author are not counted.')),
+    yearShelf(base),
     trend,
     el('div', { class: 'cols3' },
       barList('Top book file tags', base.top.epub, 'var(--accent)'), barList('Top community tags', base.top.community, 'var(--accent2)'),
