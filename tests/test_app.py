@@ -1916,7 +1916,7 @@ def test_household_look_is_chosen_by_an_admin(app, client):
     assert (look["theme"], look["scene"], look["accent"], look["transition"]) == ("blueprint", "live-sky", 150, False)
     page = client.get("/").get_data(as_text=True)
     assert 'data-design="minimalist" data-theme="blueprint" data-accent="custom" style="--accent-h:150"' in page
-    assert "/static/looks/minimalist/bundle.css" in page and "family=Archivo" in page
+    assert "/static/looks/minimalist/bundle.css" in page and "/static/fonts/archivo.css" in page
     # A bad value changes nothing, not even the good values sent with it.
     for bad in ({"theme": "vesper"}, {"scene": "../etc"}, {"scene": 5}, {"accent": 360}, {"accent": "teal"}, {"accent": True}):
         assert client.post("/api/admin/look", json=dict(bad, transition=True)).status_code == 400, bad

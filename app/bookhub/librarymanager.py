@@ -47,7 +47,7 @@ class LibraryManager:
         """Start a session. The library manager allows three tries a minute, so one session is kept and reused."""
         config = config or self.hub.config
         if not configured(config):
-            raise ManagerError("The library manager's sign-in is not set up. An admin can add it under Admin, Hub, Connections.")
+            raise ManagerError("Calibre-Web's sign-in is not set up. An admin can add it under Admin, Hub, Connections.")
         session = requests.Session()
         try:
             page = session.get(config.cwa_api_url + "/login", timeout=30)
@@ -55,13 +55,13 @@ class LibraryManager:
             reply = session.post(config.cwa_api_url + "/login", timeout=30, allow_redirects=False,
                                  data={"username": config.cwa_user, "password": config.cwa_pass, "csrf_token": token or "", "next": "/"})
             if reply.status_code == 429:
-                raise ManagerError("The library manager allows three sign-ins a minute. Wait a minute and try again.")
+                raise ManagerError("Calibre-Web allows three sign-ins a minute. Wait a minute and try again.")
             home = session.get(config.cwa_api_url + "/", timeout=30)
         except requests.RequestException as exc:
-            raise ManagerError("Could not reach the library manager: %s" % exc)
+            raise ManagerError("Could not reach Calibre-Web: %s" % exc)
         # a good login answers with a redirect, and the home page after it has a logout link. no logout link = not in
         if reply.status_code not in (301, 302, 303) or "/logout" not in home.text:
-            raise ManagerError("The library manager refused the user name or password.")
+            raise ManagerError("Calibre-Web refused the user name or password.")
         self._session, self._token = session, self._find_token(home.text) or token
         self._signed_in_as = (config.cwa_api_url, config.cwa_user)
         return session
@@ -76,12 +76,12 @@ class LibraryManager:
                     reply = self._session.post(config.cwa_api_url + path, timeout=TIMEOUT, allow_redirects=False,
                                                headers={"X-CSRFToken": self._token or "", "X-Requested-With": "XMLHttpRequest"}, **kw)
                 except requests.RequestException as exc:
-                    raise ManagerError("Could not reach the library manager: %s" % exc)
+                    raise ManagerError("Could not reach Calibre-Web: %s" % exc)
                 if reply.status_code in (301, 302, 303, 400, 401, 403) and attempt == 1:
                     self._session = None  # session went stale, log in again. but only once, we're not hammering a 3-per-minute limit
                     continue
                 return reply
-        raise ManagerError("The library manager would not accept the request.")
+        raise ManagerError("Calibre-Web would not accept the request.")
 
     def set_field(self, book_id, field, value):
         """Change one detail of one entry. The library manager's answer is not relied on; the caller reads the result back."""
@@ -92,13 +92,13 @@ class LibraryManager:
         reply = self._post("/ajax/mergebooks", json={"Merge_books": [keep_id] + list(spare_ids)})
         # it answers with python-ish 'single quotes' sometimes, so flip them before looking
         if reply.status_code != 200 or '"success": true' not in reply.text.replace("'", '"'):
-            raise ManagerError("The library manager did not confirm the change (%s). Does this account have permission to edit and delete books?" % reply.status_code)
+            raise ManagerError("Calibre-Web did not confirm the change (%s). Does this account have permission to edit and delete books?" % reply.status_code)
 
     def delete(self, book_id):
         """Remove one entry and its files from the library, the way the library manager's own Delete button does."""
         reply = self._post("/ajax/delete/%d" % book_id)
         if reply.status_code != 200 or "success" not in reply.text:
-            raise ManagerError("The library manager did not confirm the deletion (%s). Does this account have permission to delete books?" % reply.status_code)
+            raise ManagerError("Calibre-Web did not confirm the deletion (%s). Does this account have permission to delete books?" % reply.status_code)
 
     def test(self, config):
         if not configured(config):
@@ -107,4 +107,4 @@ class LibraryManager:
             self.sign_in(config)
         except ManagerError as exc:
             return {"ok": False, "message": str(exc)}
-        return {"ok": True, "message": "Signed in to the library manager as %s." % config.cwa_user}
+        return {"ok": True, "message": "Signed in to Calibre-Web as %s." % config.cwa_user}

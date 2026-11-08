@@ -23,6 +23,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from . import bookfix, calibre, catalogues, visuals, watchlist, covers, db, devices, duplicates, goodreads, integrations, kinds, kosync, looks, media, mediasort, readers, recommend, search, secondcopy, series, settings, tagmerge
 from . import tabletop  # game books: the Tabletop view, nested tags, what each profile hides
 from . import review  # the review queue: the sorter's suggestions, confirmed into the library, and learned rules
+from . import kindle  # a person's Kindle library and the diary of how far through each book they are
 from . import librarymanager  # its refusals, for the duplicates queue
 from . import peek  # a look inside a book's first pages, next to its details
 
@@ -866,6 +867,42 @@ def add_outside(who):
     return jsonify({"ok": True, "book_key": key})
 
 
+@bp.get("/me/kindle")
+@profile_only
+def my_kindle(who):
+    """This person's Kindle books: finished or not, and the days each one moved on."""
+    return jsonify(kindle.library(hub(), who["id"]))
+
+
+@bp.post("/me/kindle")
+@profile_only
+def bring_in_kindle(who):
+    """A file saved by the Kindle export script (static/kindle-export.js)."""
+    try:
+        counts = kindle.bring_in(hub(), who["id"], request.get_json(silent=True))
+    except kindle.KindleError as exc:
+        return fail(str(exc))
+    return jsonify(dict(counts, **kindle.library(hub(), who["id"])))
+
+
+@bp.post("/me/kindle/<asin>/finished")
+@profile_only
+def kindle_finished(who, asin):
+    """Finished (or not after all): Amazon does not say how long a book is, so the reader does."""
+    data = request.get_json(silent=True) or {}
+    book = next((entry for entry in kindle.library(hub(), who["id"])["books"] if entry["asin"] == asin), None)
+    if book is None:
+        return fail("That book is not in your Kindle library here.", 404)
+    day = data.get("day") if isinstance(data.get("day"), str) and re.match(r"^\d{4}-\d{2}-\d{2}$", data.get("day") or "") else None
+    if data.get("finished", True):
+        hub().save_reading(who["id"], book["key"], status="finished", source="manual", finished=day or (book["days"][-1] if book["days"] else None),
+                           device="Kindle", title=book["title"], author=book["author"])
+    else:
+        hub().save_reading(who["id"], book["key"], status="reading" if book["position"] > 1 else "none", source="manual",
+                           device="Kindle", title=book["title"], author=book["author"])
+    return jsonify(kindle.library(hub(), who["id"]))
+
+
 @bp.get("/me/shelf")
 @profile_only
 def my_shelf(who):
@@ -941,6 +978,7 @@ def books(who):
     # Guests see the library and nothing else. Everyone else also sees books somebody
     # in the family has on Goodreads but the library lacks, without being told whose.
     elsewhere = goodreads.elsewhere(family_hub) if pid else {}
+    mine_on_kindle = set(kindle.keys(family_hub, pid)) if pid else set()
     mine = goodreads.book_ids(family_hub, pid) if pid else {}
 
     def outside(key, title, author, book_pages, progress=None):
@@ -969,6 +1007,15 @@ def books(who):
     for key, entry in elsewhere.items():
         if key not in reading:
             items.append(outside(key, entry["title"], entry["author"], entry["pages"]))
+    # this person's own Kindle books not started yet, so they can be found in the library search too
+    listed = {item["key"] for item in items}
+    for key, (title, author) in (kindle.keys(family_hub, pid).items() if pid else []):
+        if key not in listed:
+            items.append(outside(key, title, author, pages.get(key)))
+            listed.add(key)
+    for item in items:
+        if item["key"] in mine_on_kindle:
+            item["kindle"] = True
 
     tabletop.annotate(family_hub, items)  # game, edition, role, product line, language
     public = readers.index(family_hub)
@@ -1219,7 +1266,7 @@ def delete_book(who, book_id):
         return fail("That book is not in the library.", 404)
     from . import librarymanager
     if not librarymanager.configured(family_hub.config):
-        return fail("The library manager's sign-in is not set up yet. Add it under Admin, Hub, Connections, Library manager.")
+        return fail("Calibre-Web's sign-in is not set up yet. Add it under Admin, Hub, Connections, Calibre-Web.")
     ids = [book["id"]] + [copy["id"] for copy in book["copies"]]
     done = 0
     try:
@@ -1570,7 +1617,7 @@ def convert(who, book_id):
         return fail("This book has no PDF to convert.")
     tool = shutil.which("ebook-convert")
     if not tool:
-        hint = " Open it in the library manager and use its Convert button." if family_hub.config.cwa_url else ""
+        hint = " Open it in Calibre-Web and use its Convert button." if family_hub.config.cwa_url else ""
         return fail("The converter is not installed in Family Hub." + hint, 501)
     family_hub.config.converted_dir.mkdir(parents=True, exist_ok=True)
     target = family_hub.config.converted_dir / ("%d.epub" % book_id)
@@ -2281,7 +2328,7 @@ SERVICES = [
     ("qbittorrent", "qBittorrent", "Downloads, through the VPN", "http://gluetun:8080"),
     ("bazarr", "Bazarr", "Subtitles", "http://bazarr:6767"),
     ("jellyfin", "Jellyfin", "Watching films and TV", "http://jellyfin:8096"),
-    ("cwa", "Library manager", "The Calibre library (Calibre-Web Automated)", "http://calibre-web-automated:8083"),
+    ("cwa", "Calibre-Web", "The Calibre library (Calibre-Web Automated)", "http://calibre-web-automated:8083"),
     ("suwayomi", "Suwayomi", "Manga by chapter", "http://suwayomi:4567"),
     ("komga", "Komga", "Comics and manga reader", "http://komga:25600"),
 ]

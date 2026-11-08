@@ -60,7 +60,7 @@ def create_app(config=None):
             "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff",
             # Its own scripts and the font only; it may fetch public data (weather, earthquakes) from anywhere.
             "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self' https:; "
-                                       "style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+                                       "style-src 'self' 'unsafe-inline'; font-src 'self'; "
                                        "img-src 'self' data: blob:; frame-ancestors 'self'"}
 
     @app.get("/visuals/<ver>/<path:rel>")

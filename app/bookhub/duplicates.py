@@ -138,7 +138,7 @@ class Duplicates:
             # same bytes, but a spare may still carry a description or series someone typed in. those come across too
             lost = sorted({LABEL[field] for spare in spares for field in FIXED if details(spare)[field] and not mine[field]})
             if lost:
-                return REVIEW, "The kept entry lacks the %s, which the library manager cannot copy across." % " and ".join(lost), lost, []
+                return REVIEW, "The kept entry lacks the %s, which Calibre-Web cannot copy across." % " and ".join(lost), lost, []
             return IDENTICAL, "", [], self._copies(mine, spares)
         if doubtful:
             return REVIEW, "The title looks like a file name or the author like a user name, so these may be different documents.", [], []
@@ -153,7 +153,7 @@ class Duplicates:
         # a date or a cover, so if we'd lose one of those a human gets to decide
         lost = sorted({LABEL[field] for spare in spares for field in FIXED if details(spare)[field] and not mine[field]})
         if lost:
-            why = "The entry with the better file lacks the %s, which the library manager cannot copy across." % " and ".join(lost)
+            why = "The entry with the better file lacks the %s, which Calibre-Web cannot copy across." % " and ".join(lost)
             return REVIEW, why, lost, []
         return MERGE, "", [], self._copies(mine, spares)
 
@@ -187,7 +187,7 @@ class Duplicates:
         """None when spare copies can be removed, otherwise what is missing."""
         config = self.hub.config
         if not librarymanager.configured(config):
-            return "The library manager's sign-in is not set up yet. Add it under Admin, Hub, Connections, Library manager."
+            return "Calibre-Web's sign-in is not set up yet. Add it under Admin, Hub, Connections, Calibre-Web."
         if not config.attention_dir or not Path(config.attention_dir).is_dir():
             return "The needs-attention folder is not set up, so there is nowhere to set spare copies aside."
         return None
@@ -274,7 +274,7 @@ class Duplicates:
             kept = details(hub.library.get(now["keep"]) or by_id[now["keep"]])
             missed = [step["label"] for step in now["copy"] if not kept[step["field"]]]
             if missed:
-                raise ValueError("The library manager did not take the %s, so nothing was removed." % " and ".join(missed))
+                raise ValueError("Calibre-Web did not take the %s, so nothing was removed." % " and ".join(missed))
         aside = ""
         if now["cls"] != IDENTICAL:
             for book_id in now["remove"]:
@@ -283,7 +283,7 @@ class Duplicates:
         hub.library.refresh(force=True)
         left = [book_id for book_id in now["remove"] if hub.library.get(book_id)]  # trust, but verify
         if left:
-            raise ValueError("The library manager reported success but %d spare entries are still there." % len(left))
+            raise ValueError("Calibre-Web reported success but %d spare entries are still there." % len(left))
         con = hub.con()
         con.execute("INSERT INTO duplicate_log(at, book_key, title, action, kept, removed, note) VALUES(?,?,?,?,?,?,?)",
                     (db.now(), now["key"], now["title"], now["cls"], now["keep"], ",".join(str(book_id) for book_id in now["remove"]),
@@ -315,7 +315,7 @@ class Duplicates:
                             self.job["problems"].append("%s: %s" % (plan["title"], exc))
                             refused = refused + 1 if isinstance(exc, librarymanager.ManagerError) else 0
                             if refused >= 3:
-                                self.job["problems"].append("Stopped after three failures in a row with the library manager.")
+                                self.job["problems"].append("Stopped after three failures in a row with Calibre-Web.")
                                 break
                         self.job["done"] += 1
             finally:
@@ -471,7 +471,7 @@ class Duplicates:
         self.hub.library.refresh(force=True)
         fixed = self.hub.library.get(book["id"])
         if not fixed or fixed["title"] != fields["title"]:
-            raise ValueError("The library manager did not make the change. Does its account have permission to edit books?")
+            raise ValueError("Calibre-Web did not make the change. Does its account have permission to edit books?")
         self._follow(old_key, fixed, move=True)
 
     @staticmethod
@@ -549,7 +549,7 @@ class Duplicates:
             for number, (book, fields) in enumerate(renamed):
                 fixed = self.hub.library.get(book["id"])
                 if not fixed or fixed["title"] != fields["title"]:
-                    raise ValueError("The library manager did not make the change. Does its account have permission to edit books?")
+                    raise ValueError("Calibre-Web did not make the change. Does its account have permission to edit books?")
                 # the last one renamed takes the records with it, unless a copy kept the old name
                 self._follow(key, fixed, move=not stayed and number == len(renamed) - 1)
         con = self.hub.con()

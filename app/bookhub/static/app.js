@@ -50,15 +50,56 @@ async function api(method, url, body) {
 }
 
 // replaceChildren would print a missing (null) part as the word "null"; this leaves it out.
-const fill = (node, ...kids) => node.replaceChildren(...kids.flat().filter((kid) => kid !== null && kid !== undefined && kid !== false));
+const fill = (node, ...kids) => redraw(node, kids.flat().filter((kid) => kid !== null && kid !== undefined && kid !== false));
 
+// Redrawing a page or a panel throws away the button that was pressed, and focus fell back to the top of the
+// document, so a keyboard or screen reader user started again from the sidebar after every star or "Mark read".
+// Before a redraw note what had focus (its words, and which of the same words it was); afterwards focus the
+// new copy. A button whose words change when pressed ("Follow" to "Stop following") is found by its place instead.
+let focusWanted = null;
+const FOCUSABLE = 'a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])';
+const focusWords = (node) => (node.getAttribute('aria-label') || node.textContent || node.name || '').trim().slice(0, 120);
+function rememberFocus(node) {
+  const active = document.activeElement;
+  if (!active || active === document.body || active === node || !node.contains(active)) return;
+  const all = [...main().querySelectorAll(FOCUSABLE)];
+  const words = focusWords(active);
+  const same = all.filter((candidate) => candidate.tagName === active.tagName && focusWords(candidate) === words);
+  focusWanted = { tag: active.tagName, words, nth: same.indexOf(active), place: all.indexOf(active), at: Date.now() };
+}
+function restoreFocus() {
+  const wanted = focusWanted;
+  if (!wanted || (document.activeElement && document.activeElement !== document.body)) return;
+  if (Date.now() - wanted.at > 15000) { focusWanted = null; return; }
+  const all = [...main().querySelectorAll(FOCUSABLE)];
+  if (!all.length) return;  // still "Loading…": try again when the page is drawn
+  const same = all.filter((candidate) => candidate.tagName === wanted.tag && focusWords(candidate) === wanted.words);
+  const pick = same[Math.max(0, Math.min(wanted.nth, same.length - 1))] || all[Math.min(wanted.place, all.length - 1)];
+  focusWanted = null;
+  if (pick) pick.focus({ preventScroll: true });
+}
+function redraw(node, kids) {
+  rememberFocus(node);
+  node.replaceChildren(...kids);
+  restoreFocus();
+}
+
+// A notice goes by itself after a few seconds (held while the pointer or focus is on it). A problem stays until
+// it is closed or the next notice replaces it: an error that vanished before it was read was no help.
 let toastTimer = null;
 function toast(message, isError, ms) {
   const box = document.getElementById('toast');
-  box.textContent = message;
+  const hide = () => { box.className = ''; box.replaceChildren(); };
+  const close = isError ? el('button', { class: 'toast-x', type: 'button', 'aria-label': 'Close this message', text: '×', onclick: hide }) : null;
+  box.replaceChildren(el('span', { text: message }), ...(close ? [close] : []));
   box.className = 'show' + (isError ? ' err' : '');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { box.className = ''; }, ms || (isError ? 6000 : 3000));
+  box.onpointerenter = box.onfocusin = box.onpointerleave = box.onfocusout = null;
+  if (isError && !ms) return;
+  const later = () => { toastTimer = setTimeout(hide, ms || 3000); };
+  box.onpointerenter = box.onfocusin = () => clearTimeout(toastTimer);
+  box.onpointerleave = box.onfocusout = later;
+  later();
 }
 const oops = (err) => { if (!(err instanceof Stale)) toast(err.message, true); };
 const qs = (params) => Object.entries(params).filter(([, value]) => value !== '' && value !== null && value !== undefined)
@@ -124,7 +165,7 @@ const canRequest = () => appState.me && !appState.me.guest && (appState.me.role 
 /// ----------------------------------------------------------------- shell
 
 const main = () => document.getElementById('main');
-function setMain(...kids) { const mainArea = main(); mainArea.replaceChildren(...kids.flat().filter(Boolean)); }
+function setMain(...kids) { redraw(main(), kids.flat().filter(Boolean)); }
 
 // The sections in the sidebar, with the design's line icons.
 // [key, name, link, icon, short name for the phone's bottom bar]. The first four sit in the phone's bottom bar;
@@ -133,7 +174,7 @@ const PHONE_BAR = ['home', 'movies', 'books', 'downloads'];
 const SHORT = { movies: 'Films & TV' };
 const SECTIONS = [
   ['home', 'Home', '#/home', 'M3 11l9-7 9 7v9h-6v-6H9v6H3z'],
-  ['movies', 'Movies and TV Shows', '#/movies', 'M3 5h18v14H3zM7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4'],
+  ['movies', 'Films and TV', '#/movies', 'M3 5h18v14H3zM7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4'],
   ['books', 'Books', '#/library', 'M4 4h7a2 2 0 0 1 1 1 2 2 0 0 1 1-1h7v15h-7a2 2 0 0 0-1 1 2 2 0 0 0-1-1H4zM12 5v15'],
   ['downloads', 'Downloads', '#/downloads', 'M12 4v11M7 10l5 5 5-5M5 20h14'],
   ['watchlist', 'Watchlist', '#/watchlist', 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6'],
@@ -163,7 +204,7 @@ function sectionTabs(section) {
   if (section === 'movies') return mediaTabs();
   return [];
 }
-const SECTION_LOGO = { home: 'Home', movies: 'Movies and TV', downloads: 'Downloads', watchlist: 'Watchlist', books: 'Books',
+const SECTION_LOGO = { home: 'Home', movies: 'Films and TV', downloads: 'Downloads', watchlist: 'Watchlist', books: 'Books',
     photos: 'Photos', files: 'Files', admin: 'Admin', profiles: 'Family Hub' };
 
 // Put the household's chosen colour scheme and accent in place, if the page is not showing them already.
@@ -301,6 +342,7 @@ async function route() {
   if (!appState.series && (page === 'series' || page === 'read')) page = 'library';
   if (['admin', 'sort', 'tags', 'copies'].includes(page) && !isAdmin()) page = 'home';
   const section = page === 'profiles' ? 'profiles' : (PAGE_SECTION[page] || 'books');
+  document.body.dataset.page = page;  // the stylesheet keeps some decoration for Home only
   let tab = { library: 'library', book: 'library', shelf: 'library', series: 'library', read: 'library', dashboard: 'dashboard',
       mybooks: 'dashboard', devices: 'dashboard', discover: 'discover', tabletop: 'library' }[page];
   if (section === 'admin') tab = page === 'admin' && parts[1] !== 'books' ? 'hub' : 'books';
@@ -314,6 +356,7 @@ async function route() {
   // A new screen starts at the top, not wherever the last one was scrolled to.
   if (moved) window.scrollTo(0, 0);
   setMain(el('p', { class: 'small dim', role: 'status', text: 'Loading…' }));
+  if (moved) focusWanted = null;  // a new screen: the link pressed on the last one is not looked for on this one
   const pages = { home: pageHome, movies: pageMovies, downloads: pageDownloads, shelf: pageShelf, photos: pageSoon, files: pageSoon, profiles: pageProfiles, library: pageLibrary, book: pageBook,
     dashboard: pageDashboard, admin: parts[1] === 'books' ? pageBooksAdmin : pageHubAdmin, sort: pageSort, tags: pageTags, copies: pageCopies, details: pageDetails, rules: pageRules, fix: pageFix, watchlist: pageWatchlist,
     discover: pageDiscover, devices: pageDevices, series: pageSeries, read: pageRead, mybooks: pageMyBooks, tabletop: pageTabletop };
@@ -922,7 +965,7 @@ async function pageDownloads() {
   }).catch((err) => { if (!(err instanceof Stale)) fill(addedBooks, el('p', { class: 'small dim', text: err.message })); });
   drawChips();
   setMain(
-    pageHead('Downloads', 'Everything being downloaded for the hub. Ask for films and TV in ', el('a', { href: '#/movies/search', text: 'Movies and TV, Search' }),
+    pageHead('Downloads', 'Everything being downloaded for the hub. Ask for films and TV in ', el('a', { href: '#/movies/search', text: 'Films and TV, Search' }),
       ' and for books in ', el('a', { href: '#/discover', text: 'Books, Discover' }), '.'),
     el('section', { class: 'panel cut' }, head('Every download', vpnLine),
       el('p', { class: 'small dim', text: 'In the order qBittorrent works through them. Three download at once; the rest wait their turn. '
@@ -1344,7 +1387,7 @@ function setPiece(look) {
 
 async function pageHome() {
   const home = await api('GET', '/api/home');
-  const latestMedia = el('section', { class: 'panel cut' }, head('Latest movies and shows', el('a', { class: 'btn sm', href: '#/movies', text: 'Open movies and TV' })),
+  const latestMedia = el('section', { class: 'panel cut' }, head('Latest films and TV', el('a', { class: 'btn sm', href: '#/movies', text: 'Open Films and TV' })),
     el('p', { class: 'small dim', role: 'status',
         text: appState.media.jellyfin ? 'Asking Jellyfin…' : 'Films and series arrive here once Jellyfin is connected' + (isAdmin() ? ' under Admin.' : ' by an admin.') }));
   if (appState.media.jellyfin && !isGuest()) {
@@ -1583,7 +1626,7 @@ function devicesBox(profileId) {
               'aria-label': 'Send new books to ' + dev.name + ' automatically', text: dev.auto_send ? 'Sends automatically' : 'Send automatically: off',
               onclick: () => change(dev.id, { auto_send: !dev.auto_send },
               dev.auto_send ? 'Books will only be sent when you press Send.' : 'Books added to My books will be sent straight away.') }) : null,
-          dev.link ? el('a', { class: 'btn', href: dev.link, target: '_blank', rel: 'noopener', text: 'Open' }) : null,
+          dev.link ? el('a', { class: 'btn', href: dev.link, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + dev.name + ' in a new tab', text: 'Open' }) : null,
           el('button', { class: 'btn', type: 'button', text: 'Change', 'aria-label': 'Change ' + dev.name, onclick: () => { editing = dev; draw(); } }),
           el('button', { class: 'btn danger', type: 'button', text: 'Remove', 'aria-label': 'Remove ' + dev.name, onclick: async () => {
             if (!window.confirm('Remove ' + dev.name + ' from the list? Books already on it stay on it.')) return;
@@ -1734,7 +1777,7 @@ function bookCard(book, onChange, opts) {
     el('div', { class: 'card-foot' },
       action,
       book.goodreads_id ? goodreadsLink(book) : null,
-      book.in_library && !isGuest() ? (book.on_shelf ? el('div', { class: 'small ok', text: 'Already in my library' })
+      book.in_library && !isGuest() ? (book.on_shelf ? el('div', { class: 'small ok', text: 'In my books ✓' })
         : el('button', { class: 'btn sm', type: 'button', 'aria-label': 'Add to my books: ' + book.title, text: 'Add to my books',
             onclick: () => setShelf(book.id, true).then(onChange).catch(oops) })) : null));
 }
@@ -1819,7 +1862,7 @@ function seriesButtons(item, href, onChange) {
       text: comics ? 'Download CBZ' : 'Download all (.zip)' });
   // One volume on my list brings the whole series to the reading app, so any one counts.
   const missing = item.volumes.filter((volume) => volume.in_library && !volume.on_shelf);
-  const mine = isGuest() ? null : item.volumes.some((volume) => volume.on_shelf) ? el('div', { class: 'small ok', text: 'Already in my library' })
+  const mine = isGuest() ? null : item.volumes.some((volume) => volume.on_shelf) ? el('div', { class: 'small ok', text: 'In my books ✓' })
     : el('button', { class: 'btn sm', type: 'button', 'aria-label': 'Add every volume of ' + item.series + ' to my books', text: 'Add to my books', onclick: async (ev) => {
       ev.currentTarget.disabled = true;
       try {
@@ -2499,7 +2542,7 @@ function chapterCard(item, onChange) {
             text: 'CBZ · ' + item.file_parts + ' parts' }) : null,
       // As for a book: on my list, it goes to my reading app as one book with a chapter list.
       isGuest() ? el('a', { class: 'btn sm', href, text: 'Open the series' })
-        : item.on_shelf ? el('div', { class: 'small ok', text: 'Already in my library' })
+        : item.on_shelf ? el('div', { class: 'small ok', text: 'In my books ✓' })
         : el('button', { class: 'btn sm', type: 'button', 'aria-label': 'Add to my books: ' + item.title, text: 'Add to my books',
           onclick: () => api('POST', '/api/series/' + item.series_id + '/mine',
               { on: true }).then(() => { toast('In your books: your reading app gets it as one book, with a chapter list.'); onChange(); }).catch(oops) })));
@@ -2723,10 +2766,11 @@ function deviceLine(device, bookId, again) {
 }
 let sendPolls = 0;
 
-function tagSection(title, note, cls, list, onRemove, onAdd, addLabel) {
+function tagSection(title, note, cls, list, onRemove, onAdd, addLabel, sub) {
   const input = el('input', { type: 'text', maxlength: 60 });
-  return el('section', { class: 'stack' },
-    head(title, el('span', { class: 'small dim', text: note })),
+  return el('section', { class: 'stack' + (sub ? ' tagsub' : '') },
+    sub ? el('div', { class: 'row gap8' }, el('h3', { text: title }), el('span', { class: 'small dim', text: note }))
+      : head(title, el('span', { class: 'small dim', text: note })),
     el('div', { class: 'row gap8' }, list.length ? list.map((entry) => el('span', { class: 'chip tg' + (cls === 'mine' ? ' mine' : '') }, entry,
       onRemove ? el('button', { class: 'x', type: 'button', 'aria-label': 'Remove tag ' + entry, onclick: () => onRemove(entry), text: '×' }) : null))
       : el('span', { class: 'small dim', text: 'None yet.' })),
@@ -2758,10 +2802,10 @@ async function pageBook(id) {
   const side = el('div', { class: 'bside' },
     el('div', { class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title),
         style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') },
-      el('span', { class: 'fmt', text: book.formats.join(' · ') }), el('span', { class: 't', style: 'font-size:26px;text-decoration:none', text: book.has_cover ? '' : book.title })),
+      el('span', { class: 'fmt', text: book.formats.join(' · ') }), el('span', { class: 't t-hero', text: book.has_cover ? '' : book.title })),
     book.formats.map((fmt, index) => el('a', { class: 'btn' + (index === 0 ? ' pri' : ''), href: '/api/books/' + id + '/download/' + fmt, text: 'Download ' + fmt })),
     book.formats.length || book.converted ? null : el('p', { class: 'small warn',
-        text: 'The library has this book\'s details but no file for it, so there is nothing to download. Adding the file again in the library manager fixes it.' }),
+        text: 'The library has this book\'s details but no file for it, so there is nothing to download. Adding the file again in Calibre-Web fixes it.' }),
     book.converted ? el('a', { class: 'btn pri', href: '/api/books/' + id + '/download/converted', text: 'Download converted EPUB' }) : null);
   if (book.formats.includes('PDF') && !book.formats.includes('EPUB') && !book.converted && !guest) {
     const running = book.convert_status === 'running';
@@ -2770,14 +2814,14 @@ async function pageBook(id) {
         onclick: () => post('/convert').then(() => toast('Conversion started. Check back in a minute.')) }),
       book.convert_status === 'failed' ? el('p', { class: 'small bad', text: 'The last conversion failed. Scanned PDFs often cannot be converted.' }) : null,
       appState.can_convert ? null : el('p', { class: 'small dim',
-          text: 'The converter is not installed in Family Hub' + (appState.cwa_url ? '; use Convert in the library manager instead.' : '.') })].filter(Boolean));
+          text: 'The converter is not installed in Family Hub' + (appState.cwa_url ? '; use Convert in Calibre-Web instead.' : '.') })].filter(Boolean));
   }
   // the details editor, with the book open beside it
   if (isAdmin()) side.append(el('a', { class: 'btn', href: '#/fix/' + id, text: 'Edit details' }));
   // Things done now and then (and deleting) wait behind More, away from the download buttons.
   const more = [];
   if (canSort()) more.push(coverBox(book, again));
-  if (isAdmin() && appState.cwa_url) more.push(el('a', { class: 'btn', href: appState.cwa_url + '/book/' + book.id, target: '_blank', rel: 'noopener', text: 'Open in library manager' }));
+  if (isAdmin() && appState.cwa_url) more.push(el('a', { class: 'btn', href: appState.cwa_url + '/book/' + book.id, target: '_blank', rel: 'noopener', text: 'Open in Calibre-Web' }));
   if (isAdmin()) {
     const copies = (book.copies || []).length;
     more.push(el('button', { class: 'btn danger', type: 'button', text: 'Delete this book', onclick: async () => {
@@ -2800,15 +2844,15 @@ async function pageBook(id) {
   // A volume or issue names its own story under the title, and links to the rest of its series.
   const seriesName = book.collection || book.series;
   body.append(el('div', { class: 'stack' }, el('h1', { class: 'glow' + titleFit(book.title), text: book.title }),
-    book.subtitle ? el('p', { style: 'font-size:20px', text: book.subtitle }) : null,
-    el('p', { class: 'dim', style: 'font-size:18px' }, [book.author, book.pages ? 'about ' + book.pages + ' pages' : ''].filter(Boolean).join(' · '),
+    book.subtitle ? el('p', { class: 'fs-lg', text: book.subtitle }) : null,
+    el('p', { class: 'dim fs-lg' }, [book.author, book.pages ? 'about ' + book.pages + ' pages' : ''].filter(Boolean).join(' · '),
       seriesName ? [book.author || book.pages ? ' · ' : '', el('a', { href: '#/shelf/' + encodeURIComponent(seriesName),
           text: (book.series_index && !book.part ? 'Book ' + book.series_index + ' of ' : 'Part of ') + book.series })] : null)));
 
-  const kindSel = el('select', { 'aria-label': 'Kind of book', onchange: (event) => api('POST', '/api/books/kind', { ids: [book.id], kind: event.target.value }).then(again).catch(oops) },
-    appState.kinds.map((kind) => el('option', { value: kind, text: kind, selected: kind === book.kind })));
-  body.append(el('div', { class: 'row' }, el('span', { class: 'small dim', text: 'Kind of book' }), canSort() ? kindSel : el('strong', { text: book.kind })));
-
+  // Tags and the rating given to the whole series count for this volume too; they are changed on the series' page.
+  const fs = book.from_series;
+  body.append(el('section', { class: 'stack' }, head('Synopsis'),
+    el('p', { class: 'synopsis' + (book.synopsis ? '' : ' dim'), text: book.synopsis || 'No synopsis in this book\'s details yet. Add one in Calibre-Web.' })));
   if (!guest) {
     body.append(el('section', { class: 'stack' },
       el('div', { class: 'row' },
@@ -2844,41 +2888,7 @@ async function pageBook(id) {
         el('div', { class: 'field', style: 'max-width:140px' }, el('label', { class: 'lab', for: 'pct', text: 'My place (%)' }), Object.assign(pct, { id: 'pct' })),
         el('button', { class: 'btn', type: 'button', text: 'Set my place', onclick: () => post('/reading', { percent: Number(pct.value) }) }))));
   }
-  body.append(el('section', { class: 'stack' }, head('Synopsis'),
-    el('p', { class: 'synopsis' + (book.synopsis ? '' : ' dim'), text: book.synopsis || 'No synopsis in this book\'s details yet. Add one in the library manager.' })));
-  const canTag = canSort();
-  body.append(tagSection('Book file tags', "From the file's own details, tidied", '', book.tags.epub));
-  const community = tagSection('Community tags',
-      (book.community_sources.length ? 'From ' + book.community_sources.join(', ') : 'From book catalogues') + ' · read-only', 'community',
-      book.tags.community);
-  if (canTag && book.can_look_up) {
-    const look = el('button', { class: 'btn', type: 'button', text: book.tags.community.length ? 'Look up again' : 'Look up tags', onclick: async () => {
-      look.disabled = true; look.textContent = 'Asking the catalogues…';
-      try {
-        const result = await api('POST', '/api/books/' + id + '/lookup');
-        if (result.added) toast(plural(result.added, 'tag') + ' from ' + result.sources.join(' and ') + '.');
-        else if (result.failed.length) toast(result.failed.join(' and ') + ' could not be reached. Try again later.', true);
-        else toast('The catalogues do not know this book under this title and author. Fixing its details in the library manager usually helps.', false, 9000);
-        again();
-      } catch (err) { oops(err); look.disabled = false; look.textContent = 'Look up tags'; }
-    } });
-    community.append(el('div', { class: 'row' }, look));
-  }
-  body.append(community);
-  // Tags and the rating given to the whole series count for this volume too; they are changed on the series' page.
-  const fs = book.from_series;
-  if (fs && (fs.rating || fs.tags.family.length || fs.tags.mine.length)) {
-    body.append(el('section', { class: 'panel cut stack' }, head('From the whole series'),
-      el('p', { class: 'small dim' }, 'Given to every volume of ', el('a', { href: '#/shelf/' + encodeURIComponent(fs.name), text: fs.name }), ". Change them on the series' page."),
-      fs.tags.family.length || fs.tags.mine.length ? el('div', { class: 'row gap6' },
-        fs.tags.family.map((tag) => el('span', { class: 'tag', text: tag })), fs.tags.mine.map((tag) => el('span', { class: 'tag mine', text: tag }))) : null,
-      !guest && fs.rating ? el('p', { class: 'small', text: 'Series rating: ' + fs.rating + ' of 5' }) : null));
-  }
-  body.append(tagSection('Family tags', 'Shared with the whole family', 'family', book.tags.family,
-    canTag ? (tag) => post('/tags', { kind: 'family', tag: tag }, 'DELETE') : null, canTag ? (tag) => post('/tags', { kind: 'family', tag: tag }) : null, 'New family tag'));
   if (!guest) {
-    body.append(tagSection('My tags', 'Only on your profile', 'mine', book.tags.mine,
-      (tag) => post('/tags', { kind: 'mine', tag: tag }, 'DELETE'), (tag) => post('/tags', { kind: 'mine', tag: tag }), 'New tag'));
     body.append(el('section', { class: 'panel cut' }, el('div', { class: 'cols' },
       el('div', { class: 'stack' }, head('My rating'),
         el('div', { class: 'stars', role: 'group', 'aria-label': 'Rate this book' }, [1, 2, 3, 4, 5].map((stars) =>
@@ -2893,15 +2903,53 @@ async function pageBook(id) {
             el('span', { text: rating.name }), el('strong', { text: rating.rating + ' of 5' }))))
           : el('p', { class: 'small dim', text: 'Nobody else has rated this yet.' })))));
   }
+  const kindSel = el('select', { 'aria-label': 'Kind of book', onchange: (event) => api('POST', '/api/books/kind', { ids: [book.id], kind: event.target.value }).then(again).catch(oops) },
+    appState.kinds.map((kind) => el('option', { value: kind, text: kind, selected: kind === book.kind })));
+  const tagsPanel = el('section', { class: 'panel cut stack tagpanel' }, head('Tags'),
+    el('div', { class: 'row' }, el('span', { class: 'small dim', text: 'Kind of book' }), canSort() ? kindSel : el('strong', { text: book.kind })));
+
+  const canTag = canSort();
+  tagsPanel.append(tagSection('Book file tags', "From the file's own details, tidied", '', book.tags.epub, null, null, null, true));
+  const community = tagSection('Community tags',
+      (book.community_sources.length ? 'From ' + book.community_sources.join(', ') : 'From book catalogues') + ' · read-only', 'community',
+      book.tags.community, null, null, null, true);
+  if (canTag && book.can_look_up) {
+    const look = el('button', { class: 'btn', type: 'button', text: book.tags.community.length ? 'Look up again' : 'Look up tags', onclick: async () => {
+      look.disabled = true; look.textContent = 'Asking the catalogues…';
+      try {
+        const result = await api('POST', '/api/books/' + id + '/lookup');
+        if (result.added) toast(plural(result.added, 'tag') + ' from ' + result.sources.join(' and ') + '.');
+        else if (result.failed.length) toast(result.failed.join(' and ') + ' could not be reached. Try again later.', true);
+        else toast('The catalogues do not know this book under this title and author. Fixing its details in Calibre-Web usually helps.', false, 9000);
+        again();
+      } catch (err) { oops(err); look.disabled = false; look.textContent = 'Look up tags'; }
+    } });
+    community.append(el('div', { class: 'row' }, look));
+  }
+  tagsPanel.append(community);
+  tagsPanel.append(tagSection('Family tags', 'Shared with the whole family', 'family', book.tags.family,
+    canTag ? (tag) => post('/tags', { kind: 'family', tag: tag }, 'DELETE') : null, canTag ? (tag) => post('/tags', { kind: 'family', tag: tag }) : null, 'New family tag', true));
+  if (!guest) {
+    tagsPanel.append(tagSection('My tags', 'Only on your profile', 'mine', book.tags.mine,
+      (tag) => post('/tags', { kind: 'mine', tag: tag }, 'DELETE'), (tag) => post('/tags', { kind: 'mine', tag: tag }), 'New tag', true));
+  }
+  body.append(tagsPanel);
+  if (fs && (fs.rating || fs.tags.family.length || fs.tags.mine.length)) {
+    body.append(el('section', { class: 'panel cut stack' }, head('From the whole series'),
+      el('p', { class: 'small dim' }, 'Given to every volume of ', el('a', { href: '#/shelf/' + encodeURIComponent(fs.name), text: fs.name }), ". Change them on the series' page."),
+      fs.tags.family.length || fs.tags.mine.length ? el('div', { class: 'row gap6' },
+        fs.tags.family.map((tag) => el('span', { class: 'tag', text: tag })), fs.tags.mine.map((tag) => el('span', { class: 'tag mine', text: tag }))) : null,
+      !guest && fs.rating ? el('p', { class: 'small', text: 'Series rating: ' + fs.rating + ' of 5' }) : null));
+  }
   body.append(similarList('Similar books', sim.books));
-  setMain(back('#/library', 'Back to library'),
+  setMain(back('#/library', 'Back to the library'),
     el('div', { class: 'detail' }, side, body));
 }
 
 function similarList(title, books) {
   return el('section', { class: 'stack' }, head(title),
     books.length ? el('div', { class: 'tiles' }, books.slice(0, 9).map((book) => el('div', { class: 'tile cut stack' },
-      el('strong', { style: 'font-size:18px', text: book.title }), el('span', { class: 'small dim', text: book.author }),
+      el('strong', { class: 'fs-lg', text: book.title }), el('span', { class: 'small dim', text: book.author }),
       el('span', { class: 'lab', text: 'Shares: ' + book.shared.join(', ') }),
       book.already_read ? el('span', { class: 'small dim', text: 'You have read this' }) : null,
       book.in_library ? el('a', { class: 'btn', href: '#/book/' + book.id, text: 'Open in library' })
@@ -3136,8 +3184,8 @@ async function pageDashboard() {
 
   const readingNow = el('section', { class: 'panel cut' }, head('Reading now'),
     base.reading_now.length ? el('div', { class: 'list' }, base.reading_now.map((book) => el('div', { class: 'stack gap6' },
-      el('div', { class: 'row' }, book.id ? el('a', { href: '#/book/' + book.id, style: 'font-weight:700;font-size:18px',
-          text: book.title }) : el('strong', { style: 'font-size:18px', text: book.title }),
+      el('div', { class: 'row' }, book.id ? el('a', { href: '#/book/' + book.id, class: 'fs-lg strong',
+          text: book.title }) : el('strong', { class: 'fs-lg', text: book.title }),
         el('span', { class: 'tag', text: book.in_library ? 'Library' : 'Elsewhere' })),
       el('span', { class: 'small dim', text: book.author }),
       book.in_library || book.percent ? bar(book.percent, Math.round(book.percent) + ' percent read') : null,
@@ -3183,8 +3231,71 @@ async function pageDashboard() {
             el('span', { class: 'small dim', text: (book.volumes ? ' · ' + plural(book.volumes,
                 'volume') : '') + (book.graphic && !book.volumes ? ' · graphic novel' : '') + (book.in_library ? '' : ' · elsewhere') })),
           el('span', { class: 'small dim', text: niceDate(book.finished) })))) : el('p', { class: 'small dim', text: 'No finished books yet this year.' }))),
+    kindlePanel(),
     outside);
   await drawTrend();
+}
+
+// Kindle: the books in this person's Kindle library and a diary of the days each one moved on. Amazon gives
+// out no reading history, so a script run on the Kindle library page saves where each book is up to, and every
+// file brought in here is one entry in the diary (see kindle.py). Finished is pressed here: Amazon does not say
+// how long a book is.
+function kindlePanel() {
+  const box = el('section', { class: 'panel cut stack', 'aria-label': 'Kindle' }, head('Kindle'), el('p', { class: 'small dim', role: 'status', text: 'Loading…' }));
+  const shortDay = (iso) => new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  const picker = el('input', { type: 'file', accept: '.json,application/json', class: 'kd-file', 'aria-label': 'The kindle-reading.json file' });
+  picker.addEventListener('change', async () => {
+    const file = picker.files[0];
+    if (!file) return;
+    let payload;
+    try { payload = JSON.parse(await file.text()); } catch (err) { toast('That file is not the one the script saves (kindle-reading.json).', true); return; }
+    try {
+      const got = await api('POST', '/api/me/kindle', payload);
+      toast(plural(got.books, 'book') + ' brought in' + (got.new ? ', ' + got.new + ' new' : '') + (got.moved ? ', ' + plural(got.moved, 'book') + ' read further' : '') + '.');
+      draw(got);
+    } catch (err) { oops(err); }
+    picker.value = '';
+  });
+  const copy = el('button', { class: 'btn sm', type: 'button', text: 'Copy the script', onclick: async () => {
+    try {
+      const text = await (await fetch('/static/kindle-export.js')).text();
+      await navigator.clipboard.writeText(text);
+      toast('Copied. Paste it into the console on your Kindle library page.');
+    } catch (err) { window.open('/static/kindle-export.js', '_blank', 'noopener'); }
+  } });
+  const steps = el('ol', { class: 'kd-steps small' },
+    el('li', {}, copy, ' (or ', el('a', { href: '/static/kindle-export.js', target: '_blank', rel: 'noopener', text: 'open it' }), ').'),
+    el('li', {}, 'On a computer, open ', el('a', { href: 'https://read.amazon.com.au/kindle-library', target: '_blank', rel: 'noopener', text: 'your Kindle library' }),
+      ', signed in. Open the console (Ctrl+Shift+J in Chrome), paste the script and press Enter. It saves kindle-reading.json.'),
+    el('li', {}, 'Bring the file in here: ', picker));
+  function bookLine(book) {
+    const status = book.status === 'finished' ? 'Finished' + (book.finished ? ' ' + niceDate(book.finished) : '')
+      : book.status === 'reading' ? 'Reading' : 'Not started';
+    const days = book.days.length ? 'Read on ' + book.days.map(shortDay).join(', ')
+      : book.status === 'reading' ? 'Started before ' + shortDay(book.first_seen) + '; no reading since' : '';
+    const mark = (finished) => api('POST', '/api/me/kindle/' + book.asin + '/finished', { finished }).then((got) => { toast(finished ? 'Marked finished.' : 'Marked not finished.'); draw(got); }).catch(oops);
+    return el('div', { class: 'row between gap8' },
+      el('div', { class: 'stack gap4 grow' },
+        el('strong', { class: 'wrap', text: book.title }),
+        el('span', { class: 'small dim', text: [book.author, book.unlimited ? 'Kindle Unlimited' : ''].filter(Boolean).join(' · ') }),
+        el('span', { class: 'small' + (book.status === 'finished' ? ' ok' : '') }, status, days ? el('span', { class: 'dim', text: ' · ' + days }) : null)),
+      book.status === 'finished'
+        ? el('button', { class: 'linkish', type: 'button', text: 'Not finished', 'aria-label': 'Not finished: ' + book.title, onclick: () => mark(false) })
+        : book.status === 'reading' ? el('button', { class: 'btn sm', type: 'button', text: 'Finished', 'aria-label': 'Finished: ' + book.title, onclick: () => mark(true) }) : null);
+  }
+  function draw(data) {
+    const groups = [['reading', 'Reading'], ['finished', 'Finished'], ['none', 'Not started']].map(([state, name]) => [name, data.books.filter((book) => book.status === state)]);
+    fill(box, head('Kindle', data.last_import ? el('span', { class: 'small dim', text: 'Last brought in ' + niceDate(data.last_import) }) : null),
+      el('p', { class: 'small dim', text: 'Amazon only gives out how far you are in each book. Each time you bring a file in, Family Hub notes which books moved on since the last one, so bring one in often (weekly is fine) to see the days you read. Press Finished when you finish one.' }),
+      steps,
+      data.books.length ? groups.filter(([, books]) => books.length).map(([name, books]) => el('div', { class: 'stack gap8' },
+        el('h3', { text: name + ' (' + books.length + ')' }),
+        el('div', { class: 'list' }, (name === 'Not started' ? books.slice(0, 8) : books).map(bookLine)),
+        name === 'Not started' && books.length > 8 ? el('p', { class: 'small dim', text: 'And ' + (books.length - 8) + ' more. All of them are in the library search, marked Kindle.' }) : null))
+        : el('p', { class: 'small dim', text: 'No Kindle books here yet. Follow the steps above.' }));
+  }
+  api('GET', '/api/me/kindle').then(draw).catch((err) => { fill(box, head('Kindle'), el('p', { class: 'small bad', text: err.message })); });
+  return box;
 }
 
 // ----------------------------------------------------------------- admin
@@ -3197,7 +3308,7 @@ function monthChart(months, label) {
   return el('div', { class: 'scroll' },
     el('div', { class: 'chart' }, months.map((month) => {
       const unit = 140 / max * (month.scale === undefined ? 1 : (total(month) ? month.scale / total(month) : 0));
-      return el('div', { class: 'm' }, el('div', { class: 'num', style: 'font-size:20px;line-height:1', text: month.value }),
+      return el('div', { class: 'm' }, el('div', { class: 'num fs-lg tight', text: month.value }),
         el('div', { class: 'stack', role: 'img', 'aria-label': label(month) },
           month.series.slice().reverse().map(([cls, value]) => el('div', { class: cls, style: 'height:' + Math.round(value * unit) + 'px' }))));
     })),
@@ -3219,7 +3330,7 @@ function serverCard(sv, reload) {
           text: 'Not set up' }) : el('span', { class: 'ok', text: sv.inbox_waiting ? plural(sv.inbox_waiting, 'file') + ' waiting' : 'Empty' })),
       el('div', { class: 'row between' }, 'Library import folder', sv.ingest_folder ? (sv.ingest_stuck ? el('span', { class: 'warn',
           text: plural(sv.ingest_stuck,
-          'file') + ' waiting longer than usual. Family Hub has asked the library manager to look again; if this stays, restart the library manager.' }) : el('span',
+          'file') + ' waiting longer than usual. Family Hub has asked Calibre-Web to look again; if this stays, restart Calibre-Web.' }) : el('span',
           { class: 'ok', text: sv.ingest_waiting ? plural(sv.ingest_waiting, 'file') + ' being added' : 'Found' })) : el('span', { class: 'warn',
           text: 'Not set up' })),
       el('div', { class: 'row between' }, 'Guest access', el('span', { class: 'dim', text: sv.remote_guest_blocked ? 'Home network only' : 'Anywhere' }))),
@@ -3503,7 +3614,7 @@ function setupFileCard(inFile) {
   };
   return el('section', { class: 'panel cut' }, head('Setup file'),
     el('p', { class: 'small dim', text: 'Everything needed to set Family Hub up again, or on the home server, in one file locked with a passphrase: '
-      + 'the .env file with every setting and password, the profiles and reading history, and each program\'s own setup (indexers, qBittorrent, Radarr, Sonarr, subtitles, Jellyfin, the library manager). '
+      + 'the .env file with every setting and password, the profiles and reading history, and each program\'s own setup (indexers, qBittorrent, Radarr, Sonarr, subtitles, Jellyfin, Calibre-Web). '
       + 'No books or films. Unpack it into the Family Hub folder with 7-Zip and the passphrase (guide 7 has the steps).' }),
     inFile ? el('form', { class: 'row end gap8', onsubmit: make }, field('Passphrase (10 or more characters)', phrase), field('Again', again),
       el('button', { class: 'btn pri', type: 'submit', text: 'Make the setup file' }))
@@ -3608,7 +3719,7 @@ async function pageTags() {
         el('button', { class: 'btn', type: 'button', disabled: tags.lookups.running, text: tags.lookups.running ? 'Looking up…' : 'Look up waiting books now', onclick: () => lookNow(false) }),
         el('button', { class: 'btn', type: 'button', disabled: tags.lookups.running, text: 'Ask again about unrecognised books', onclick: () => lookNow(true) })) : null,
       el('p', { class: 'small dim',
-          text: 'A book is only recognised when its title and author match a catalogue entry. Books whose details are a file name or a user name will not be; correct them in the library manager, then ask again.' })),
+          text: 'A book is only recognised when its title and author match a catalogue entry. Books whose details are a file name or a user name will not be; correct them in Calibre-Web, then ask again.' })),
     tagMergePanel(),
     tagNestPanel(),
     el('section', { class: 'panel cut' }, head(plural(shown.length, 'tag') + ' in use', field('Filter tags', filterBox)),
@@ -3817,9 +3928,15 @@ async function pageDetails() {
         el('div', { class: 'stack', style: 'gap:2px;min-width:0;flex:1 1 240px' }, el('strong', { class: 'book', text: book.title }),
           el('span', { class: 'small dim book', text: (book.author || 'no author') + ' · ' + (book.formats.join(', ') || 'no file') + ' · ' + book.problems.join(', ').toLowerCase() })),
         el('div', { class: 'row gap6' }, find,
-          el('a', { class: 'btn sm', href: '#/book/' + book.id, text: 'Open' }),
-          el('button', { class: 'btn sm', type: 'button', text: 'It is right', 'aria-label': 'Leave as it is: ' + book.title,
-            onclick: () => api('POST', '/api/admin/book-details/' + book.id, { leave: true }).then(() => { toast('Left as it is.'); row.remove(); }).catch(oops) }))),
+          el('a', { class: 'btn sm', href: '#/book/' + book.id, 'aria-label': 'Open ' + book.title, text: 'Open' }),
+          el('button', { class: 'btn sm', type: 'button', text: 'It is right', 'aria-label': 'It is right: ' + book.title,
+            onclick: () => api('POST', '/api/admin/book-details/' + book.id, { leave: true }).then(() => {
+              toast('Marked as right. It is left as it is.');
+              // the row goes, so focus moves on to the next book rather than falling back to the top of the page
+              const next = row.nextElementSibling && row.nextElementSibling.querySelector('button, a[href]');
+              row.remove();
+              if (next) next.focus({ preventScroll: true });
+            }).catch(oops) }))),
       area);
     return row;
   }
@@ -3834,7 +3951,7 @@ async function pageDetails() {
   draw();
   setMain(back('#/admin/books', 'Back to books admin'),
     pageHead('Books without real details', 'Titles that are file names and authors that are user names. Find details reads the file for an ISBN and its own title, then asks Open Library '
-      + '(and Google Books, when its key is saved). Saving changes the title and author in the library through the library manager, after a copy of the library database. '
+      + '(and Google Books, when its key is saved). Saving changes the title and author in the library through Calibre-Web, after a copy of the library database. '
       + 'Reading progress, tags and ratings stay with the book. Afterwards, Copies of the same book may find more spare copies.'),
     data.blocked ? el('p', { class: 'bad' }, data.blocked + ' ', el('a', { href: '#/admin', text: 'Open Admin, Hub' })) : null,
     reviewPanel(),
@@ -4002,7 +4119,7 @@ function peekPane(bookId, marker) {
 async function pageFix(bookId) {
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
   setMain(back('#/book/' + bookId, 'Back to the book'),
-    pageHead('Edit details', 'Look inside the book and put its details right. Saving changes the library entry through the library manager, after a copy of the '
+    pageHead('Edit details', 'Look inside the book and put its details right. Saving changes the library entry through Calibre-Web, after a copy of the '
       + 'library database, and Family Hub remembers how books like it are sorted.'),
     reviewPanel(Number(bookId)));
 }
@@ -4097,7 +4214,7 @@ function reviewPanel(only) {
         el('div', { class: 'row between gap8' },
           el('div', { class: 'stack', style: 'gap:2px;min-width:0;flex:1 1 260px' }, el('strong', { class: 'book', text: item.title }),
             el('span', { class: 'small dim book', text: (item.author || 'no author') + ' · ' + (item.formats.join(', ') || 'no file') + (item.origin ? ' · from ' + item.origin : '') })),
-          el('a', { class: 'btn sm', href: '#/book/' + item.book_id, text: 'Open' })),
+          el('a', { class: 'btn sm', href: '#/book/' + item.book_id, 'aria-label': 'Open ' + item.title, text: 'Open' })),
         item.shares > 1 ? el('p', { class: 'small rv-note', text: 'Shares its title and author with ' + plural(item.shares - 1, 'other entry', 'other entries')
           + ', so they share one set of tags. Giving it its own title tells them apart.' }) : null,
         item.why.length ? el('ul', { class: 'small rv-why' }, item.why.map((line) => el('li', { text: line }))) : null,
@@ -4107,15 +4224,20 @@ function reviewPanel(only) {
             change.field === 'tags' ? null : el('span', { class: 'small dim', text: change.now === null || change.now === '' ? 'now empty' : 'now ' + reviewValue(change.now) })))))
           : el('p', { class: 'small dim', text: 'Nothing in the library entry changes; confirming settles how Family Hub sorts it.' }),
         sorted ? el('p', { class: 'small dim', text: 'Sorted in Family Hub as ' + sorted + '.' }) : null,
-        el('div', { class: 'row gap6' },
-          el('button', { class: 'btn sm pri', type: 'button', text: 'Confirm', disabled: blocked, onclick: (event) => confirmOne(item.suggest, event.currentTarget) }),
-          el('button', { class: 'btn sm', type: 'button', text: 'Edit', onclick: edit }),
-          el('button', { class: 'btn sm', type: 'button', text: 'Not right', title: 'Leave the book as it is and never suggest this for it again', onclick: (event) => reject(event.currentTarget) }),
-          el('button', { class: 'btn sm', type: 'button', text: 'Skip', onclick: skip }),
-          item.batch_size > 1 ? el('button', { class: 'btn sm line2', type: 'button', disabled: blocked || data.job.running, text: 'Confirm all ' + item.batch_size + ' like this',
-            onclick: () => confirmAll(item, item.suggest) }) : null),
+        // Confirm and Edit lead; "Not right" (for good) is set apart from Skip (just for now), and the batch, the
+        // widest action, sits on its own line under what it covers.
+        el('div', { class: 'row gap6 rv-acts' },
+          el('button', { class: 'btn sm pri', type: 'button', text: 'Confirm', 'aria-label': 'Confirm: ' + item.title, disabled: blocked,
+            onclick: (event) => confirmOne(item.suggest, event.currentTarget) }),
+          el('button', { class: 'btn sm', type: 'button', text: 'Edit', 'aria-label': 'Edit: ' + item.title, onclick: edit }),
+          el('button', { class: 'linkish', type: 'button', text: 'Skip for now', 'aria-label': 'Skip for now: ' + item.title, onclick: skip }),
+          el('button', { class: 'btn sm quiet-danger', type: 'button', text: 'Not right', 'aria-label': 'Not right: ' + item.title,
+            title: 'Leave the book as it is and never suggest this for it again', onclick: (event) => reject(event.currentTarget) })),
         whyOff(),
-        item.batch_size > 1 ? el('p', { class: 'small dim', text: plural(item.batch_size, 'book') + ' in this batch ' + batchWords + '.' }) : null);
+        item.batch_size > 1 ? el('div', { class: 'row between gap8 rv-batch' },
+          el('p', { class: 'small dim', text: plural(item.batch_size, 'book') + ' in this batch ' + batchWords + '. Confirming them all gives each the same sorting and keeps its own title.' }),
+          el('button', { class: 'btn sm', type: 'button', disabled: blocked || data.job.running, text: 'Confirm all ' + item.batch_size,
+            onclick: () => confirmAll(item, item.suggest) })) : null);
     }
 
     // The details as boxes, started from the suggestion.
@@ -4172,9 +4294,9 @@ function reviewPanel(only) {
           markedNote,
           el('div', { class: 'row gap6' },
             el('button', { class: 'btn sm pri', type: 'submit', text: 'Confirm', disabled: blocked }),
-            item.batch_size > 1 ? el('button', { class: 'btn sm line2', type: 'button', disabled: blocked || data.job.running, text: 'Confirm all ' + item.batch_size + ' like this',
-              onclick: () => confirmAll(item, values()) }) : null,
-            only ? null : el('button', { class: 'btn sm', type: 'button', text: item.media === 'unsorted' ? 'Skip' : 'Cancel', onclick: item.media === 'unsorted' ? skip : summary })),
+            only ? null : el('button', { class: 'linkish', type: 'button', text: item.media === 'unsorted' ? 'Skip for now' : 'Cancel', onclick: item.media === 'unsorted' ? skip : summary }),
+            item.batch_size > 1 ? el('button', { class: 'btn sm rv-all', type: 'button', disabled: blocked || data.job.running, text: 'Confirm all ' + item.batch_size + ' like this',
+              onclick: () => confirmAll(item, values()) }) : null),
           whyOff())));
       inputs.title.focus();
     }
@@ -4230,7 +4352,7 @@ function reviewPanel(only) {
         el('a', { class: 'btn sm', href: '#/rules', text: data.merges ? 'Learned rules (' + plural(data.merges, 'merge') + ' to look at)' : 'Learned rules' }),
         el('button', { class: 'btn sm', type: 'button', text: 'Sort the whole library again', disabled: data.job.running, onclick: resort })),
       el('p', { class: 'small dim', text: 'What the sorter would like to put right, from the folder a book arrived in, its name and its first pages. Books that share a name come first, '
-        + 'then the biggest batches. Confirming changes the library entry through the library manager, after a copy of the library database, and teaches Family Hub '
+        + 'then the biggest batches. Confirming changes the library entry through Calibre-Web, after a copy of the library database, and teaches Family Hub '
         + 'the books like it: they wait under Ready to write until you write them too. Not right leaves the book as it is.' }),
       data.blocked ? el('p', { class: 'small bad', text: data.blocked }) : null,
       jobArea, tabRow, readyArea, list, empty, more);
@@ -4271,12 +4393,12 @@ async function pageRules() {
       } })),
     el('p', { class: 'small dim', text: 'From ' + plural(rule.confirmations, 'confirmation') + (rule.note ? ' (' + rule.note + ')' : '') + ', ' + niceDate(rule.created) + '.' }),
     examples(rule.examples, rule.matches)));
-  setMain(back('#/details', 'Back to fix book details'),
+  setMain(back('#/details', 'Back to books without real details'),
     pageHead('Learned rules', 'Each time a suggestion is confirmed or turned down, Family Hub remembers it here, and books arriving the same way are sorted by themselves. '
       + 'Delete a rule to have books like it wait in the queue again.'),
     merges.length ? el('section', { class: 'panel cut focus' }, head(plural(merges.length, 'set') + ' of rules that could be one'), el('div', { class: 'list' }, merges)) : null,
     el('section', { class: 'panel cut' }, head(plural(rules.length, 'rule')),
-      rules.length ? el('div', { class: 'list' }, rules) : el('p', { class: 'small dim', text: 'No rules yet. Confirm or turn down a suggestion on Fix book details and it appears here.' })));
+      rules.length ? el('div', { class: 'list' }, rules) : el('p', { class: 'small dim', text: 'No rules yet. Confirm or turn down a suggestion on Books without real details and it appears here.' })));
 }
 
 function copiesCard(copies) {
@@ -4328,7 +4450,7 @@ function spareEntry(book, extra) {
       el('span', { class: 'small dim',
           text: (book.converted ? ' · converted copy' : '') + ' · added ' + niceDate(book.added) + ' · ' + (book.details.length ? book.details.join(', ') : 'no details') })),
     el('span', { class: 'row gap8' }, appState.cwa_url ? el('a', { class: 'small', href: appState.cwa_url + '/book/' + book.id,
-        target: '_blank', rel: 'noopener', text: 'Open in library manager' }) : null, extra || null));
+        target: '_blank', rel: 'noopener', text: 'Open in Calibre-Web' }) : null, extra || null));
 }
 function spareCopiesCard(data, again) {
   const run = (body, sure) => { if (!window.confirm(sure)) return; api('POST', '/api/admin/duplicates', body).then(() => { toast('Started. This page follows it.'); again(); }).catch(oops); };
@@ -4350,7 +4472,7 @@ function spareCopiesCard(data, again) {
           'entries') + '? Their files are set aside in ' + data.set_aside + ' first.') }) : null))));
   return el('section', { class: 'panel cut' }, head('Remove spare copies from the library'),
     el('p', { class: 'small dim',
-        text: 'This is the one place where Family Hub changes the library, and it does it by asking the library manager. The library\'s database is copied first, every time. A spare is only deleted outright when the kept file is identical; otherwise its files are moved to ' + data.set_aside + ' for you to empty when you are satisfied.' }),
+        text: 'This is the one place where Family Hub changes the library, and it does it by asking Calibre-Web. The library\'s database is copied first, every time. A spare is only deleted outright when the kept file is identical; otherwise its files are moved to ' + data.set_aside + ' for you to empty when you are satisfied.' }),
     data.blocked ? el('p', { class: 'warn', role: 'status' }, data.blocked + ' ', el('a', { href: '#/admin', text: 'Open Admin, Hub' })) : null,
     busy ? el('p', { class: 'ok', role: 'status', text: 'Working: ' + data.job.done + ' of ' + data.job.total + ' done…' }) : null,
     !busy && data.job.finished ? el('p', { class: 'small ' + (data.job.problems.length ? 'bad' : 'ok'), role: 'status',
@@ -4579,7 +4701,7 @@ async function pageCopies() {
     el('span', { class: 'wrap' }, book.files.length ? el('a', { href: '/api/books/' + book.id + '/download/' + book.files[0].format, text: files(book) }) : el('span', { class: 'dim', text: files(book) }),
       el('span', { class: 'small dim', text: ' · added ' + niceDate(book.added) + (book.has_cover ? '' : ' · no cover') })),
     el('span', { class: 'row gap8' }, book.shown ? el('span', { class: 'tag', text: 'Shown' }) : null,
-      appState.cwa_url ? el('a', { class: 'small', href: appState.cwa_url + '/book/' + book.id, target: '_blank', rel: 'noopener', text: 'Open in library manager' }) : null));
+      appState.cwa_url ? el('a', { class: 'small', href: appState.cwa_url + '/book/' + book.id, target: '_blank', rel: 'noopener', text: 'Open in Calibre-Web' }) : null));
   const block = (group, button) => el('div', { class: 'stack gap6' },
     el('div', { class: 'row between' }, el('span', { class: 'wrap' }, el('strong', { text: group.title }), el('span', { class: 'small dim',
         text: ' · ' + (group.author || 'no author') + (group.choice ? ' · your choice' : '') })), button),
@@ -4593,7 +4715,7 @@ async function pageCopies() {
     head('How Family Hub shows them meanwhile'),
     el('section', { class: 'panel cut' }, head(plural(one.length, 'book') + ' shown as one'),
       el('p', { class: 'small dim',
-          text: 'The copy marked Shown is the one people download: the one with a cover, an EPUB and the larger file. A format that only another copy has is offered too. To remove spare copies for good, use the card above, or delete one by hand in the library manager.' }),
+          text: 'The copy marked Shown is the one people download: the one with a cover, an EPUB and the larger file. A format that only another copy has is offered too. To remove spare copies for good, use the card above, or delete one by hand in Calibre-Web.' }),
       one.length ? el('div', { class: 'list' }, one.map((group) => block(group, el('button', { class: 'btn', type: 'button',
           text: 'Keep apart', 'aria-label': 'Keep apart: ' + group.title, onclick: () => choose(group.key, 'apart', 'Shown as separate books.') }))))
         : el('p', { class: 'small dim', text: 'No book is in the library twice.' })),

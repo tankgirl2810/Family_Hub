@@ -269,7 +269,7 @@ class BookFix:
 
     def ready(self):
         if not librarymanager.configured(self.hub.config):
-            return "The library manager's sign-in is not set up yet. Add it under Admin, Hub, Connections, Library manager."
+            return "Calibre-Web's sign-in is not set up yet. Add it under Admin, Hub, Connections, Calibre-Web."
         return None
 
     def apply(self, book_id, title, authors, synopsis="", publisher="", cover="", profile_id=None):
@@ -303,7 +303,7 @@ class BookFix:
         self.hub.library.refresh(force=True)
         fixed = self.hub.library.get(book_id)
         if not fixed or fixed["title"] != title:
-            raise FixError("The library manager did not make the change. Does its account have permission to edit books?")
+            raise FixError("Calibre-Web did not make the change. Does its account have permission to edit books?")
         self.rekey(old_key, fixed["key"], fixed)
         if cover and not fixed["has_cover"] and not self.hub.covers.row(fixed["key"]):
             try:
