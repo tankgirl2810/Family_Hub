@@ -323,7 +323,8 @@ class Review:
                 found.append(tag)
         return found
 
-    def item(self, book, verdict, origin, lines, languages, shares=1, entries=None, rules=None, kind_now=None, force=False):
+    def item(self, book, verdict, origin, lines, languages, shares=1, entries=None, rules=None, kind_now=None, force=False,
+             doubts=None):
         """One queue item, or None when there is nothing for a person to look at. A book a learned rule sorted
         is "ready": a person already said what books like it are, so it only waits for its library entry to be
         written (one press for the rule's whole batch), and only while the entry still lacks something."""
@@ -335,6 +336,10 @@ class Review:
                 return None  # only a "not right": the book is to be left as it is
             ready = setting[-1] if setting else None  # the rules are applied widest first, so the last is the closest fit
         suggest = self.suggestion(book, verdict, lines, languages, entries)
+        # a catalogue's likely answer for a book whose title is a file name (identify.py), when it is not a game book
+        doubt = (doubts if doubts is not None else self.hub.identify.doubts()).get(book["id"])
+        if doubt and verdict["kind"] != kinds.TABLETOP:
+            suggest.update(title=doubt["title"], authors=list(doubt["authors"]), publisher=suggest["publisher"] or doubt["publisher"])
         folder, _, _ = kinds.split_origin(origin)
         new_game = new_game_from(folder, lines) if UNKNOWN_GAME in verdict["unsure"] else None
         if new_game:
@@ -346,6 +351,8 @@ class Review:
         if not force and not nobody_knows and (not (changes or verdict["conflicts"] or verdict["unsure"] or new_game) or (ready and not changes)):
             return None
         why = list(verdict["conflicts"]) + [line for line in verdict["unsure"] if not (new_game and line == UNKNOWN_GAME)]
+        if doubt and verdict["kind"] != kinds.TABLETOP:
+            why.append(doubt["why"])
         if new_game:
             why.append("A game Family Hub does not know yet: %s." % " › ".join(part for part in (new_game["game"], new_game["edition"]) if part))
         batch, batch_folder, pattern = batch_of(origin, book["title"], book["author"])
@@ -364,6 +371,7 @@ class Review:
         hub = self.hub
         verdicts, reviewed, languages, kind_of = self._verdicts(), self._reviewed(), self._languages(), hub.kind_index()
         lines, learned, origins, games = hub.game_lines(), hub.learned_rules(), None, game_entries(hub.con())
+        doubts = hub.identify.doubts()
         by_key = {}
         for book in hub.library.all_books():
             by_key.setdefault(book["key"], []).append(book)
@@ -383,7 +391,7 @@ class Review:
                     if book_origin == origin:
                         book_verdict = verdict  # that's the one the saved verdict (pages and all) is about
                 entry = self.item(book, book_verdict, book_origin, lines, languages.get(book["id"], []), len(entries), entries=games,
-                                  rules=learned, kind_now=kind_of.get(key))
+                                  rules=learned, kind_now=kind_of.get(key), doubts=doubts)
                 if entry:
                     found.append(entry)
         sizes = {}

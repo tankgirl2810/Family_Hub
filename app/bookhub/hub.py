@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 
-from . import (bookfix, calibre, catalogues, covers, db, devices, duplicates, goodreads, intake, kinds, librarymanager, media, mediasort,
+from . import (bookfix, calibre, catalogues, covers, db, devices, duplicates, goodreads, identify, intake, kinds, librarymanager, media, mediasort,
                peek, readers, review, secondcopy, series, settings, tabletop, tagmerge, tags)
 
 TAG_WEIGHTS = {"family": 3, "mine": 3, "community": 2, "epub": 1}
@@ -57,6 +57,7 @@ class Hub:
         self.duplicates = duplicates.Duplicates(self)
         self.sorter = mediasort.Sorter(self)
         self.bookfix = bookfix.BookFix(self)
+        self.identify = identify.Identify(self)  # finding out what books really are; see identify.py
         self.review = review.Review(self)  # the review queue and learned rules, see review.py
         self.ingest_stuck = 0  # files the library manager had to be reminded about, last time we looked
         self._backup_lock = threading.Lock()
@@ -1034,6 +1035,8 @@ def chores_due(hub, app, tick):
     every(10, 7, "could not start the Komga sync", lambda: komga.start(hub, app))  # graphic novels and chapters, for Paperback
     always("could not send books to devices", hub.devices.send_queued)
     always("could not look books up in catalogues", lambda: hub.catalogues.run(limit=4))  # a few a minute, not hammered
+    # books with a file name for a title: clear cases put right, doubtful ones offered in the review queue
+    always("could not identify books", lambda: hub.identify.run(limit=2))
     always("could not ask the readers' sites", lambda: readers.run(hub, limit=4))
     always("could not back up the book data", hub.backup_if_needed)
     always("could not start the copy to the second disk", second_copy)
