@@ -2769,6 +2769,35 @@ def admin_book_details_apply(who, book_id):
     return jsonify(dict(done, message="Now %s by %s." % (done["title"], done["author"])))
 
 
+@bp.get("/admin/identify")
+@admin_only
+def admin_identify(who):
+    """Books put right by themselves (with an Undo each), the switch, and how many are still to look up. See identify.py."""
+    return jsonify(hub().identify.summary())
+
+
+@bp.post("/admin/identify")
+@admin_only
+def admin_identify_switch(who):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get("auto"), bool):
+        return fail("Say whether clear cases are fixed by themselves.")
+    hub().identify.set_auto(data["auto"])
+    return jsonify({"ok": True, "auto": data["auto"]})
+
+
+@bp.post("/admin/identify/undo/<int:change_id>")
+@admin_only
+def admin_identify_undo(who, change_id):
+    try:
+        done = hub().identify.undo(change_id)
+    except LookupError as exc:
+        return fail(str(exc), 404)
+    except bookfix.FixError as exc:
+        return fail(str(exc))
+    return jsonify({"ok": True, "message": "Put back to %s." % done["title"]})
+
+
 # ------------------------------------------------------- a look inside
 # The first pages of one library entry (not its copies'), for the details editor and the copies queue. See peek.py.
 
