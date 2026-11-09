@@ -1500,9 +1500,9 @@ async function pageHome() {
   const filmsNote = !appState.media.jellyfin && isAdmin() ? el('section', { class: 'panel cut' }, head('Films and TV', el('a', { class: 'btn sm', href: '#/admin', text: 'Open Admin' })),
     el('p', { class: 'small dim', text: 'Films and shows join the week here once Jellyfin is connected under Admin.' })) : null;
   const bookCard = (book) => el('div', { class: 'book' },
-    el('a', { class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title), title: book.title, href: '#/book/' + book.id,
-        style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') },
-      el('span', { class: 'fmt', text: book.formats.includes('EPUB') ? 'EPUB' : (book.formats[0] || '') }), el('span', { class: 't', text: book.title })),
+    el('a', Object.assign({ class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title), title: book.title, href: '#/book/' + book.id,
+        style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') }, jacket(book)),
+      el('span', { class: 'fmt', text: book.formats.includes('EPUB') ? 'EPUB' : (book.formats[0] || '') }), el('span', { class: 't', text: book.title }), jacketAuthor(book)),
     el('div', { class: 'small dim', text: book.author }),
     el('div', { class: 'small', text: dayWord(book.added) }));
   const books = home.books.map(bookCard);
@@ -1907,13 +1907,18 @@ function ratingLine(book) {
   return el('div', { class: 'small' }, mine ? el('div', { text: mine }) : null, theirs ? el('div', { class: 'dim', text: '★ ' + theirs }) : null);
 }
 
+// A cover with no picture is drawn as a jacket: its frame, its title and author, and a faint pattern for its kind.
+const KIND_KEY = { Fiction: 'fiction', 'Non-fiction': 'nonfiction', 'Graphic novel': 'graphic', Tabletop: 'tabletop' };
+const jacket = (book) => (book.has_cover ? {} : { 'data-kind': KIND_KEY[book.kind] || 'other' });
+const jacketAuthor = (book) => (book.has_cover || !book.author ? null : el('span', { class: 'a', text: book.author.split(/\s*(?:&|;)\s*/)[0] }));
+
 function bookCard(book, onChange, opts) {
   // A series followed chapter by chapter has no book page or cover of its own (its id is empty), so it gets its series card.
   if (book.chapter_series) return chapterCard(book, onChange);
   const fmt = !book.in_library ? (book.kindle ? 'KINDLE' : 'ELSEWHERE') : (book.formats.includes('EPUB') ? 'EPUB' : (book.formats[0] || ''));
-  const coverProps = { class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title), title: book.title,
-    style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') };
-  const inner = [el('span', { class: 'fmt', text: fmt }), el('span', { class: 't', text: book.title }), langBadge(book)];
+  const coverProps = Object.assign({ class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title), title: book.title,
+    style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') }, jacket(book));
+  const inner = [el('span', { class: 'fmt', text: fmt }), el('span', { class: 't', text: book.title }), jacketAuthor(book), langBadge(book)];
   const picture = book.in_library ? el('a', Object.assign({ href: '#/book/' + book.id }, coverProps), inner) : el('div', coverProps, inner);
   // A book this person has finished is shown faded, with a note across it.
   const done = book.status === 'finished' && !isGuest() && !(opts && opts.plain);
@@ -2264,7 +2269,8 @@ function pageLibrary(section) {
     pickable = shown.map((item, index) => [item, grid.children[index]])
       .filter(([item]) => !item.volumes && !item.game_group && !item.chapter_series && item.in_library && item.status !== 'finished' && item.status !== 'reading');
     picked = null;
-    pickBtn.hidden = pickable.length < 2;
+    pickBtn.hidden = pickable.length < 2 || viewMode === 'shelf';
+    drawShelf(shown);
     pickBtn.textContent = 'Pick one for me';
     pickNote.textContent = '';
     const stacks = shown.filter((item) => item.volumes || item.game_group).length;
@@ -2431,6 +2437,22 @@ function pageLibrary(section) {
       tagsToggle.setAttribute('aria-expanded', String(tagsOpen)); tagsToggle.textContent = tagsOpen ? 'Hide tags' : 'Tags';
       showSuggestions();
     } });
+  // Covers or Shelf: the same books, as a grid of covers or as spines standing on planks (remembered).
+  let viewMode = recall('view', 'covers');
+  const shelfView = el('div', { class: 'libshelf', hidden: viewMode !== 'shelf' });
+  const viewSwitch = el('div', { class: 'tabs sm', role: 'radiogroup', 'aria-label': 'Show the books as' });
+  const drawSwitch = () => fill(viewSwitch, ...[['covers', 'Covers'], ['shelf', 'Shelf']].map(([key, label]) => el('button', { type: 'button', role: 'radio',
+    'aria-checked': String(viewMode === key), text: label, onclick: () => {
+      viewMode = key; remember('view', key); drawSwitch();
+      grid.hidden = key === 'shelf'; shelfView.hidden = key !== 'shelf';
+      loadBooks().catch(oops);
+    } })));
+  drawSwitch();
+  grid.hidden = viewMode === 'shelf';
+  function drawShelf(items) {
+    if (viewMode !== 'shelf') { fill(shelfView); return; }
+    fill(shelfView, libraryShelf(items, recall('order', 'title')));
+  }
   // Keyboard users jump past the search to the books (a button: a #link would change the page).
   Object.assign(grid, { id: 'lib-results', tabIndex: -1 });
   grid.setAttribute('aria-label', 'Books');
@@ -2445,7 +2467,7 @@ function pageLibrary(section) {
       el('div', { class: 'lib-tools' }, el('div', { class: 'lib-opt' }, el('span', { class: 'lab', text: 'Sort' }), orderRow),
         el('div', { class: 'row gap8' }, tagsToggle, refineToggle)),
       refine, chipsRow, tagsBox, waiting),
-    seriesBox, el('div', { class: 'row between lib-count' }, count, pickBtn), pickNote, grid);
+    seriesBox, el('div', { class: 'row between lib-count' }, count, el('div', { class: 'row gap8' }, pickBtn, viewSwitch)), pickNote, grid, shelfView);
   draw();
   loadStates().then(() => loadBooks()).catch(() => { /* the badges are a nicety */ });
 }
@@ -3018,9 +3040,9 @@ async function pageBook(id) {
   const post = (path, body, method) => api(method || 'POST', '/api/books/' + id + path, body).then(again).catch(oops);
   const guest = isGuest();
   const side = el('div', { class: 'bside' },
-    el('div', { class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title),
-        style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') },
-      el('span', { class: 'fmt', text: book.formats.join(' · ') }), el('span', { class: 't t-hero', text: book.has_cover ? '' : book.title })),
+    el('div', Object.assign({ class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title),
+        style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') }, jacket(book)),
+      el('span', { class: 'fmt', text: book.formats.join(' · ') }), el('span', { class: 't t-hero', text: book.has_cover ? '' : book.title }), jacketAuthor(book)),
     book.formats.map((fmt, index) => el('a', { class: 'btn' + (index === 0 ? ' pri' : ''), href: '/api/books/' + id + '/download/' + fmt, text: 'Download ' + fmt })),
     book.formats.length || book.converted ? null : el('p', { class: 'small warn',
         text: 'The library has this book\'s details but no file for it, so there is nothing to download. Adding the file again in Calibre-Web fixes it.' }),
@@ -3397,6 +3419,40 @@ function yearShelf(stats) {
       slots)
       : el('p', { class: 'small dim', text: 'Nothing on the shelf yet. Each book you finish this year stands here, in the order you finished them.' }),
     books.length ? el('p', { class: 'small dim', text: 'Longer books stand thicker. Striped spines were read outside the family library.' }) : null);
+}
+
+// The Library as a shelf: one spine per book (a series stands as one spine with its volume count), in the Library's
+// order, with a bookend at each new letter (or month, when newest first). Reading books carry a mark at how far.
+function libraryShelf(items, order) {
+  const surname = (author) => { const first = (author || '').split(/\s*(?:&|;| and )\s*/)[0].trim(); return first.includes(',') ? first : first.split(/\s+/).pop() || ''; };
+  const sortTitle = (text) => (text || '').replace(/^(the|a|an)\s+/i, '');
+  const books = items.filter((item) => !item.chapter_series && !item.game_group);
+  const pagesOf = (item) => (item.volumes ? item.volumes.reduce((total, volume) => total + (volume.pages || 0), 0) : item.pages || 0);
+  const longest = Math.max(1, ...books.map(pagesOf));
+  let mark = null;
+  const slots = books.map((item) => {
+    const title = item.volumes ? item.series : item.title;
+    const author = item.volumes ? item.volumes[0].author : item.author;
+    const added = item.volumes ? item.volumes.reduce((top, volume) => ((volume.added_at || '') > top ? volume.added_at : top), '') : (item.added_at || item.added || '');
+    const here = order === 'added' ? MONTHS[Number(added.slice(5, 7)) - 1] || '' : (order === 'author' ? surname(author) : sortTitle(title)).charAt(0).toUpperCase();
+    const bookend = here && here !== mark ? el('span', { class: 'bookend', 'aria-hidden': 'true', text: here }) : null;
+    if (bookend) mark = here;
+    const pages = pagesOf(item);
+    const width = pages ? Math.round(24 + 32 * Math.sqrt(pages / longest)) : 32;
+    const reading = !item.volumes && item.status === 'reading' && !isGuest();
+    const finished = !item.volumes && item.status === 'finished' && !isGuest();
+    const label = title + (author ? ', ' + author : '') + (item.volumes ? ', ' + plural(item.volumes.length, 'volume') : '')
+      + (reading ? ', reading, ' + Math.round(item.percent || 0) + '%' : '') + (finished ? ', already read' : '');
+    const href = item.volumes ? '#/shelf/' + encodeURIComponent(item.series) : item.in_library ? '#/book/' + item.id : null;
+    const look = '--cv:' + coverColor(title) + ';--w:' + width + 'px;--h:' + (100 + (titleHash(title) % 33)) + 'px'
+      + (reading ? ';--at:' + Math.max(4, Math.min(96, Math.round(item.percent || 0))) + '%' : '');
+    const kids = [el('span', { class: 'spine-t', text: title + (item.volumes ? ' · ' + item.volumes.length : '') }), reading ? el('i', { class: 'spine-at', 'aria-hidden': 'true' }) : null];
+    const spine = href ? el('a', { class: 'spine' + (finished ? ' read' : ''), href, style: look, title: label, 'aria-label': label }, kids)
+      : el('span', { class: 'spine away' + (finished ? ' read' : ''), role: 'img', tabindex: '0', style: look, title: label, 'aria-label': label }, kids);
+    return el('span', { role: 'listitem', class: 'slot' }, bookend, spine);
+  });
+  return books.length ? el('div', { class: 'yearshelf', role: 'list', 'aria-label': 'The books, as spines on a shelf' }, slots)
+    : el('p', { class: 'small dim', text: 'No books to stand on the shelf here.' });
 }
 
 function titleHash(title) { let hash = 7; for (const char of title || '') hash = (hash * 33 + char.charCodeAt(0)) >>> 0; return hash; }

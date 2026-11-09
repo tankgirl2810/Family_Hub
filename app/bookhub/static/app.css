@@ -697,3 +697,31 @@ dialog.ask .ask-remove { margin-right: auto; }
 .week-facts { margin: 0; font: 400 22px/1.35 var(--font-display); font-stretch: 110%; max-width: 32ch; }
 .week-facts a { color: var(--accent); }
 @media (max-width: 760px) { .week-top { grid-template-columns: minmax(0, 1fr); } .week-facts { font-size: 19px; } }
+
+/* Covers without a picture are drawn as jackets: an inset frame line, the title, the author under a short rule, and
+   a faint pattern for the kind of book (rules for fiction, a band for non-fiction, halftone for graphic novels, a
+   squared grid for game books). All in the book's own cover colour, so the shelf still reads as a run of colours. */
+.cover[data-kind] { position: relative; isolation: isolate; padding: 12px; }
+.cover[data-kind]::before { content: ""; position: absolute; inset: 6px; border: 1px solid rgb(255 255 255 / .24); pointer-events: none; z-index: -1; }
+.cover[data-kind]::after { content: ""; position: absolute; left: 6px; right: 6px; top: 38px; height: 26%; pointer-events: none; z-index: -1; opacity: .9; }
+.cover[data-kind="fiction"]::after { background: linear-gradient(rgb(255 255 255 / .26), rgb(255 255 255 / .26)) 0 0 / 100% 1px no-repeat,
+  linear-gradient(rgb(255 255 255 / .26), rgb(255 255 255 / .26)) 0 5px / 100% 1px no-repeat; height: 6px; }
+.cover[data-kind="nonfiction"]::after { background: rgb(255 255 255 / .1); height: 22%; }
+.cover[data-kind="graphic"]::after { background: radial-gradient(rgb(255 255 255 / .24) 1.3px, transparent 1.7px) 0 0 / 7px 7px; }
+.cover[data-kind="tabletop"]::after { background: linear-gradient(rgb(255 255 255 / .14) 1px, transparent 1px) 0 0 / 12px 12px,
+  linear-gradient(90deg, rgb(255 255 255 / .14) 1px, transparent 1px) 0 0 / 12px 12px; }
+.cover[data-kind] .t { margin-top: auto; }  /* title and author sit together at the foot, as before the author line */
+.cover[data-kind] .a { display: block; margin-top: 8px; padding-top: 7px; border-top: 1px solid rgb(255 255 255 / .35); width: fit-content; max-width: 100%;
+  font: 600 11px/1.2 var(--font-label); font-stretch: 75%; letter-spacing: .08em; text-transform: uppercase; color: rgb(242 241 236 / .85);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cover.sm .a, .reel .cover .a { font-size: 11px; }
+
+/* The Library's Shelf view: the year shelf's spines, with a mark at how far a book being read is, and read ones quieter. */
+.libshelf { min-width: 0; }
+.spine.read { filter: saturate(.45) brightness(.8); }
+.spine .spine-at { position: absolute; left: 0; right: 0; bottom: var(--at); height: 3px; background: var(--accent); box-shadow: 0 0 0 1px rgb(0 0 0 / .35); }
+/* The small cover beside a book's buttons on a phone: a tighter frame, so it keeps clear of the title and author. */
+@media (max-width: 760px) {
+  .detail .bside > .cover[data-kind] { padding: 10px; }
+  .detail .bside > .cover[data-kind]::before { inset: 4px; }
+}
