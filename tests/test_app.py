@@ -5,7 +5,7 @@ import json
 import os
 import sys
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -1973,6 +1973,24 @@ def test_household_look_is_chosen_by_an_admin(app, client):
     assert client.get("/static/looks/medieval/tokens.css").status_code == 404
     login(client, "Nan")
     assert client.post("/api/admin/look", json={"theme": "light"}).status_code == 403
+
+
+def test_home_says_what_happened_this_week(client):
+    login(client, "You")
+    emma = book_id(client, "Emma")
+    client.post("/api/books/%d/reading" % emma, json={"status": "finished"})
+    week = client.get("/api/home").get_json()["week"]
+    assert week["since"] == (date.today() - timedelta(days=6)).isoformat()
+    assert all(book["added"] >= week["since"] for book in week["added"])
+    assert week["family_finished"] >= 1 and week["mine"]["finished"] >= 1
+    # what you are reading now, most recently moved on first
+    now = week["mine"]["reading"]
+    assert now and now["title"] and 0 <= now["percent"] <= 100
+    # a guest is not tracked, so gets neither "mine" nor the family's count
+    client.post("/api/logout")
+    client.post("/api/login", json={"guest": True})
+    guest = client.get("/api/home").get_json()["week"]
+    assert guest["mine"] is None and guest["family_finished"] is None
 
 
 def test_home_lists_the_newest_books(client):
