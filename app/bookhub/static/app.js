@@ -102,6 +102,52 @@ function toast(message, isError, ms) {
   later();
 }
 const oops = (err) => { if (!(err instanceof Stale)) toast(err.message, true); };
+
+// Asking before something that cannot be taken back, in the hub's own look rather than the browser's grey box.
+// A <dialog> shown as modal keeps focus inside it, closes on Esc, and puts focus back on the button that opened it.
+// ask(text, { yes: 'Delete book', danger: true }) -> true when the action is chosen. On a dangerous one Cancel
+// has the focus, so Enter alone never deletes. With passcode: {...} it resolves to { set: '…' }, { remove: true } or null.
+function ask(text, opts) {
+  const { yes = 'Yes', no = 'Cancel', danger = false, title = '', passcode = null } = opts || {};
+  return new Promise((resolve) => {
+    let answer = passcode ? null : false;
+    const box = el('dialog', { class: 'ask', 'aria-labelledby': 'ask-title', 'aria-describedby': 'ask-text' });
+    const done = (value) => { answer = value; box.close(); };
+    const yesBtn = el('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), type: 'button', text: yes });
+    const noBtn = el('button', { class: 'btn', type: 'button', text: no, onclick: () => box.close() });
+    let field = null;
+    if (passcode) {
+      field = el('input', { type: 'password', id: 'ask-pass', autocomplete: 'new-password', inputmode: 'numeric' });
+      yesBtn.disabled = true;
+      field.addEventListener('input', () => { yesBtn.disabled = !field.value; });
+      field.addEventListener('keydown', (event) => { if (event.key === 'Enter' && field.value) done({ set: field.value }); });
+      yesBtn.addEventListener('click', () => done({ set: field.value }));
+    } else {
+      yesBtn.addEventListener('click', () => done(true));
+    }
+    box.append(...[
+      el('h2', { id: 'ask-title', text: title || (danger ? 'Are you sure?' : 'Check before going on') }),
+      el('p', { id: 'ask-text', text }),
+      field ? el('div', { class: 'field' }, el('label', { class: 'lab', for: 'ask-pass', text: 'New passcode' }), field) : null,
+      el('div', { class: 'row ask-buttons' },
+        passcode && passcode.removable ? el('button', { class: 'btn danger ask-remove', type: 'button', text: 'Remove passcode',
+          onclick: () => done({ remove: true }) }) : null,
+        noBtn, yesBtn)].filter(Boolean));
+    box.addEventListener('close', () => { box.remove(); resolve(answer); });
+    document.body.append(box);
+    box.showModal();
+    (field || (danger ? noBtn : yesBtn)).focus();
+  });
+}
+// "1st", "2nd", "3rd", "11th", "22nd"
+const ordinal = (n) => n + ([, 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || [, 'st', 'nd', 'rd'][n % 100] || 'th');
+// A book just finished: where it comes in the year. The first, and every tenth, get a word more.
+function finishedToast(done, title) {
+  if (!done) return toast('Marked finished.');
+  const whose = done.name ? done.name + "'s" : 'your';
+  const extra = done.count === 1 ? ' The first of the year.' : done.count % 10 === 0 ? ' A shelf of ' + done.count + ' now.' : '';
+  toast((title ? title + ': ' : 'Finished: ') + whose + ' ' + ordinal(done.count) + ' book of ' + done.year + '.' + extra, false, 5000);
+}
 const qs = (params) => Object.entries(params).filter(([, value]) => value !== '' && value !== null && value !== undefined)
   .map(([key, value]) => encodeURIComponent(key) + '=' + encodeURIComponent(value)).join('&');
 // waits until you STOP typing for ms before calling fn, so the search box doesn't fire on every keystroke
@@ -131,6 +177,22 @@ function head(title, ...right) {
   return el('div', { class: 'ph' }, el('h2', { text: title }), el('span', { class: 'hatch' }), ...right);
 }
 // The top of a page: its title, and the plain words under it (text, or text with links).
+// A long admin page: a row of its panels' names under the title, each scrolling to its panel. Buttons, not #links,
+// which would change the page. notes: { 'Connections': '9 not set up' } adds a word to a name.
+function jumpBar(notes) {
+  const panels = [...main().querySelectorAll(':scope > section.panel, :scope > .cols > section.panel, :scope > .cols2 > section.panel')]
+    .map((panel) => [panel, panel.querySelector(':scope > .ph h2')]).filter(([, h2]) => h2);
+  if (panels.length < 4) return;
+  const bar = el('nav', { class: 'jump', 'aria-label': 'On this page' }, panels.map(([panel, h2]) => {
+    const name = h2.textContent;
+    return el('button', { type: 'button', class: 'chip', onclick: () => {
+      panel.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+      panel.setAttribute('tabindex', '-1'); panel.focus({ preventScroll: true });
+    } }, name, notes && notes[name] ? el('span', { class: 'src', text: notes[name] }) : null);
+  }));
+  main().children[0].after(bar);
+}
+
 function pageHead(title, ...intro) {
   return el('div', { class: 'col gap8' }, el('h1', { class: 'glow', text: title }), intro.length ? el('p', { class: 'dim' }, ...intro) : null);
 }
@@ -149,6 +211,11 @@ function icon(path, size) {
 }
 const isGuest = () => appState.me && appState.me.guest;
 const isAdmin = () => appState.me && appState.me.role === 'admin';
+// Films and TV, and Downloads, are for the people who can use them. Admins always see them (that is where they get
+// set up); a member sees Films and TV once something is connected, and Downloads once there is a download client
+// and they may ask for books or films. Nobody else is shown server plumbing they cannot do anything about.
+const seesFilms = () => !!appState.me && !isGuest() && (isAdmin() || !!(appState.media.films || appState.media.shows || appState.media.jellyfin));
+const seesDownloads = () => !!appState.me && !isGuest() && (isAdmin() || (!!appState.media.downloads && !!(appState.me.can_request || appState.me.can_request_media)));
 const canSort = () => appState.me && !appState.me.guest && (appState.me.role === 'admin' || appState.me.can_tag);
 // Add a book to someone's "My books" or take it off, then say what happened. profile is for admins acting for someone else.
 async function setShelf(bookId, on, profile) {
@@ -197,13 +264,18 @@ const PAGE_SECTION = { home: 'home', movies: 'movies', downloads: 'downloads', p
 function sectionTabs(section) {
   if (section === 'books') {
     const tabs = [['library', 'Library', '#/library']];
-    if (!isGuest()) tabs.push(['dashboard', 'Dashboard', '#/dashboard'], ['discover', 'Discover', '#/discover'], ['downloads', 'Downloads', '#/downloads']);
+    if (!isGuest()) tabs.push(['dashboard', 'Dashboard', '#/dashboard'], ['discover', 'Discover', '#/discover']);
+    if (seesDownloads()) tabs.push(['downloads', 'Downloads', '#/downloads']);
     return tabs;
   }
-  if (section === 'admin') return [['hub', 'Hub', '#/admin'], ['books', 'Books', '#/admin/books']];
+  if (section === 'admin') return [['hub', 'Hub', '#/admin'], ['books', 'Books', '#/admin/books'], ['details', 'Book details', '#/details'],
+    ['copies', 'Copies', '#/copies'], ['sort', 'Sort', '#/sort'], ['tags', 'Tags', '#/tags']];
   if (section === 'movies') return mediaTabs();
   return [];
 }
+// The step-by-step guides live in the repository's docs folder.
+const GUIDES = 'https://github.com/tankgirl2810/Family_Hub/blob/master/docs/';
+const guide = (file, words) => el('a', { href: GUIDES + file, target: '_blank', rel: 'noopener', text: words });
 const SECTION_LOGO = { home: 'Home', movies: 'Films and TV', downloads: 'Downloads', watchlist: 'Watchlist', books: 'Books',
     photos: 'Photos', files: 'Files', admin: 'Admin', profiles: 'Family Hub' };
 
@@ -278,6 +350,9 @@ addEventListener('click', (event) => { if (!event.target.closest('#side')) close
 addEventListener('blur', closeMore);
 
 let pageTitle = 'Family Hub';  // the tab title for the current screen, put back after a "ready" notice
+// A page about one thing (a book, an admin tool) names it: "Dracula · Books · Family Hub".
+let sectionTitle = 'Family Hub';  // "Books · Family Hub", set with the section; a page redrawn in place is named afresh, not twice
+function nameThePage(name) { document.title = pageTitle = name + ' · ' + sectionTitle; }
 
 function shell(section, tab) {
   applyLook(appState.look);
@@ -285,7 +360,8 @@ function shell(section, tab) {
   document.getElementById('shell').classList.toggle('signed-out', !signedIn);
   const sectionLink = ([key, label, href, iconPath]) => el('a', { href, 'aria-current': section === key ? 'page' : null, onclick: closeMore },
     sectionIcon(iconPath), el('span', { class: 'long', text: label }), el('span', { class: 'short', text: SHORT[key] || label }));
-  const sections = SECTIONS.filter(([key]) => (key !== 'admin' || isAdmin()) && ((key !== 'movies' && key !== 'downloads' && key !== 'watchlist') || !isGuest()));
+  const sections = SECTIONS.filter(([key]) => (key !== 'admin' || isAdmin()) && (key !== 'movies' || seesFilms())
+    && (key !== 'downloads' || seesDownloads()) && (key !== 'watchlist' || !isGuest()));
   fill(document.getElementById('side'),
     el('div', { class: 'hub glow' }, starMark(), 'Family Hub'),
     el('nav', { 'aria-label': 'Family Hub sections' }, sections.filter(([key]) => PHONE_BAR.includes(key)).map(sectionLink),
@@ -307,7 +383,7 @@ function shell(section, tab) {
   const where = section === 'profiles' ? 'Profiles' : (SECTIONS.find((entry) => entry[0] === section) || [0, 'Home'])[1];
   document.getElementById('strip').replaceChildren(el('span', { text: 'Family Hub' + appState.look.sep + where }));
   // The browser tab and screen readers name the section too.
-  document.title = pageTitle = where + ' · Family Hub';
+  document.title = pageTitle = sectionTitle = where + ' · Family Hub';
   closeMore();
   // On a phone the section's tabs are one sideways row; keep the current tab in view rather than off the edge.
   const nav = document.querySelector('#top .nav');
@@ -319,6 +395,13 @@ function shell(section, tab) {
       const tabBox = current.getBoundingClientRect(), navBox = nav.getBoundingClientRect();
       if (tabBox.right > navBox.right - 16) nav.scrollLeft = tabBox.left - navBox.left - 16;
     }
+    // Tabs past the edge fade out on that side, so a cut-off row reads as "there is more this way".
+    const edges = () => {
+      const more = nav.scrollWidth - nav.clientWidth;
+      nav.dataset.more = more <= 1 ? '' : (nav.scrollLeft > 1 ? 'left ' : '') + (nav.scrollLeft < more - 1 ? 'right' : '');
+    };
+    nav.addEventListener('scroll', edges, { passive: true });
+    edges();
   }
 }
 
@@ -340,12 +423,16 @@ async function route() {
   if (!appState.me) page = 'profiles';
   if (isGuest() && ['dashboard', 'mybooks', 'admin', 'sort', 'tags', 'copies', 'discover', 'devices', 'series', 'read', 'movies', 'downloads', 'watchlist'].includes(page)) page = 'library';
   if (!appState.series && (page === 'series' || page === 'read')) page = 'library';
-  if (['admin', 'sort', 'tags', 'copies'].includes(page) && !isAdmin()) page = 'home';
+  if (['admin', 'sort', 'tags', 'copies', 'details', 'rules', 'fix'].includes(page) && !isAdmin()) page = 'home';
+  // a link or bookmark to a section this person does not see goes home rather than to a page of set-up notes
+  if ((page === 'movies' && !seesFilms()) || (page === 'downloads' && !seesDownloads())) page = 'home';
+  if (page === 'movies' && parts[1] === 'search' && !isAdmin() && !canRequestMedia()) parts[1] = '';
   const section = page === 'profiles' ? 'profiles' : (PAGE_SECTION[page] || 'books');
   document.body.dataset.page = page;  // the stylesheet keeps some decoration for Home only
   let tab = { library: 'library', book: 'library', shelf: 'library', series: 'library', read: 'library', dashboard: 'dashboard',
       mybooks: 'dashboard', devices: 'dashboard', discover: 'discover', tabletop: 'library' }[page];
-  if (section === 'admin') tab = page === 'admin' && parts[1] !== 'books' ? 'hub' : 'books';
+  if (section === 'admin') tab = { sort: 'sort', tags: 'tags', copies: 'copies', details: 'details', rules: 'details', fix: 'details' }[page]
+    || (parts[1] === 'books' ? 'books' : 'hub');
   if (section === 'movies') tab = parts[1] === 'search' ? 'search' : 'watch';
   shell(section, tab);
   Tracker.kick();
@@ -367,6 +454,13 @@ async function route() {
   if (moved && gen === routeGen && (!document.activeElement || document.activeElement === document.body)) main().focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', route);
+// "/" goes to the page's search box (Library, Discover, Films and TV), as on most sites; not while typing somewhere.
+document.addEventListener('keydown', (event) => {
+  if (event.key !== '/' || event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
+  if (event.target.closest && event.target.closest('input, textarea, select, [contenteditable], dialog')) return;
+  const box = main().querySelector('input[type="search"]:not(:disabled)');
+  if (box) { event.preventDefault(); box.focus(); }
+});
 window.addEventListener('hashchange', () => checkMaking());
 window.addEventListener('DOMContentLoaded', route);
 // After signing in: changing the address draws Home by itself; only an address already on Home needs a redraw.
@@ -413,7 +507,8 @@ function mediaState(item) {
 }
 
 function mediaTabs() {
-  return [['watch', 'Watch', '#/movies'], ['search', 'Search', '#/movies/search'], ['downloads', 'Downloads', '#/downloads']];
+  return [['watch', 'Watch', '#/movies'], isAdmin() || canRequestMedia() ? ['search', 'Search', '#/movies/search'] : null,
+    seesDownloads() ? ['downloads', 'Downloads', '#/downloads'] : null].filter(Boolean);
 }
 
 async function pageMovies(sub, id) {
@@ -450,8 +545,9 @@ async function pageMovies(sub, id) {
     el('div', { class: 'row between end' }, pageHead('Watch', 'Films and series on the family server.'),
       nothing ? null : field('Search title', search)),
     nothing ? el('section', { class: 'panel cut' }, head('Not set up yet'),
-      el('p',
-          { text: 'Films and TV need Radarr and Sonarr. ' + (isAdmin() ? 'Start them with the media profile (guide 14), then press Connect everything under Admin.' : 'Ask an admin to set them up.') }),
+      isAdmin() ? el('p', {}, 'Films and TV need Radarr and Sonarr. Start them with the media profile (',
+          guide('14-films-tv-and-the-vpn.md', 'guide 14'), '), then press Connect everything under ', el('a', { href: '#/admin', text: 'Admin' }), '.')
+        : el('p', { text: 'Films and TV need Radarr and Sonarr. Ask an admin to set them up.' }),
       isAdmin() ? el('a', { class: 'btn pri', href: '#/admin', text: 'Open Admin' }) : null) : null,
     latest,
     problems.length ? el('p', { class: 'warn', role: 'status', text: problems.join(' ') }) : null,
@@ -747,6 +843,7 @@ async function pageMediaItem(kind, id) {
     poll();
   }
   const facts = [item.year, KIND_WORD[kind], item.runtime ? item.runtime + ' min' : '', item.network].filter(Boolean).join(' · ');
+  nameThePage(item.title);
   setMain(back('#/movies', 'Back to watch'),
     el('div', { class: 'detail' },
       el('div', { class: 'bside' }, el('div', { class: 'cover' + (item.poster ? ' has-img' : '') + titleSize(item.title),
@@ -776,7 +873,8 @@ async function pageMediaItem(kind, id) {
           el('p', { class: 'small dim',
               text: 'Deletes ' + (kind === 'film' ? 'the film' : 'every episode') + ' and stops looking for ' + (kind === 'film' ? 'it' : 'new ones') + '. This cannot be undone.' }),
           el('div', { class: 'row' }, el('button', { class: 'btn danger', type: 'button', text: 'Remove ' + item.title, onclick: async () => {
-            if (!window.confirm('Remove "' + item.title + '" from the server and delete its files' + (item.size ? ' (' + gb(item.size) + ')' : '') + '? This cannot be undone.')) return;
+            if (!(await ask('Remove "' + item.title + '" from the server and delete its files' + (item.size ? ' (' + gb(item.size) + ')' : '') + '? This cannot be undone.',
+                { yes: 'Remove ' + (kind === 'film' ? 'film' : 'show'), danger: true }))) return;
             try { await api('DELETE', '/api/media/' + kind + '/' + id); toast(item.title + ' was removed.'); location.hash = '#/movies'; } catch (err) { oops(err); }
           } }))) : null));
 }
@@ -898,6 +996,15 @@ async function pageWatchlist() {
 
 // Every download in one place: films, TV and books, with pause, reorder and (for admins) delete.
 async function pageDownloads() {
+  // No download client yet: one note saying so and where to add it, instead of a page of empty panels and errors.
+  // (Only admins get here then; for members the section is hidden until it is set up.)
+  if (!appState.media.downloads) {
+    setMain(pageHead('Downloads', 'Everything being downloaded for the hub, once there is something to download with.'),
+      el('section', { class: 'panel cut' }, head('Not set up yet'),
+        el('p', {}, 'Films, TV and books download through qBittorrent, behind the VPN. Add it under ',
+          el('a', { href: '#/admin', text: 'Admin, Hub, Connections' }), ', then press Connect everything. Family members see Downloads once it works.')));
+    return;
+  }
   const vpnLine = el('span', { class: 'small dim', text: 'Checking the VPN…' });
   const list = el('div', { class: 'stack' }, el('p', { class: 'small dim', role: 'status', text: 'Asking qBittorrent…' }));
   const added = el('div', { class: 'list' });
@@ -918,7 +1025,7 @@ async function pageDownloads() {
     const waiting = shown.filter((item) => !item.done && item.waiting_seed && !item.missing);
     // Downloads whose files were moved by hand: qBittorrent cannot find them. Forgetting them leaves the files alone.
     const forgetAll = el('button', { class: 'btn sm', type: 'button', text: 'Forget all ' + missing.length + ' (files stay)', onclick: async () => {
-      if (!window.confirm('Take these ' + missing.length + ' downloads off qBittorrent\'s list? Their files are not touched, wherever they are. A film or show you do not have can be asked for again.')) return;
+      if (!(await ask('Take these ' + missing.length + ' downloads off qBittorrent\'s list? Their files are not touched, wherever they are. A film or show you do not have can be asked for again.', { yes: 'Forget ' + missing.length }))) return;
       forgetAll.disabled = true;
       try { const result = await api('POST', '/api/media/torrents/forget',
           { hashes: missing.map((torrent) => torrent.hash) }); toast(result.message); } catch (err) { if (!(err instanceof Stale)) oops(err); }
@@ -945,7 +1052,8 @@ async function pageDownloads() {
       if (err instanceof Stale) return;
       // qBittorrent is often only away while the VPN restarts: keep asking, less often.
       last = null;
-      fill(list, el('p', { class: 'small bad', role: 'status', text: err.message }), el('p', { class: 'small dim', text: 'Trying again shortly.' }));
+      fill(list, el('p', { class: 'small bad', role: 'status', text: err.message }),
+        el('p', { class: 'small dim', text: 'Asked at ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + '; asking again every 20 seconds.' }));
       again(20000);
       return;
     }
@@ -967,9 +1075,9 @@ async function pageDownloads() {
   setMain(
     pageHead('Downloads', 'Everything being downloaded for the hub. Ask for films and TV in ', el('a', { href: '#/movies/search', text: 'Films and TV, Search' }),
       ' and for books in ', el('a', { href: '#/discover', text: 'Books, Discover' }), '.'),
-    el('section', { class: 'panel cut' }, head('Every download', vpnLine),
-      el('p', { class: 'small dim', text: 'In the order qBittorrent works through them. Three download at once; the rest wait their turn. '
-        + 'One nobody has shared for ten minutes goes to the back, paused, marked waiting for seed.' }), chips, list),
+    el('section', { class: 'panel cut' }, head('Every download', isAdmin() ? vpnLine : null),
+      el('p', { class: 'small dim', text: isAdmin() ? 'In the order qBittorrent works through them. Three download at once; the rest wait their turn. '
+        + 'One nobody has shared for ten minutes goes to the back, paused, marked waiting for seed.' : 'Three download at once; the rest wait their turn.' }), chips, list),
     speedPanel(),
     isAdmin() ? sortPanel() : null,
     el('div', { class: 'cols2' },
@@ -1119,7 +1227,8 @@ function sortPanel() {
           item.status === 'ready' || item.status === 'better' ? el('button', { class: 'btn sm pri', type: 'button', text: 'File it',
             onclick: (event) => send(event.currentTarget, '/api/admin/media/sort', { path: item.path }, look) }) : null,
           item.status === 'have' || /short sample/.test(item.reason) ? el('button', { class: 'btn sm danger', type: 'button', text: 'Delete spare',
-            onclick: (event) => { if (window.confirm('Delete "' + item.name + '" for good? The copy in the library stays.')) send(event.currentTarget,
+            onclick: async (event) => { const button = event.currentTarget;
+              if (await ask('Delete "' + item.name + '" for good? The copy in the library stays.', { yes: 'Delete spare', danger: true })) send(button,
                 '/api/admin/media/sort/remove', { path: item.path }, look); } }) : null)),
       el('div', { class: 'small dim', text: facts.filter(Boolean).join(' · ') }),
       el('div', { class: 'small ' + (item.status === 'problem' ? 'bad' : item.status === 'have' ? 'warn' : ''), text: item.reason }),
@@ -1295,8 +1404,8 @@ function torrentRow(torrent, listing, reload) {
           : show ? 'Delete the whole show "' + show + '" everywhere: this download, every episode already on the server, and the show from Jellyfin. It will not be looked for again.'
           : torrent.type === 'Book' ? 'Delete the download "' + torrent.title + '" and its files. A book already added to the library stays there; delete it from its page in Books.'
           : 'Delete "' + torrent.title + '" and its downloaded files.';
-        if (!window.confirm(what + ' This cannot be undone.')) return;
         const btn = ev.currentTarget;
+        if (!(await ask(what + ' This cannot be undone.', { yes: 'Delete download', danger: true }))) return;
         btn.disabled = true;
         try { const result = await api('DELETE', '/api/media/torrents/' + torrent.hash); toast(result.message); } catch (err) { if (!(err instanceof Stale)) oops(err); }
         btn.blur();  // the list is left alone while focus is in it
@@ -1343,7 +1452,7 @@ function mediaCard(reload) {
       !item.configured ? el('span', { class: 'dim', text: 'Not set up' }) : el('span', { class: item.ok ? 'ok' : 'warn',
           text: item.ok ? 'Connected' + (item.version ? ' · ' + item.version : '') : 'Not reachable · ' + (item.error || '') }));
     fill(body, el('div', { class: 'list' }, line(status.radarr), line(status.sonarr), line(status.bazarr), line(status.jellyfin),
-      el('div', { class: 'row between' }, el('span', { text: 'VPN for torrents' }), el('span', { class: status.vpn.ok ? 'ok' : 'warn', text: status.vpn.message }))));
+      el('div', { class: 'row between' }, el('span', { text: 'VPN for torrents' }), el('span', { class: status.vpn.ok ? 'ok' : /not set up/i.test(status.vpn.message) ? 'dim' : 'warn', text: status.vpn.message }))));
   }
   const go = el('button', { class: 'btn pri', type: 'button', text: 'Connect everything', onclick: async () => {
     go.disabled = true; go.textContent = 'Connecting…';
@@ -1414,14 +1523,19 @@ async function pageHome() {
       watchNews.hidden = false;
     }).catch(() => {});
   }
+  // Films lead once Jellyfin is connected. Until then members are not shown the gap at all, and admins find the
+  // reminder under the books rather than above them.
+  const filmsFirst = appState.media.jellyfin && !isGuest();
+  const filmsNote = !appState.media.jellyfin && isAdmin();
   setMain(
     pageHead('Welcome home', 'Everything on the family server, newest first.'),
     setPiece(appState.look),
     watchNews,
-    isGuest() ? null : latestMedia,
-    el('section', { class: 'panel cut' }, head('Latest books', el('span', { class: 'small dim', text: plural(home.books_month,
-        'book') + ' added this month' }), el('a', { class: 'btn sm', href: '#/library', text: 'Open books' })),
-      books.length ? el('div', { class: 'reel' }, books) : el('p', { class: 'small dim', text: 'No books in the library yet.' })));
+    filmsFirst ? latestMedia : null,
+    el('section', { class: 'panel cut' }, head('Latest books', el('span', { class: 'small dim', text: home.books_month ? plural(home.books_month,
+        'book') + ' added this month' : 'Nothing new this month' }), el('a', { class: 'btn sm', href: '#/library', text: 'Open books' })),
+      books.length ? el('div', { class: 'reel' }, books) : el('p', { class: 'small dim', text: 'No books in the library yet.' })),
+    filmsNote ? latestMedia : null);
 }
 
 // A section that is not built yet. Says so plainly, with no made-up content.
@@ -1493,6 +1607,7 @@ function pageProfiles() {
       el('span', { class: 'name', text: profile.name }),
       el('span', { class: 'tag' + (profile.role === 'admin' ? ' on' : ''), text: profile.role === 'admin' ? 'Admin' : 'Member' }),
       el('span', { class: 'small dim', text: profile.has_passcode ? 'Passcode on' : 'No passcode' }),
+      appState.me && appState.me.id === profile.id ? el('span', { class: 'small here', text: 'In use now' }) : null,
       // Admins can always find new books, whatever their own switch says, so they are never "Reading only".
       profile.tracker_linked ? el('span', { class: 'small dim',
           text: 'Kindle tracking linked' }) : (profile.can_request || profile.role === 'admin' ? null : el('span', { class: 'small dim',
@@ -1530,8 +1645,8 @@ function mySettings() {
       el('div', { class: 'stack' }, el('h3', { text: 'Passcode' }),
         el('div', { class: 'row end' }, field('New passcode (leave empty to remove)', pass),
           // An empty box removes the passcode, so say so before doing it rather than after.
-          el('button', { class: 'btn', type: 'button', text: 'Save passcode', onclick: () => {
-            if (!pass.value && !window.confirm('Remove your passcode? Anyone using this hub could then open your profile.')) return;
+          el('button', { class: 'btn', type: 'button', text: 'Save passcode', onclick: async () => {
+            if (!pass.value && !(await ask('Remove your passcode? Anyone using this hub could then open your profile.', { yes: 'Remove passcode', danger: true }))) return;
             save({ passcode: pass.value }, pass.value ? 'Passcode saved.' : 'Passcode removed.');
           } }))),
       el('div', { class: 'stack' }, el('h3', { text: 'Reading app sync' }),
@@ -1573,7 +1688,7 @@ function goodreadsBox(profileId) {
         el('button', { class: 'btn', type: 'button', text: 'Save link', onclick: () => send({ link: input.value }, input.value.trim() ? 'Link saved. Reading the shelves now.' : 'Link removed.') }),
         info.linked ? el('button', { class: 'btn', type: 'button', disabled: info.busy, text: 'Read shelves now', onclick: () => send({ sync: true }, 'Reading the shelves now.') }) : null,
         info.linked ? el('button', { class: 'btn', type: 'button', text: 'Remove link',
-            onclick: () => { if (window.confirm('Remove the Goodreads link? Reading history already taken from it stays; the "Available on Kindle" books from it are no longer listed.')) send({ link: '' },
+            onclick: async () => { if (await ask('Remove the Goodreads link? Reading history already taken from it stays; the "Available on Kindle" books from it are no longer listed.', { yes: 'Remove link', danger: true })) send({ link: '' },
             'Link removed.'); } }) : null),
       el('div', { class: 'row end' }, field('Or import a Goodreads export file (.csv)', file),
         el('button', { class: 'btn', type: 'button', text: 'Import file', onclick: async () => {
@@ -1629,7 +1744,7 @@ function devicesBox(profileId) {
           dev.link ? el('a', { class: 'btn', href: dev.link, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + dev.name + ' in a new tab', text: 'Open' }) : null,
           el('button', { class: 'btn', type: 'button', text: 'Change', 'aria-label': 'Change ' + dev.name, onclick: () => { editing = dev; draw(); } }),
           el('button', { class: 'btn danger', type: 'button', text: 'Remove', 'aria-label': 'Remove ' + dev.name, onclick: async () => {
-            if (!window.confirm('Remove ' + dev.name + ' from the list? Books already on it stay on it.')) return;
+            if (!(await ask('Remove ' + dev.name + ' from the list? Books already on it stay on it.', { yes: 'Remove device', danger: true }))) return;
             try { await api('DELETE', '/api/devices/' + dev.id); toast('Device removed.'); draw(); } catch (err) { oops(err); }
           } }))),
       help(dev)))) : el('p', { class: 'small dim', text: 'No devices yet.' });
@@ -1667,6 +1782,7 @@ function devicesBox(profileId) {
 }
 
 async function pageDevices(id) {
+  nameThePage('Devices');
   // a bare #/devices means my own
   const profile = appState.profiles.find((candidate) => candidate.id === Number(id || appState.me.id));
   if (!profile || (!isAdmin() && profile.id !== appState.me.id)) { location.hash = '#/profiles'; return; }
@@ -1914,6 +2030,7 @@ function seriesOwn(name) {
 // Every volume of one series, in order.
 async function pageShelf(name) {
   const set = decodeURIComponent(name || '');
+  nameThePage(set);
   // Inside a series a part is called by its own title when it has one, otherwise "Volume 3", "Issue 12" and so on.
   const asPart = (book) => Object.assign({}, book, { title: book.subtitle || book.part || book.title, author: book.subtitle ? book.part : book.part ? '' : book.author });
   const body = el('div', { class: 'stack gap28' });
@@ -2020,6 +2137,24 @@ function pageLibrary(section) {
   const tabOf = () => recall('tab-' + view.section, 'all');
   const grid = el('div', { class: 'shelf' });
   const count = el('div', { class: 'dim', role: 'status' });
+  // Pick one for me: a book from the ones on screen that is in the library and not started, brought into view.
+  let pickable = [], picked = null;
+  const pickNote = el('p', { class: 'small pick-note', role: 'status' });
+  const pickBtn = el('button', { class: 'btn sm', type: 'button', hidden: true, text: 'Pick one for me', onclick: () => pickOne() });
+  function pickOne() {
+    const choices = pickable.filter(([, card]) => card !== picked);
+    if (!choices.length) return;
+    const [book, card] = choices[Math.floor(Math.random() * choices.length)];
+    if (picked) { picked.classList.remove('picked'); picked.querySelector('.readnote.pick')?.remove(); }
+    picked = card;
+    card.classList.add('picked');
+    // said on the cover too, since on a phone the sentence above is scrolled out of sight
+    card.querySelector('.coverwrap').append(el('span', { class: 'readnote going pick', 'aria-hidden': 'true', text: 'Picked for you' }));
+    card.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    pickBtn.textContent = 'Pick another';
+    fill(pickNote, 'From the ' + plural(pickable.length, 'book') + ' here you have not started: ',
+      el('a', { href: '#/book/' + book.id, text: book.title }), book.author ? ' by ' + book.author + '.' : '.');
+  }
   const orderRow = el('div', { class: 'tabs sm', role: 'radiogroup', 'aria-label': 'Order the books' });
   const sectionRow = el('div', { class: 'tabs', role: 'group', 'aria-label': 'Part of the library' });
   const tabRow = el('div', { class: 'tabs sm', role: 'group', 'aria-label': 'Kind of book' });
@@ -2027,6 +2162,9 @@ function pageLibrary(section) {
   const chipsRow = el('div', { class: 'terms', 'aria-label': 'Search terms', role: 'list' });
   const suggest = el('div', { class: 'terms suggest', role: 'group', 'aria-label': 'Tags that match what you are typing' });
   const moreTags = el('div', { class: 'row' });
+  // The tag list is folded away unless asked for (remembered), so the books come first; typing still shows the tags that match.
+  let tagsOpen = recall('tags-open', false);
+  const tagsBox = el('div', { class: 'stack gap10', id: 'lib-tags', hidden: !tagsOpen }, suggest, moreTags);
   const colourKey = el('p', { class: 'small dim colour-key' }, el('span', { text: 'Colours:' }),
     ['title', 'author', 'series', 'epub', 'community', 'family', 'mine'].map((dotKey) => el('span', {}, el('span', { class: 'dot',
         'data-k': dotKey, 'aria-hidden': 'true' }), ' ' + (dotKey === 'epub' ? 'Book file' : TERM_LABEL[dotKey]))));
@@ -2065,6 +2203,12 @@ function pageLibrary(section) {
     fill(grid, ...shown.map((item) => item.chapter_series ? chapterCard(item,
         () => loadBooks().catch(oops)) : item.volumes ? seriesStack(item, info[item.series.toLowerCase()], states[item.series.toLowerCase()],
         () => loadBooks().catch(oops)) : item.game_group ? gameStack(item) : bookCard(item, () => loadBooks().catch(oops))));
+    pickable = shown.map((item, index) => [item, grid.children[index]])
+      .filter(([item]) => !item.volumes && !item.game_group && !item.chapter_series && item.in_library && item.status !== 'finished' && item.status !== 'reading');
+    picked = null;
+    pickBtn.hidden = pickable.length < 2;
+    pickBtn.textContent = 'Pick one for me';
+    pickNote.textContent = '';
     const stacks = shown.filter((item) => item.volumes || item.game_group).length;
     const followed = shown.filter((item) => item.chapter_series).length;
     const books = shown.reduce((total, item) => total + (item.volumes ? item.volumes.length : item.game_group ? item.items.length : item.chapter_series ? 0 : 1), 0);
@@ -2149,6 +2293,7 @@ function pageLibrary(section) {
     let data;
     try { data = await api('GET', '/api/tags?' + qs(Object.assign({ kinds: kindsNow().join(','), merged: 1 }, typing ? { q: last } : {}))); } catch (err) { fill(suggest); return; }
     const chosen = (tag) => view.chips.findIndex((picked) => picked.fields.length === 1 && picked.fields[0] === 'tag' && picked.value.toLowerCase() === tag.tag.toLowerCase());
+    tagsBox.hidden = !(tagsOpen || typing);
     const list = data.tags.slice(0, typing || showAll ? 120 : TOP_TAGS);
     suggest.classList.toggle('all', typing || showAll);
     fill(suggest, ...(list.length ? nestTags(list).map((group) => nestBox(group, group.map((entry) => {
@@ -2222,16 +2367,27 @@ function pageLibrary(section) {
       refineToggle.setAttribute('aria-expanded', String(!refine.hidden)); refineToggle.textContent = refine.hidden ? 'Refine' : 'Hide refine';
     } });
 
-  setMain(
+  const tagsToggle = el('button', { class: 'btn sm', type: 'button', 'aria-expanded': String(tagsOpen), 'aria-controls': 'lib-tags',
+    text: tagsOpen ? 'Hide tags' : 'Tags', onclick: () => {
+      tagsOpen = !tagsOpen; remember('tags-open', tagsOpen);
+      tagsToggle.setAttribute('aria-expanded', String(tagsOpen)); tagsToggle.textContent = tagsOpen ? 'Hide tags' : 'Tags';
+      showSuggestions();
+    } });
+  // Keyboard users jump past the search to the books (a button: a #link would change the page).
+  Object.assign(grid, { id: 'lib-results', tabIndex: -1 });
+  grid.setAttribute('aria-label', 'Books');
+  const skipToBooks = el('button', { class: 'skip', type: 'button', text: 'Skip to the books', onclick: () => grid.focus() });
+  setMain(skipToBooks,
     pageHead('Library',
         isGuest() ? 'Browse and download. Nothing is tracked for guests.' : 'Every book: the ones on the home server, the ones you have read elsewhere and the ones the family has on Kindle. Add books to My books to have them on your devices.'),
     appState.library_available ? null : el('p', { class: 'bad', text: 'The book library could not be found. Check the CALIBRE_LIBRARY folder in the settings.' }),
     el('div', { class: 'lib-bar' }, sectionRow, tabRow, gamesLink),
     el('section', { class: 'panel cut stack lib-search', 'aria-label': 'Search the library' },
       el('div', { class: 'row end', style: 'flex-wrap:nowrap' }, field('Build your search', box, 'wide'), searchBtn),
-      el('div', { class: 'lib-tools' }, el('div', { class: 'lib-opt' }, el('span', { class: 'lab', text: 'Sort' }), orderRow), refineToggle),
-      refine, chipsRow, suggest, moreTags, waiting),
-    seriesBox, count, grid);
+      el('div', { class: 'lib-tools' }, el('div', { class: 'lib-opt' }, el('span', { class: 'lab', text: 'Sort' }), orderRow),
+        el('div', { class: 'row gap8' }, tagsToggle, refineToggle)),
+      refine, chipsRow, tagsBox, waiting),
+    seriesBox, el('div', { class: 'row between lib-count' }, count, pickBtn), pickNote, grid);
   draw();
   loadStates().then(() => loadBooks()).catch(() => { /* the badges are a nicety */ });
 }
@@ -2378,6 +2534,7 @@ function hiddenFeedBox(onChange) {
 
 // Every game book, by Game › Edition › Product line. Hidden tags still show here.
 async function pageTabletop(focusText) {
+  nameThePage('Game books');
   const focus = new URLSearchParams(decodeURIComponent(focusText || ''));
   const data = await api('GET', '/api/books?' + qs({ view: 'tabletop' }));
   const books = data.books;
@@ -2551,7 +2708,8 @@ function chapterCard(item, onChange) {
 // What a search of the reading sites found, one heading per site. after() runs once a series is followed.
 function seriesHits(data, after) {
   if (!data.sources) return [el('p', { class: 'warn', role: 'status',
-      text: 'The series server has no sources yet, so there is nowhere to search. An admin adds them in the series server itself; guide 13 shows how.' })];
+      }, 'The series server has no sources yet, so there is nowhere to search. An admin adds them in the series server itself; ',
+      guide('13-manga-and-series-by-chapter.md', 'guide 13'), ' shows how.')];
   const hits = data.groups.filter((group) => group.results.length);
   const quiet = data.groups.filter((group) => group.error).map((group) => group.source);
   return [
@@ -2647,6 +2805,7 @@ function scheduleLine(info) {
 
 async function pageSeries(id) {
   const info = await api('GET', '/api/series/' + encodeURIComponent(id));
+  nameThePage(info.title);
   const again = () => pageSeries(id).catch(oops);
   const mark = (ids, read) => api('POST', '/api/series/chapters/read', { ids, read }).then(again).catch(oops);
   const list = info.chapters_list.slice().reverse();
@@ -2670,7 +2829,8 @@ async function pageSeries(id) {
         el('div', { class: 'row' },
           info.next ? el('a', { class: 'btn pri', href: '#/read/' + info.id + '/' + info.next.order, text: (info.read ? 'Continue: ' : 'Start: ') + info.next.name }) : null,
           !canRequest() ? null : el('button', { class: 'btn', type: 'button', text: info.following ? 'Stop following' : 'Follow', onclick: async () => {
-            if (info.following && !window.confirm('Stop following ' + info.title + '? New chapters will no longer be fetched. The chapters already kept stay on the server.')) return;
+            if (info.following && !(await ask('Stop following ' + info.title + '? New chapters will no longer be fetched. The chapters already kept stay on the server.',
+                { yes: 'Stop following' }))) return;
             try { const added = await api('POST', '/api/series/' + info.id + '/follow',
                 { on: !info.following }); toast(info.following ? 'No longer following.' : 'Following. ' + plural(added.queued,
                 'chapter') + ' queued to download.'); again(); } catch (err) { oops(err); }
@@ -2826,7 +2986,7 @@ async function pageBook(id) {
     const copies = (book.copies || []).length;
     more.push(el('button', { class: 'btn danger', type: 'button', text: 'Delete this book', onclick: async () => {
       const files = (book.formats.join(', ') || 'no file') + (copies ? ' and ' + plural(copies, 'other copy', 'other copies') : '');
-      if (!window.confirm('Delete "' + book.title + '" (' + files + ') from the library for good? Its files are removed. A copy of the library\'s database is saved first, and the nightly copy (if switched on) still has the book.')) return;
+      if (!(await ask('Delete "' + book.title + '" (' + files + ') from the library for good? Its files are removed. A copy of the library\'s database is saved first, and the nightly copy (if switched on) still has the book.', { yes: 'Delete book', danger: true }))) return;
       try { const result = await api('DELETE', '/api/books/' + book.id); toast('"' + result.removed + '" was deleted.'); location.hash = '#/library'; } catch (err) { oops(err); }
     } }));
   }
@@ -2853,15 +3013,17 @@ async function pageBook(id) {
   const fs = book.from_series;
   body.append(el('section', { class: 'stack' }, head('Synopsis'),
     el('p', { class: 'synopsis' + (book.synopsis ? '' : ' dim'), text: book.synopsis || 'No synopsis in this book\'s details yet. Add one in Calibre-Web.' })));
+  // Your own reading comes first, under the synopsis; what an admin keeps for the rest of the family goes last.
+  let familyPanel = null;
   if (!guest) {
-    body.append(el('section', { class: 'stack' },
+    const shelfRow = el('div', { class: 'stack gap8' },
       el('div', { class: 'row' },
         el('button', { class: 'btn' + (book.shelf.on ? ' done' : ''), type: 'button', 'aria-pressed': String(book.shelf.on),
             text: book.shelf.on ? 'In my books ✓' : 'Add to my books', onclick: () => setShelf(id, !book.shelf.on).then(again).catch(oops) }),
         el('span', { class: 'small dim', text: book.shelf.on ? 'Listed under My books in your reading app.' : 'My books are the ones offered to your devices.' })),
-      book.shelf.devices.map((device) => deviceLine(device, id, again))));
+      book.shelf.devices.map((device) => deviceLine(device, id, again)));
     if (book.family_shelves && book.family_shelves.length) {
-      body.append(el('section', { class: 'panel cut' }, head("Other people's books"),
+      familyPanel = el('section', { class: 'panel cut' }, head("Other people's books"),
         el('p', { class: 'small dim', text: 'Admins can put this book on someone else\'s list, send it to their Kindle, and record how far they have got.' }),
         el('div', { class: 'list' }, book.family_shelves.map((shelf) => el('div', { class: 'row between' },
           el('div', { class: 'stack gap6' },
@@ -2870,23 +3032,26 @@ async function pageBook(id) {
                   text: shelf.on ? 'In ' + shelf.name + "'s books ✓" : 'Add to ' + shelf.name + "'s books", onclick: () => setShelf(id, !shelf.on,
                   { id: shelf.profile_id, name: shelf.name }).then(again).catch(oops) })),
             shelf.devices.map((device) => deviceLine(device, id, again))),
-          field('Reading status for ' + shelf.name, el('select', { onchange: (event) => post('/reading', { profile_id: shelf.profile_id, status: event.target.value }) },
-            [['none', 'Not started'], ['reading', 'Reading'], ['finished', 'Finished']].map(([key, label]) => el('option', { value: key, text: label, selected: shelf.status === key })))))))));
+          field('Reading status for ' + shelf.name, el('select', { onchange: (event) => api('POST', '/api/books/' + id + '/reading',
+              { profile_id: shelf.profile_id, status: event.target.value }).then((got) => { if (got.finished) finishedToast(got.finished, book.title); again(); }).catch(oops) },
+            [['none', 'Not started'], ['reading', 'Reading'], ['finished', 'Finished']].map(([key, label]) => el('option', { value: key, text: label, selected: shelf.status === key }))))))));
     }
     const waiting = book.shelf.devices.concat(...(book.family_shelves || []).map((person) => person.devices)).some((device) => device.state === 'queued');
     if (!waiting) sendPolls = 0;
     else if (sendPolls++ < 12) setTimeout(() => { if (location.hash === '#/book/' + id) again(); }, 5000);
     const pct = el('input', { type: 'number', min: 0, max: 100, value: Math.round(book.percent || 0) });
-    body.append(el('section', { class: 'stack' },
+    body.append(el('section', { class: 'stack my-reading', 'aria-label': 'My reading' }, head('My reading'),
       book.status === 'reading' ? el('div', { style: 'max-width:480px' }, bar(book.percent, Math.round(book.percent) + ' percent read')) : null,
       el('p', { class: 'small dim',
           text: book.status === 'finished' ? 'Finished ' + niceDate(book.finished) : (book.status === 'reading' ? Math.round(book.percent) + '% read' + (book.device ? ' · last read on ' + book.device : '') : 'Not started') }),
       el('div', { class: 'row end', role: 'group', 'aria-label': 'Reading status' },
         el('button', { class: 'chip', type: 'button', 'aria-pressed': String(book.status === 'none'), text: 'Not started', onclick: () => post('/reading', { status: 'none' }) }),
         el('button', { class: 'chip', type: 'button', 'aria-pressed': String(book.status === 'reading'), text: 'Reading', onclick: () => post('/reading', { status: 'reading' }) }),
-        el('button', { class: 'chip', type: 'button', 'aria-pressed': String(book.status === 'finished'), text: 'Finished', onclick: () => post('/reading', { status: 'finished' }) }),
+        el('button', { class: 'chip', type: 'button', 'aria-pressed': String(book.status === 'finished'), text: 'Finished',
+          onclick: () => api('POST', '/api/books/' + id + '/reading', { status: 'finished' }).then((got) => { if (got.finished) finishedToast(got.finished, book.title); again(); }).catch(oops) }),
         el('div', { class: 'field', style: 'max-width:140px' }, el('label', { class: 'lab', for: 'pct', text: 'My place (%)' }), Object.assign(pct, { id: 'pct' })),
-        el('button', { class: 'btn', type: 'button', text: 'Set my place', onclick: () => post('/reading', { percent: Number(pct.value) }) }))));
+        el('button', { class: 'btn', type: 'button', text: 'Set my place', onclick: () => post('/reading', { percent: Number(pct.value) }) })),
+      shelfRow));
   }
   if (!guest) {
     body.append(el('section', { class: 'panel cut' }, el('div', { class: 'cols' },
@@ -2942,8 +3107,10 @@ async function pageBook(id) {
       !guest && fs.rating ? el('p', { class: 'small', text: 'Series rating: ' + fs.rating + ' of 5' }) : null));
   }
   body.append(similarList('Similar books', sim.books));
+  if (familyPanel) body.append(familyPanel);
   setMain(back('#/library', 'Back to the library'),
     el('div', { class: 'detail' }, side, body));
+  nameThePage(book.title);
 }
 
 function similarList(title, books) {
@@ -2977,12 +3144,13 @@ function dashTabs(active, reload) {
   } });
   return el('div', { class: 'row between', style: 'align-items:center' },
     el('nav', { class: 'tabs', 'aria-label': 'Dashboard views' },
-      el('a', { href: '#/dashboard', 'aria-current': active === 'me' ? 'page' : null, text: 'Personal' }),
+      el('a', { href: '#/dashboard', 'aria-current': active === 'me' ? 'page' : null, text: 'My reading' }),
       el('a', { href: '#/mybooks', 'aria-current': active === 'mybooks' ? 'page' : null, text: 'My books' })),
     btn);
 }
 // Dashboard, My books: what is on my list and my devices, what I am reading, what I have finished.
 async function pageMyBooks() {
+  nameThePage('My books');
   const [shelf, mine, reading, read] = await Promise.all([api('GET', '/api/me/shelf'), api('GET', '/api/books?filter=shelf'),
     api('GET', '/api/books?filter=reading'), api('GET', '/api/books?filter=read')]);
   const again = () => pageMyBooks().catch(oops);
@@ -2997,7 +3165,7 @@ async function pageMyBooks() {
     appBox,
     comicsBox,
     el('section', { class: 'panel cut' }, head('On my devices', el('a', { class: 'btn', href: '#/devices/' + appState.me.id, text: 'Add or change devices' })),
-      shelf.devices.length ? null : el('p', { class: 'small warn', text: 'You have no devices yet. Add one and the books on your list are offered to it.' }),
+      shelf.devices.length ? null : el('p', { class: 'small dim', text: 'You have no devices yet. Add one and the books on your list are offered to it.' }),
       apps.length ? el('p', { class: 'small dim',
           text: apps.join(' and ') + (apps.length === 1 ? ' fetches' : ' fetch') + ' these from the catalogue under My books. "For your reading app" above shows which ones have been downloaded.' }) : null,
       mine.books.length ? el('div', { class: 'list' }, mine.books.map((book) => {
@@ -3131,7 +3299,8 @@ setInterval(() => { if (!document.hidden) checkMaking(); }, 10000);
 
 // A number tile. empty: a sentence shown instead of a big 0.
 function tile(label, num, note, empty) {
-  if (empty && !num) return el('div', { class: 'tile cut empty' }, el('div', { class: 'lab', text: label }), el('p', { class: 'dim', text: empty }));
+  if (empty && !num) return el('div', { class: 'tile cut empty' }, el('div', { class: 'lab', text: label }), el('div', { class: 'num glow', text: '0' }),
+    el('div', { class: 'small dim', text: empty }));
   return el('div', { class: 'tile cut' }, el('div', { class: 'lab', text: label }), el('div', { class: 'num glow', text: num }), el('div', { class: 'small dim', text: note || '' }));
 }
 function barList(title, rows, color) {
@@ -3142,6 +3311,37 @@ function barList(title, rows, color) {
       el('div', { class: 'meter', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.round(100 * count / max) + '%;background:' + color }))))
       : el('p', { class: 'small dim', text: 'Nothing yet this year.' }));
 }
+
+// The year as a shelf: one spine per finished book, left to right in the order they were finished, a month's
+// bookend between months. Thicker spines for longer books; books read elsewhere carry the trend chart's stripes.
+function yearShelf(stats) {
+  const books = stats.shelf || [];
+  const longest = Math.max(1, ...books.map((book) => book.pages || 0));
+  let month = 0;
+  const slots = books.map((book) => {
+    // a month's bookend travels with its first book, so a row never ends on a bookend with nothing after it
+    const finished = Number((book.finished || '').slice(5, 7));
+    const bookend = finished && finished !== month ? el('span', { class: 'bookend', 'aria-hidden': 'true', text: MONTHS[finished - 1] }) : null;
+    if (bookend) month = finished;
+    // 24 to 56 pixels across (24 is the smallest a finger or pointer target should be), by page count against the
+    // year's longest; an unknown length stands in the middle
+    const width = book.pages ? Math.round(24 + 32 * Math.sqrt(book.pages / longest)) : 32;
+    const label = book.title + (book.author ? ', ' + book.author : '') + (book.finished && book.finished.length === 10 ? ', finished ' + niceDate(book.finished) : '')
+      + (book.in_library ? '' : ', read elsewhere');
+    const look = '--cv:' + coverColor(book.title) + ';--w:' + width + 'px;--h:' + (100 + (titleHash(book.title) % 33)) + 'px';
+    const spine = [el('span', { class: 'spine-t', text: book.title })];
+    return el('span', { role: 'listitem', class: 'slot' }, bookend, book.id
+      ? el('a', { class: 'spine', href: '#/book/' + book.id, style: look, title: label, 'aria-label': label }, spine)
+      : el('span', { class: 'spine away', role: 'img', tabindex: '0', style: look, title: label, 'aria-label': label }, spine));
+  });
+  return el('section', { class: 'panel cut' }, head('Your ' + stats.year + ' shelf', books.length ? el('span', { class: 'small dim', text: plural(books.length, 'spine') }) : null),
+    books.length ? el('div', { class: 'yearshelf', role: 'list', 'aria-label': 'Books finished in ' + stats.year + ', in order' },
+      slots)
+      : el('p', { class: 'small dim', text: 'Nothing on the shelf yet. Each book you finish this year stands here, in the order you finished them.' }),
+    books.length ? el('p', { class: 'small dim', text: 'Longer books stand thicker. Striped spines were read outside the family library.' }) : null);
+}
+
+function titleHash(title) { let hash = 7; for (const char of title || '') hash = (hash * 33 + char.charCodeAt(0)) >>> 0; return hash; }
 
 async function pageDashboard() {
   const view = { kind: '', value: '', metric: 'books' };
@@ -3208,7 +3408,7 @@ async function pageDashboard() {
     } })) : null);
 
   setMain(
-    pageHead('Your reading', 'Family library and everything read elsewhere · ' + base.year + ' so far'),
+    pageHead('My reading', 'Family library and everything read elsewhere · ' + base.year + ' so far'),
     dashTabs('me', () => pageDashboard()),
     el('div', { class: 'tiles' },
       tile('Books read this year', base.read_books,
@@ -3219,6 +3419,7 @@ async function pageDashboard() {
       tile('Read this month', base.read_month, plural(base.month_books, 'book') + ' · ' + plural(base.month_graphic, 'graphic novel volume'), 'Nothing finished yet this month.'),
       tile('Pages read this year', base.pages_year.toLocaleString(), base.pages_unknown ? plural(base.pages_unknown, 'book') + ' without a page count' : 'From finished books'),
       tile('Authors read this year', base.authors_year, '', 'No named authors yet; books with an unknown author are not counted.')),
+    yearShelf(base),
     trend,
     el('div', { class: 'cols3' },
       barList('Top book file tags', base.top.epub, 'var(--accent)'), barList('Top community tags', base.top.community, 'var(--accent2)'),
@@ -3273,7 +3474,10 @@ function kindlePanel() {
       : book.status === 'reading' ? 'Reading' : 'Not started';
     const days = book.days.length ? 'Read on ' + book.days.map(shortDay).join(', ')
       : book.status === 'reading' ? 'Started before ' + shortDay(book.first_seen) + '; no reading since' : '';
-    const mark = (finished) => api('POST', '/api/me/kindle/' + book.asin + '/finished', { finished }).then((got) => { toast(finished ? 'Marked finished.' : 'Marked not finished.'); draw(got); }).catch(oops);
+    const mark = (finished) => api('POST', '/api/me/kindle/' + book.asin + '/finished', { finished }).then((got) => {
+      if (finished) finishedToast(got.finished, book.title); else toast('Marked not finished.');
+      draw(got);
+    }).catch(oops);
     return el('div', { class: 'row between gap8' },
       el('div', { class: 'stack gap4 grow' },
         el('strong', { class: 'wrap', text: book.title }),
@@ -3325,13 +3529,13 @@ function serverCard(sv, reload) {
           { class: sv.series.sources ? 'ok' : 'warn', text: sv.series.sources ? 'Connected · ' + plural(sv.series.sources,
           'source') : 'Connected, but it has no sources yet' }) : status(false, '', 'Not reachable')) : el('span', { class: 'dim',
           text: 'Not set up' })),
-      el('div', { class: 'row between' }, 'Finished-downloads folder', status(sv.downloads_folder, 'Found', 'Not set up')),
+      el('div', { class: 'row between' }, 'Finished-downloads folder', sv.downloads_folder ? status(true, 'Found', '') : el('span', { class: 'dim', text: 'Not set up' })),
       el('div', { class: 'row between' }, 'Inbox for new files', sv.inbox_waiting === null ? el('span', { class: 'dim',
           text: 'Not set up' }) : el('span', { class: 'ok', text: sv.inbox_waiting ? plural(sv.inbox_waiting, 'file') + ' waiting' : 'Empty' })),
       el('div', { class: 'row between' }, 'Library import folder', sv.ingest_folder ? (sv.ingest_stuck ? el('span', { class: 'warn',
           text: plural(sv.ingest_stuck,
           'file') + ' waiting longer than usual. Family Hub has asked Calibre-Web to look again; if this stays, restart Calibre-Web.' }) : el('span',
-          { class: 'ok', text: sv.ingest_waiting ? plural(sv.ingest_waiting, 'file') + ' being added' : 'Found' })) : el('span', { class: 'warn',
+          { class: 'ok', text: sv.ingest_waiting ? plural(sv.ingest_waiting, 'file') + ' being added' : 'Found' })) : el('span', { class: 'dim',
           text: 'Not set up' })),
       el('div', { class: 'row between' }, 'Guest access', el('span', { class: 'dim', text: sv.remote_guest_blocked ? 'Home network only' : 'Anywhere' }))),
     el('div', { class: 'row' }, el('button', { class: 'btn sm', type: 'button', text: 'Rescan library and tag packs',
@@ -3353,6 +3557,8 @@ async function pageHubAdmin() {
     setupFileCard(conn.in_file),
     el('div', { class: 'cols' }, serverCard(stats.services, reload),
       el('section', { class: 'panel cut' }, head('Copies to a second disk'), secondCopyLines(stats.services.second_copy, reload))));
+  const unset = conn.groups.filter((group) => !group.fields.some((setting) => setting.set && setting.source !== 'default')).length;
+  jumpBar({ Connections: unset ? unset + ' not set up' : '' });
 }
 
 // A program's address as this device can reach it: the saved one, or this page's address with the program's port.
@@ -3525,11 +3731,16 @@ function profilesCard(stats) {
           el('td', {}, el('div', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' },
             el('a', { class: 'btn sm', href: '#/devices/' + person.id, 'aria-label': 'Devices for ' + person.name, text: 'Devices' }),
             el('button', { class: 'btn sm', type: 'button', text: 'Reset passcode',
-                onclick: () => { const passcode = window.prompt('New passcode for ' + person.name + ' (leave empty to remove it):',
-                ''); if (passcode !== null) patch(person.id, { passcode: passcode },
-                passcode ? 'Passcode updated.' : person.name + ' has no passcode now.'); } }),
+                onclick: async () => {
+                  const answer = await ask('Choose a new passcode for ' + person.name + '. Tell them what it is; it is not shown again.',
+                    { title: 'Reset passcode', yes: 'Set passcode', passcode: { removable: true } });
+                  if (!answer) return;
+                  if (answer.remove && !(await ask('Remove ' + person.name + '\'s passcode? Anyone using this hub could then open their profile.',
+                    { yes: 'Remove passcode', danger: true }))) return;
+                  patch(person.id, { passcode: answer.remove ? '' : answer.set }, answer.remove ? person.name + ' has no passcode now.' : 'Passcode updated.');
+                } }),
             person.id === appState.me.id ? null : el('button', { class: 'btn sm danger', type: 'button', text: 'Delete', onclick: async () => {
-              if (!window.confirm('Delete ' + person.name + ' and their ratings, tags and reading history? A backup is saved first.')) return;
+              if (!(await ask('Delete ' + person.name + ' and their ratings, tags and reading history? A backup is saved first.', { yes: 'Delete ' + person.name, danger: true }))) return;
               try { await api('DELETE', '/api/profiles/' + person.id); toast('Profile deleted.'); route(); } catch (err) { oops(err); }
             } }))));
       })))),
@@ -3544,6 +3755,7 @@ function profilesCard(stats) {
 
 // Admin, Books: the library, its tidying, the family's reading, and the book data backup.
 async function pageBooksAdmin() {
+  nameThePage('Books admin');
   const stats = await api('GET', '/api/stats/admin');
   const reload = () => pageBooksAdmin().catch(oops);
   const file = el('input', { type: 'file', accept: 'application/json,.json' });
@@ -3584,6 +3796,7 @@ async function pageBooksAdmin() {
           const fd = new FormData(); fd.append('file', file.files[0]);
           try { const result = await api('POST', '/api/admin/import', fd); toast('Imported data for ' + plural(result.books, 'book') + '.'); reload(); } catch (err) { oops(err); }
         } })))));
+  jumpBar();
 }
 
 // The whole setup in one zip locked with a passphrase, to set up or rebuild the server (setupfile.py).
@@ -3688,6 +3901,7 @@ function tagsCard(tags) {
 }
 
 async function pageTags() {
+  nameThePage('Tidy tags');
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
   const tags = await api('GET', '/api/admin/tags');
   const again = () => pageTags().catch(oops);
@@ -3756,7 +3970,7 @@ function tagMergePanel() {
     const preview = await api('POST', '/api/admin/tags/merge/preview', { tags: names, keep });
     if (!preview.names.length) { toast('Choose at least one other tag to merge into "' + keep + '".', true); return; }
     const from = preview.names.map((name) => '"' + name + '"').join(', ');
-    if (!window.confirm('Merge ' + from + ' into "' + keep + '"? ' + mergeSentence(preview))) return;
+    if (!(await ask('Merge ' + from + ' into "' + keep + '"? ' + mergeSentence(preview), { yes: 'Merge tags' }))) return;
     await api('POST', '/api/admin/tags/merge', { tags: preview.names, keep });
     toast('Merged into "' + keep + '".');
     pageTags().catch(oops);  // the tag list below changes too
@@ -3877,6 +4091,7 @@ function detailsCard() {
 // One book at a time: what its files say, matches from Open Library and Google Books, and a form to type the
 // details in. The library manager makes the change, after a copy of the library's database.
 async function pageDetails() {
+  nameThePage('Books without real details');
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
   const data = await api('GET', '/api/admin/book-details');
   const gen = routeGen;
@@ -4117,6 +4332,7 @@ function peekPane(bookId, marker) {
 
 // "Edit details" for one book from anywhere: the same editor as the queue, with the book open beside it.
 async function pageFix(bookId) {
+  nameThePage('Fix a book');
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
   setMain(back('#/book/' + bookId, 'Back to the book'),
     pageHead('Edit details', 'Look inside the book and put its details right. Saving changes the library entry through Calibre-Web, after a copy of the '
@@ -4165,10 +4381,11 @@ function reviewPanel(only) {
       : 'Getting ready to sort the library again…') : 'Writing ' + job.done + ' of ' + plural(job.total, 'book') + ' to the library…';
     fill(jobArea, el('p', { class: 'small', role: 'status', text: words }), bar(job.total ? 100 * job.done / job.total : 2, words));
   }
-  function resort(event) {
-    if (!window.confirm('Sort every book in the library again? Books whose kind someone chose are left as they are. Reading the first pages of every PDF takes a while; '
-      + 'the suggestions fill in when it is done.')) return;
-    event.currentTarget.disabled = true;
+  async function resort(event) {
+    const button = event.currentTarget;
+    if (!(await ask('Sort every book in the library again? Books whose kind someone chose are left as they are. Reading the first pages of every PDF takes a while; '
+      + 'the suggestions fill in when it is done.', { yes: 'Sort again' }))) return;
+    button.disabled = true;
     api('POST', '/api/admin/review/resort').then((answer) => { data.job = answer.job; watch(); }).catch(oops);
   }
 
@@ -4179,9 +4396,9 @@ function reviewPanel(only) {
     drawList();
     load();
   }
-  function confirmAll(item, fields) {
-    if (!window.confirm('Confirm all ' + item.batch_size + ' books like this? Each keeps its own title and number; the game, edition, role, kind, publisher, '
-      + 'language and tags you see here go on all of them. The library database is copied first.')) return;
+  async function confirmAll(item, fields) {
+    if (!(await ask('Confirm all ' + item.batch_size + ' books like this? Each keeps its own title and number; the game, edition, role, kind, publisher, '
+      + 'language and tags you see here go on all of them. The library database is copied first.', { yes: 'Confirm all ' + item.batch_size }))) return;
     api('POST', '/api/admin/review/' + item.book_id, { action: 'confirm_all', batch: item.batch, fields, new_game: item.new_game })
       .then((answer) => { data.job = answer.job; watch(); }).catch(oops);
   }
@@ -4314,9 +4531,10 @@ function reviewPanel(only) {
         el('button', { class: 'btn sm', type: 'button', text: 'Edit', 'aria-label': 'Edit ' + item.title, onclick: () => row.replaceWith(itemCard(item, true)) }));
       return row;
     }));
-    const write = (event) => {
-      if (!window.confirm('Write ' + plural(group.count, 'book') + ' to the library? The library database is copied first.')) return;
-      event.currentTarget.disabled = true;
+    const write = async (event) => {
+      const button = event.currentTarget;
+      if (!(await ask('Write ' + plural(group.count, 'book') + ' to the library? The library database is copied first.', { yes: 'Write to the library' }))) return;
+      button.disabled = true;
       api('POST', '/api/admin/review/ready/' + group.rule).then((answer) => { data.job = answer.job; watch(); }).catch(oops);
     };
     return el('div', { class: 'rv stack rv-ready' },
@@ -4366,6 +4584,7 @@ function reviewPanel(only) {
 // Learned rules: what confirming and rejecting taught the sorter, in plain words. Rules that say nearly the
 // same thing are offered as one; nothing is combined until an admin says so.
 async function pageRules() {
+  nameThePage('Learned rules');
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
   const data = await api('GET', '/api/admin/review/rules');
   const again = () => pageRules().catch(oops);
@@ -4386,9 +4605,10 @@ async function pageRules() {
     } }))));
   const rules = data.rules.map((rule) => el('div', { class: 'stack gap8' },
     el('div', { class: 'row between gap8' }, el('strong', { style: 'flex:1 1 320px;min-width:0', text: rule.words }),
-      el('button', { class: 'btn sm danger', type: 'button', text: 'Delete', 'aria-label': 'Delete the rule: ' + rule.words, onclick: (event) => {
-        if (!window.confirm('Delete this rule? Books it sorted keep their sort; new ones like them will wait in the queue again.')) return;
-        event.currentTarget.disabled = true;
+      el('button', { class: 'btn sm danger', type: 'button', text: 'Delete', 'aria-label': 'Delete the rule: ' + rule.words, onclick: async (event) => {
+        const button = event.currentTarget;
+        if (!(await ask('Delete this rule? Books it sorted keep their sort; new ones like them will wait in the queue again.', { yes: 'Delete rule', danger: true }))) return;
+        button.disabled = true;
         api('DELETE', '/api/admin/review/rules/' + rule.id).then(() => { toast('Rule deleted.'); again(); }).catch(oops);
       } })),
     el('p', { class: 'small dim', text: 'From ' + plural(rule.confirmations, 'confirmation') + (rule.note ? ' (' + rule.note + ')' : '') + ', ' + niceDate(rule.created) + '.' }),
@@ -4453,7 +4673,7 @@ function spareEntry(book, extra) {
         target: '_blank', rel: 'noopener', text: 'Open in Calibre-Web' }) : null, extra || null));
 }
 function spareCopiesCard(data, again) {
-  const run = (body, sure) => { if (!window.confirm(sure)) return; api('POST', '/api/admin/duplicates', body).then(() => { toast('Started. This page follows it.'); again(); }).catch(oops); };
+  const run = async (body, sure) => { if (!(await ask(sure, { yes: 'Go ahead' }))) return; api('POST', '/api/admin/duplicates', body).then(() => { toast('Started. This page follows it.'); again(); }).catch(oops); };
   const busy = data.job.running;
   if (busy) setTimeout(() => { if (location.hash.startsWith('#/copies')) again(); }, 3000);
   const of = (cls) => data.sets.filter((set) => set.cls === cls);
@@ -4691,6 +4911,7 @@ function dupGo(key, again) {
 }
 
 async function pageCopies() {
+  nameThePage('Spare copies');
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
   const [copies, spares, queue] = await Promise.all([api('GET', '/api/admin/copies'), api('GET', '/api/admin/duplicates'), api('GET', '/api/admin/duplicates/queue')]);
   const again = () => pageCopies().catch(oops);
@@ -4715,7 +4936,7 @@ async function pageCopies() {
     head('How Family Hub shows them meanwhile'),
     el('section', { class: 'panel cut' }, head(plural(one.length, 'book') + ' shown as one'),
       el('p', { class: 'small dim',
-          text: 'The copy marked Shown is the one people download: the one with a cover, an EPUB and the larger file. A format that only another copy has is offered too. To remove spare copies for good, use the card above, or delete one by hand in Calibre-Web.' }),
+          text: 'The copy marked Shown is the one people download: the one with a cover, an EPUB and the larger file. A format that only another copy has is offered too. To remove spare copies for good, use the queue at the top of this page, or delete one by hand in Calibre-Web.' }),
       one.length ? el('div', { class: 'list' }, one.map((group) => block(group, el('button', { class: 'btn', type: 'button',
           text: 'Keep apart', 'aria-label': 'Keep apart: ' + group.title, onclick: () => choose(group.key, 'apart', 'Shown as separate books.') }))))
         : el('p', { class: 'small dim', text: 'No book is in the library twice.' })),
@@ -4770,6 +4991,7 @@ function attentionCard(stats, reload) {
 // ------------------------------------------------------- sort the library
 
 async function pageSort() {
+  nameThePage('Sort the library');
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
   const view = { kind: 'Unsorted', q: '' };
   const picked = new Set();
@@ -4778,6 +5000,7 @@ async function pageSort() {
   const kindRow = el('div', { class: 'row', role: 'group', 'aria-label': 'Kind to show' });
   const toKind = el('select', {}, el('option', { value: '', text: 'Leave as it is' }), appState.kinds.map((kind) => el('option', { value: kind, text: kind })));
   const tag = el('input', { type: 'text', maxlength: 60 });
+  const apply = el('button', { class: 'btn pri', type: 'submit', text: 'Apply to selected', disabled: true });
   let shown = [];
 
   async function load() {
@@ -4797,7 +5020,9 @@ async function pageSort() {
             onchange: (event) => { if (event.target.checked) picked.add(item.id); else picked.delete(item.id); drawTable(); } })),
         el('th', { scope: 'row', class: 'plain' }, el('a', { href: '#/book/' + item.id, text: item.title })),
         el('td', { text: item.author }), el('td', { text: item.formats.join(' · ') }), el('td', { class: 'small', text: item.tags.family.join(', ') })))))
-      : el('p', { class: 'dim', text: 'No books of this kind.' }));
+      : el('p', { class: 'dim', text: view.q ? 'No books of this kind match.' : view.kind === 'Unsorted'
+        ? 'Nothing left to sort: every book has a kind. Pick a kind above to move some.' : 'No books of this kind.' }));
+    apply.disabled = !picked.size;
   }
   function draw() {
     fill(kindRow, ...appState.kinds.map((kind) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(view.kind === kind),
@@ -4817,7 +5042,7 @@ async function pageSort() {
         const result = await api('POST', '/api/books/kind', { ids: Array.from(picked), kind: toKind.value, tag: tag.value });
         toast(plural(result.updated, 'book') + ' updated.'); picked.clear(); tag.value = ''; load().catch(oops);
       } catch (err) { oops(err); }
-    } }, field('Set kind to', toKind), field('Add family tag (optional)', tag), el('button', { class: 'btn pri', type: 'submit', text: 'Apply to selected' })),
+    } }, field('Set kind to', toKind), field('Add family tag (optional)', tag), apply),
     count, table);
   draw();
 }
@@ -5059,15 +5284,22 @@ async function pageDiscover(prefill) {
       : el('p', { class: 'small dim', text: 'Nothing new right now.' }));
   }
 
+  if (!appState.discover_configured) {
+    searchBox.disabled = !withSites;
+    searchBox.setAttribute('aria-describedby', 'discover-off');
+  }
   setMain(
-    pageHead('Discover', 'Find new books, send them to the download client, and follow authors and tags.'),
+    pageHead('Discover', canRequest() ? 'Find new books, send them to the download client, and follow authors and tags.'
+      : 'What to read next: books like the ones you enjoyed, and the authors and tags you follow.'),
     canRequest() ? el('section', { class: 'panel cut' }, head('Search for a book'),
-      appState.discover_configured ? null : el('p', { class: 'warn' }, 'Book search is not set up yet. ', isAdmin() ? el('a',
+      appState.discover_configured ? null : el('p', { class: 'small dim', id: 'discover-off' }, 'Book search is not set up yet. ', isAdmin() ? el('a',
           { href: '#/admin',
-          text: 'Add the Prowlarr address and API key under Admin, Hub, Connections.' }) : 'Ask an admin to add the Prowlarr address and API key.'),
+          text: 'Add the Prowlarr address and API key under Admin, Hub, Connections.' }) : 'An admin can switch it on.'),
       withSites ? scope : null,
-      el('form', { class: 'row end', onsubmit: (event) => { event.preventDefault(); search(); } }, field('Title or author', searchBox,
-          'wide'), el('button', { class: 'btn pri', type: 'submit', text: 'Search' })),
+      // With nothing to search, the box and button say so rather than failing when pressed (reading sites still work without it).
+      el('form', { class: 'row end', onsubmit: (event) => { event.preventDefault(); search(); } }, field('Title or author', searchBox, 'wide'),
+        el('button', { class: 'btn pri', type: 'submit', text: 'Search', disabled: !appState.discover_configured && !withSites,
+          'aria-describedby': appState.discover_configured ? null : 'discover-off' })),
       sites, results) : el('p', { class: 'dim', text: 'This profile can browse suggestions but cannot download new books. Ask an admin to find one for you.' }),
     likeBox, authorBox, recBox, mangaBox,
     el('section', { class: 'panel cut' }, head("Similar to books you've read"), el('p', { class: 'small dim', text: 'Matches share tags or an author with the book you pick.' }), simBox),

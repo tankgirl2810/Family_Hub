@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import zipfile
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,28 @@ def test_restricted_profile(client):
     assert client.post("/api/profiles", json={"name": "X"}).status_code == 403
 
 
+def test_finishing_a_book_says_where_it_comes_in_the_year(client):
+    login(client, "You")
+    emma = book_id(client, "Emma")  # not started by You; You have finished 9 this year
+    done = client.post("/api/books/%d/reading" % emma, json={"status": "finished"}).get_json()
+    assert done["finished"] == {"count": 10, "year": date.today().year, "name": None}
+    # pressing Finished again is not another book
+    assert "finished" not in client.post("/api/books/%d/reading" % emma, json={"status": "finished"}).get_json()
+    # reading on, or a place set, says nothing
+    assert "finished" not in client.post("/api/books/%d/reading" % book_id(client, "Dracula"), json={"status": "reading"}).get_json()
+    # an admin recording someone else's finish hears whose count it is
+    nan = next(p["id"] for p in client.get("/api/state").get_json()["profiles"] if p["name"] == "Nan")
+    client.post("/api/books/%d/reading" % emma, json={"profile_id": nan, "status": "none"})
+    theirs = client.post("/api/books/%d/reading" % emma, json={"profile_id": nan, "status": "finished"}).get_json()["finished"]
+    assert theirs["name"] == "Nan" and theirs["count"] >= 1
+
+
+def test_state_says_whether_downloads_are_set_up(app, client):
+    assert client.get("/api/state").get_json()["media"]["downloads"] is False
+    app.hub.config.qbit_url = "http://gluetun:8080"
+    assert client.get("/api/state").get_json()["media"]["downloads"] is True
+
+
 def test_personal_and_admin_stats(client):
     login(client, "You")
     s = client.get("/api/stats/me").get_json()
@@ -148,6 +171,19 @@ def test_personal_and_admin_stats(client):
     assert a["total"] == 12 and a["added_year"] == 12
     assert a["read_year"] == 9 + 1 + 3
     assert {f["name"] for f in a["family"]} == {"You", "Partner", "Nan"}
+
+
+def test_the_year_shelf_has_every_book_finished_this_year_oldest_first(client):
+    login(client, "You")
+    s = client.get("/api/stats/me").get_json()
+    shelf = s["shelf"]
+    assert len(shelf) == s["read_year"] == 9  # every one, not the eight of "recently finished"
+    assert [book["finished"] for book in shelf] == sorted(book["finished"] for book in shelf)
+    assert sum(1 for book in shelf if book["in_library"]) == s["read_library"]
+    assert all(book["id"] for book in shelf if book["in_library"]) and not any(book["id"] for book in shelf if not book["in_library"])
+    assert set(shelf[0]) == {"title", "author", "pages", "finished", "id", "in_library", "graphic"}
+    # a filter narrows the trend, never the shelf
+    assert len(client.get("/api/stats/me?kind=author&value=Charlotte%20Bronte").get_json()["shelf"]) == 9
 
 
 def test_graphic_novels_read_are_counted_apart_from_books(app, client):
@@ -3061,6 +3097,13 @@ def test_visuals_run_in_a_sealed_frame_with_their_libraries(app, client):
     login(client, "Nan")
     v = client.get("/api/state").get_json()["visuals"]
     assert v == {"version": "builtin", "place": {"name": "Home", "lat": 51.5, "lon": -0.12}}
+
+
+def test_the_font_can_be_used_inside_the_sealed_visuals_frame(client):
+    # the frame's origin is "null", so without this header the browser refuses the font in there
+    font = client.get("/static/fonts/archivo-normal-latin.woff2")
+    assert font.status_code == 200 and font.headers["Access-Control-Allow-Origin"] == "*"
+    assert "Access-Control-Allow-Origin" not in client.get("/static/app.js").headers
 
 
 def test_new_visuals_are_picked_up_from_github(app, client, monkeypatch):

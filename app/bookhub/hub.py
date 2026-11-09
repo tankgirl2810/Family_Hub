@@ -453,6 +453,9 @@ class Hub:
             "authors": author_counts.most_common(8),
             "reading_now": reading_now,
             "recent": _grouped(finished)[:8],
+            # the Dashboard's shelf: one spine per book finished this year, left to right in the order they were finished
+            "shelf": [{field: item[field] for field in ("title", "author", "pages", "finished", "id", "in_library", "graphic")}
+                      for item in reversed(finished)],
         }
 
     def admin_stats(self):

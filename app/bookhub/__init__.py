@@ -3,7 +3,7 @@ import secrets
 from datetime import timedelta
 from pathlib import Path
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 from . import looks
 from .config import Config
@@ -75,6 +75,14 @@ def create_app(config=None):
         # "cross-site" to the browser. hence the wildcard
         reply.headers["Access-Control-Allow-Origin"] = "*"
         reply.headers["X-Content-Type-Options"] = "nosniff"
+        return reply
+
+    # The Home visuals' frame is sandboxed, so its origin is "null" and the browser asks for CORS before it
+    # will use our own font in there. The font is public, so anyone may have it.
+    @app.after_request
+    def fonts_for_frames(reply):
+        if request.path.startswith("/static/fonts/"):
+            reply.headers["Access-Control-Allow-Origin"] = "*"
         return reply
 
     @app.teardown_appcontext
