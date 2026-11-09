@@ -6,8 +6,8 @@ from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 
-from . import (bookfix, calibre, catalogues, covers, db, devices, duplicates, goodreads, intake, kinds, librarymanager, media, mediasort,
-               peek, readers, review, secondcopy, series, settings, tabletop, tagmerge, tags)
+from . import (bookfix, calibre, catalogues, covers, db, devices, duplicates, goodreads, identify, intake, kinds, librarymanager, media, mediasort,
+               peek, readers, review, secondcopy, series, settings, tabletop, tagmerge, tags, tagsync)
 
 TAG_WEIGHTS = {"family": 3, "mine": 3, "community": 2, "epub": 1}
 SAME_AUTHOR_WEIGHT = 2
@@ -57,6 +57,8 @@ class Hub:
         self.duplicates = duplicates.Duplicates(self)
         self.sorter = mediasort.Sorter(self)
         self.bookfix = bookfix.BookFix(self)
+        self.identify = identify.Identify(self)  # finding out what books really are; see identify.py
+        self.tagsync = tagsync.TagSync(self)  # the tags shown, written back into the library; see tagsync.py
         self.review = review.Review(self)  # the review queue and learned rules, see review.py
         self.ingest_stuck = 0  # files the library manager had to be reminded about, last time we looked
         self._backup_lock = threading.Lock()
@@ -112,6 +114,10 @@ class Hub:
         # family and personal tags are typed by people, so the admin's tidying rules never touch them
         for row in con.execute("SELECT book_key, tag FROM family_tags ORDER BY tag"):
             index[row["book_key"]]["family"].append(row["tag"])
+        for groups in index.values():  # tags written back into the library (tagsync.py) are shown once, where they came from
+            others = {tag.lower() for tag in groups["community"] + groups["family"]}
+            if others:
+                groups["epub"] = [tag for tag in groups["epub"] if tag.lower() not in others]
         if profile_id:
             for row in con.execute("SELECT book_key, tag FROM personal_tags WHERE profile_id=? ORDER BY tag", (profile_id,)):
                 index[row["book_key"]]["mine"].append(row["tag"])
@@ -1034,6 +1040,9 @@ def chores_due(hub, app, tick):
     every(10, 7, "could not start the Komga sync", lambda: komga.start(hub, app))  # graphic novels and chapters, for Paperback
     always("could not send books to devices", hub.devices.send_queued)
     always("could not look books up in catalogues", lambda: hub.catalogues.run(limit=4))  # a few a minute, not hammered
+    # books with a file name for a title: clear cases put right, doubtful ones offered in the review queue
+    always("could not identify books", lambda: hub.identify.run(limit=2))
+    always("could not write tags to the library", hub.tagsync.run)  # ten books a minute
     always("could not ask the readers' sites", lambda: readers.run(hub, limit=4))
     always("could not back up the book data", hub.backup_if_needed)
     always("could not start the copy to the second disk", second_copy)
