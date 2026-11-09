@@ -177,6 +177,22 @@ function head(title, ...right) {
   return el('div', { class: 'ph' }, el('h2', { text: title }), el('span', { class: 'hatch' }), ...right);
 }
 // The top of a page: its title, and the plain words under it (text, or text with links).
+// A long admin page: a row of its panels' names under the title, each scrolling to its panel. Buttons, not #links,
+// which would change the page. notes: { 'Connections': '9 not set up' } adds a word to a name.
+function jumpBar(notes) {
+  const panels = [...main().querySelectorAll(':scope > section.panel, :scope > .cols > section.panel, :scope > .cols2 > section.panel')]
+    .map((panel) => [panel, panel.querySelector(':scope > .ph h2')]).filter(([, h2]) => h2);
+  if (panels.length < 4) return;
+  const bar = el('nav', { class: 'jump', 'aria-label': 'On this page' }, panels.map(([panel, h2]) => {
+    const name = h2.textContent;
+    return el('button', { type: 'button', class: 'chip', onclick: () => {
+      panel.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+      panel.setAttribute('tabindex', '-1'); panel.focus({ preventScroll: true });
+    } }, name, notes && notes[name] ? el('span', { class: 'src', text: notes[name] }) : null);
+  }));
+  main().children[0].after(bar);
+}
+
 function pageHead(title, ...intro) {
   return el('div', { class: 'col gap8' }, el('h1', { class: 'glow', text: title }), intro.length ? el('p', { class: 'dim' }, ...intro) : null);
 }
@@ -252,10 +268,14 @@ function sectionTabs(section) {
     if (seesDownloads()) tabs.push(['downloads', 'Downloads', '#/downloads']);
     return tabs;
   }
-  if (section === 'admin') return [['hub', 'Hub', '#/admin'], ['books', 'Books', '#/admin/books']];
+  if (section === 'admin') return [['hub', 'Hub', '#/admin'], ['books', 'Books', '#/admin/books'], ['details', 'Book details', '#/details'],
+    ['copies', 'Copies', '#/copies'], ['sort', 'Sort', '#/sort'], ['tags', 'Tags', '#/tags']];
   if (section === 'movies') return mediaTabs();
   return [];
 }
+// The step-by-step guides live in the repository's docs folder.
+const GUIDES = 'https://github.com/tankgirl2810/Family_Hub/blob/master/docs/';
+const guide = (file, words) => el('a', { href: GUIDES + file, target: '_blank', rel: 'noopener', text: words });
 const SECTION_LOGO = { home: 'Home', movies: 'Films and TV', downloads: 'Downloads', watchlist: 'Watchlist', books: 'Books',
     photos: 'Photos', files: 'Files', admin: 'Admin', profiles: 'Family Hub' };
 
@@ -411,7 +431,8 @@ async function route() {
   document.body.dataset.page = page;  // the stylesheet keeps some decoration for Home only
   let tab = { library: 'library', book: 'library', shelf: 'library', series: 'library', read: 'library', dashboard: 'dashboard',
       mybooks: 'dashboard', devices: 'dashboard', discover: 'discover', tabletop: 'library' }[page];
-  if (section === 'admin') tab = page === 'admin' && parts[1] !== 'books' ? 'hub' : 'books';
+  if (section === 'admin') tab = { sort: 'sort', tags: 'tags', copies: 'copies', details: 'details', rules: 'details', fix: 'details' }[page]
+    || (parts[1] === 'books' ? 'books' : 'hub');
   if (section === 'movies') tab = parts[1] === 'search' ? 'search' : 'watch';
   shell(section, tab);
   Tracker.kick();
@@ -433,6 +454,13 @@ async function route() {
   if (moved && gen === routeGen && (!document.activeElement || document.activeElement === document.body)) main().focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', route);
+// "/" goes to the page's search box (Library, Discover, Films and TV), as on most sites; not while typing somewhere.
+document.addEventListener('keydown', (event) => {
+  if (event.key !== '/' || event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
+  if (event.target.closest && event.target.closest('input, textarea, select, [contenteditable], dialog')) return;
+  const box = main().querySelector('input[type="search"]:not(:disabled)');
+  if (box) { event.preventDefault(); box.focus(); }
+});
 window.addEventListener('hashchange', () => checkMaking());
 window.addEventListener('DOMContentLoaded', route);
 // After signing in: changing the address draws Home by itself; only an address already on Home needs a redraw.
@@ -517,8 +545,9 @@ async function pageMovies(sub, id) {
     el('div', { class: 'row between end' }, pageHead('Watch', 'Films and series on the family server.'),
       nothing ? null : field('Search title', search)),
     nothing ? el('section', { class: 'panel cut' }, head('Not set up yet'),
-      el('p',
-          { text: 'Films and TV need Radarr and Sonarr. ' + (isAdmin() ? 'Start them with the media profile (guide 14), then press Connect everything under Admin.' : 'Ask an admin to set them up.') }),
+      isAdmin() ? el('p', {}, 'Films and TV need Radarr and Sonarr. Start them with the media profile (',
+          guide('14-films-tv-and-the-vpn.md', 'guide 14'), '), then press Connect everything under ', el('a', { href: '#/admin', text: 'Admin' }), '.')
+        : el('p', { text: 'Films and TV need Radarr and Sonarr. Ask an admin to set them up.' }),
       isAdmin() ? el('a', { class: 'btn pri', href: '#/admin', text: 'Open Admin' }) : null) : null,
     latest,
     problems.length ? el('p', { class: 'warn', role: 'status', text: problems.join(' ') }) : null,
@@ -1423,7 +1452,7 @@ function mediaCard(reload) {
       !item.configured ? el('span', { class: 'dim', text: 'Not set up' }) : el('span', { class: item.ok ? 'ok' : 'warn',
           text: item.ok ? 'Connected' + (item.version ? ' · ' + item.version : '') : 'Not reachable · ' + (item.error || '') }));
     fill(body, el('div', { class: 'list' }, line(status.radarr), line(status.sonarr), line(status.bazarr), line(status.jellyfin),
-      el('div', { class: 'row between' }, el('span', { text: 'VPN for torrents' }), el('span', { class: status.vpn.ok ? 'ok' : 'warn', text: status.vpn.message }))));
+      el('div', { class: 'row between' }, el('span', { text: 'VPN for torrents' }), el('span', { class: status.vpn.ok ? 'ok' : /not set up/i.test(status.vpn.message) ? 'dim' : 'warn', text: status.vpn.message }))));
   }
   const go = el('button', { class: 'btn pri', type: 'button', text: 'Connect everything', onclick: async () => {
     go.disabled = true; go.textContent = 'Connecting…';
@@ -1578,6 +1607,7 @@ function pageProfiles() {
       el('span', { class: 'name', text: profile.name }),
       el('span', { class: 'tag' + (profile.role === 'admin' ? ' on' : ''), text: profile.role === 'admin' ? 'Admin' : 'Member' }),
       el('span', { class: 'small dim', text: profile.has_passcode ? 'Passcode on' : 'No passcode' }),
+      appState.me && appState.me.id === profile.id ? el('span', { class: 'small here', text: 'In use now' }) : null,
       // Admins can always find new books, whatever their own switch says, so they are never "Reading only".
       profile.tracker_linked ? el('span', { class: 'small dim',
           text: 'Kindle tracking linked' }) : (profile.can_request || profile.role === 'admin' ? null : el('span', { class: 'small dim',
@@ -2678,7 +2708,8 @@ function chapterCard(item, onChange) {
 // What a search of the reading sites found, one heading per site. after() runs once a series is followed.
 function seriesHits(data, after) {
   if (!data.sources) return [el('p', { class: 'warn', role: 'status',
-      text: 'The series server has no sources yet, so there is nowhere to search. An admin adds them in the series server itself; guide 13 shows how.' })];
+      }, 'The series server has no sources yet, so there is nowhere to search. An admin adds them in the series server itself; ',
+      guide('13-manga-and-series-by-chapter.md', 'guide 13'), ' shows how.')];
   const hits = data.groups.filter((group) => group.results.length);
   const quiet = data.groups.filter((group) => group.error).map((group) => group.source);
   return [
@@ -3113,7 +3144,7 @@ function dashTabs(active, reload) {
   } });
   return el('div', { class: 'row between', style: 'align-items:center' },
     el('nav', { class: 'tabs', 'aria-label': 'Dashboard views' },
-      el('a', { href: '#/dashboard', 'aria-current': active === 'me' ? 'page' : null, text: 'Personal' }),
+      el('a', { href: '#/dashboard', 'aria-current': active === 'me' ? 'page' : null, text: 'My reading' }),
       el('a', { href: '#/mybooks', 'aria-current': active === 'mybooks' ? 'page' : null, text: 'My books' })),
     btn);
 }
@@ -3134,7 +3165,7 @@ async function pageMyBooks() {
     appBox,
     comicsBox,
     el('section', { class: 'panel cut' }, head('On my devices', el('a', { class: 'btn', href: '#/devices/' + appState.me.id, text: 'Add or change devices' })),
-      shelf.devices.length ? null : el('p', { class: 'small warn', text: 'You have no devices yet. Add one and the books on your list are offered to it.' }),
+      shelf.devices.length ? null : el('p', { class: 'small dim', text: 'You have no devices yet. Add one and the books on your list are offered to it.' }),
       apps.length ? el('p', { class: 'small dim',
           text: apps.join(' and ') + (apps.length === 1 ? ' fetches' : ' fetch') + ' these from the catalogue under My books. "For your reading app" above shows which ones have been downloaded.' }) : null,
       mine.books.length ? el('div', { class: 'list' }, mine.books.map((book) => {
@@ -3268,7 +3299,8 @@ setInterval(() => { if (!document.hidden) checkMaking(); }, 10000);
 
 // A number tile. empty: a sentence shown instead of a big 0.
 function tile(label, num, note, empty) {
-  if (empty && !num) return el('div', { class: 'tile cut empty' }, el('div', { class: 'lab', text: label }), el('p', { class: 'dim', text: empty }));
+  if (empty && !num) return el('div', { class: 'tile cut empty' }, el('div', { class: 'lab', text: label }), el('div', { class: 'num glow', text: '0' }),
+    el('div', { class: 'small dim', text: empty }));
   return el('div', { class: 'tile cut' }, el('div', { class: 'lab', text: label }), el('div', { class: 'num glow', text: num }), el('div', { class: 'small dim', text: note || '' }));
 }
 function barList(title, rows, color) {
@@ -3291,8 +3323,9 @@ function yearShelf(stats) {
     const finished = Number((book.finished || '').slice(5, 7));
     const bookend = finished && finished !== month ? el('span', { class: 'bookend', 'aria-hidden': 'true', text: MONTHS[finished - 1] }) : null;
     if (bookend) month = finished;
-    // 18 to 56 pixels across, by page count against the year's longest; an unknown length stands in the middle
-    const width = book.pages ? Math.round(18 + 38 * Math.sqrt(book.pages / longest)) : 30;
+    // 24 to 56 pixels across (24 is the smallest a finger or pointer target should be), by page count against the
+    // year's longest; an unknown length stands in the middle
+    const width = book.pages ? Math.round(24 + 32 * Math.sqrt(book.pages / longest)) : 32;
     const label = book.title + (book.author ? ', ' + book.author : '') + (book.finished && book.finished.length === 10 ? ', finished ' + niceDate(book.finished) : '')
       + (book.in_library ? '' : ', read elsewhere');
     const look = '--cv:' + coverColor(book.title) + ';--w:' + width + 'px;--h:' + (100 + (titleHash(book.title) % 33)) + 'px';
@@ -3375,7 +3408,7 @@ async function pageDashboard() {
     } })) : null);
 
   setMain(
-    pageHead('Your reading', 'Family library and everything read elsewhere · ' + base.year + ' so far'),
+    pageHead('My reading', 'Family library and everything read elsewhere · ' + base.year + ' so far'),
     dashTabs('me', () => pageDashboard()),
     el('div', { class: 'tiles' },
       tile('Books read this year', base.read_books,
@@ -3496,13 +3529,13 @@ function serverCard(sv, reload) {
           { class: sv.series.sources ? 'ok' : 'warn', text: sv.series.sources ? 'Connected · ' + plural(sv.series.sources,
           'source') : 'Connected, but it has no sources yet' }) : status(false, '', 'Not reachable')) : el('span', { class: 'dim',
           text: 'Not set up' })),
-      el('div', { class: 'row between' }, 'Finished-downloads folder', status(sv.downloads_folder, 'Found', 'Not set up')),
+      el('div', { class: 'row between' }, 'Finished-downloads folder', sv.downloads_folder ? status(true, 'Found', '') : el('span', { class: 'dim', text: 'Not set up' })),
       el('div', { class: 'row between' }, 'Inbox for new files', sv.inbox_waiting === null ? el('span', { class: 'dim',
           text: 'Not set up' }) : el('span', { class: 'ok', text: sv.inbox_waiting ? plural(sv.inbox_waiting, 'file') + ' waiting' : 'Empty' })),
       el('div', { class: 'row between' }, 'Library import folder', sv.ingest_folder ? (sv.ingest_stuck ? el('span', { class: 'warn',
           text: plural(sv.ingest_stuck,
           'file') + ' waiting longer than usual. Family Hub has asked Calibre-Web to look again; if this stays, restart Calibre-Web.' }) : el('span',
-          { class: 'ok', text: sv.ingest_waiting ? plural(sv.ingest_waiting, 'file') + ' being added' : 'Found' })) : el('span', { class: 'warn',
+          { class: 'ok', text: sv.ingest_waiting ? plural(sv.ingest_waiting, 'file') + ' being added' : 'Found' })) : el('span', { class: 'dim',
           text: 'Not set up' })),
       el('div', { class: 'row between' }, 'Guest access', el('span', { class: 'dim', text: sv.remote_guest_blocked ? 'Home network only' : 'Anywhere' }))),
     el('div', { class: 'row' }, el('button', { class: 'btn sm', type: 'button', text: 'Rescan library and tag packs',
@@ -3524,6 +3557,8 @@ async function pageHubAdmin() {
     setupFileCard(conn.in_file),
     el('div', { class: 'cols' }, serverCard(stats.services, reload),
       el('section', { class: 'panel cut' }, head('Copies to a second disk'), secondCopyLines(stats.services.second_copy, reload))));
+  const unset = conn.groups.filter((group) => !group.fields.some((setting) => setting.set && setting.source !== 'default')).length;
+  jumpBar({ Connections: unset ? unset + ' not set up' : '' });
 }
 
 // A program's address as this device can reach it: the saved one, or this page's address with the program's port.
@@ -3761,6 +3796,7 @@ async function pageBooksAdmin() {
           const fd = new FormData(); fd.append('file', file.files[0]);
           try { const result = await api('POST', '/api/admin/import', fd); toast('Imported data for ' + plural(result.books, 'book') + '.'); reload(); } catch (err) { oops(err); }
         } })))));
+  jumpBar();
 }
 
 // The whole setup in one zip locked with a passphrase, to set up or rebuild the server (setupfile.py).
@@ -4900,7 +4936,7 @@ async function pageCopies() {
     head('How Family Hub shows them meanwhile'),
     el('section', { class: 'panel cut' }, head(plural(one.length, 'book') + ' shown as one'),
       el('p', { class: 'small dim',
-          text: 'The copy marked Shown is the one people download: the one with a cover, an EPUB and the larger file. A format that only another copy has is offered too. To remove spare copies for good, use the card above, or delete one by hand in Calibre-Web.' }),
+          text: 'The copy marked Shown is the one people download: the one with a cover, an EPUB and the larger file. A format that only another copy has is offered too. To remove spare copies for good, use the queue at the top of this page, or delete one by hand in Calibre-Web.' }),
       one.length ? el('div', { class: 'list' }, one.map((group) => block(group, el('button', { class: 'btn', type: 'button',
           text: 'Keep apart', 'aria-label': 'Keep apart: ' + group.title, onclick: () => choose(group.key, 'apart', 'Shown as separate books.') }))))
         : el('p', { class: 'small dim', text: 'No book is in the library twice.' })),
@@ -4964,6 +5000,7 @@ async function pageSort() {
   const kindRow = el('div', { class: 'row', role: 'group', 'aria-label': 'Kind to show' });
   const toKind = el('select', {}, el('option', { value: '', text: 'Leave as it is' }), appState.kinds.map((kind) => el('option', { value: kind, text: kind })));
   const tag = el('input', { type: 'text', maxlength: 60 });
+  const apply = el('button', { class: 'btn pri', type: 'submit', text: 'Apply to selected', disabled: true });
   let shown = [];
 
   async function load() {
@@ -4983,7 +5020,9 @@ async function pageSort() {
             onchange: (event) => { if (event.target.checked) picked.add(item.id); else picked.delete(item.id); drawTable(); } })),
         el('th', { scope: 'row', class: 'plain' }, el('a', { href: '#/book/' + item.id, text: item.title })),
         el('td', { text: item.author }), el('td', { text: item.formats.join(' · ') }), el('td', { class: 'small', text: item.tags.family.join(', ') })))))
-      : el('p', { class: 'dim', text: 'No books of this kind.' }));
+      : el('p', { class: 'dim', text: view.q ? 'No books of this kind match.' : view.kind === 'Unsorted'
+        ? 'Nothing left to sort: every book has a kind. Pick a kind above to move some.' : 'No books of this kind.' }));
+    apply.disabled = !picked.size;
   }
   function draw() {
     fill(kindRow, ...appState.kinds.map((kind) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(view.kind === kind),
@@ -5003,7 +5042,7 @@ async function pageSort() {
         const result = await api('POST', '/api/books/kind', { ids: Array.from(picked), kind: toKind.value, tag: tag.value });
         toast(plural(result.updated, 'book') + ' updated.'); picked.clear(); tag.value = ''; load().catch(oops);
       } catch (err) { oops(err); }
-    } }, field('Set kind to', toKind), field('Add family tag (optional)', tag), el('button', { class: 'btn pri', type: 'submit', text: 'Apply to selected' })),
+    } }, field('Set kind to', toKind), field('Add family tag (optional)', tag), apply),
     count, table);
   draw();
 }
