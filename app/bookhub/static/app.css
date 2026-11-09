@@ -658,3 +658,6 @@ dialog.ask .ask-remove { margin-right: auto; }
   dialog.ask[open] { animation: ask-in .22s cubic-bezier(.16, 1, .3, 1); }
   @keyframes ask-in { from { transform: translateY(8px); opacity: .6; } }
 }
+
+/* The Library on a phone: its long introduction gives way to the books (the same words are on the computer). */
+@media (max-width: 600px) { body[data-page="library"] #main > .col.gap8:first-of-type > p.dim { display: none; } }
