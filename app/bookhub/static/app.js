@@ -158,6 +158,11 @@ function icon(path, size) {
 }
 const isGuest = () => appState.me && appState.me.guest;
 const isAdmin = () => appState.me && appState.me.role === 'admin';
+// Films and TV, and Downloads, are for the people who can use them. Admins always see them (that is where they get
+// set up); a member sees Films and TV once something is connected, and Downloads once there is a download client
+// and they may ask for books or films. Nobody else is shown server plumbing they cannot do anything about.
+const seesFilms = () => !!appState.me && !isGuest() && (isAdmin() || !!(appState.media.films || appState.media.shows || appState.media.jellyfin));
+const seesDownloads = () => !!appState.me && !isGuest() && (isAdmin() || (!!appState.media.downloads && !!(appState.me.can_request || appState.me.can_request_media)));
 const canSort = () => appState.me && !appState.me.guest && (appState.me.role === 'admin' || appState.me.can_tag);
 // Add a book to someone's "My books" or take it off, then say what happened. profile is for admins acting for someone else.
 async function setShelf(bookId, on, profile) {
@@ -206,7 +211,8 @@ const PAGE_SECTION = { home: 'home', movies: 'movies', downloads: 'downloads', p
 function sectionTabs(section) {
   if (section === 'books') {
     const tabs = [['library', 'Library', '#/library']];
-    if (!isGuest()) tabs.push(['dashboard', 'Dashboard', '#/dashboard'], ['discover', 'Discover', '#/discover'], ['downloads', 'Downloads', '#/downloads']);
+    if (!isGuest()) tabs.push(['dashboard', 'Dashboard', '#/dashboard'], ['discover', 'Discover', '#/discover']);
+    if (seesDownloads()) tabs.push(['downloads', 'Downloads', '#/downloads']);
     return tabs;
   }
   if (section === 'admin') return [['hub', 'Hub', '#/admin'], ['books', 'Books', '#/admin/books']];
@@ -294,7 +300,8 @@ function shell(section, tab) {
   document.getElementById('shell').classList.toggle('signed-out', !signedIn);
   const sectionLink = ([key, label, href, iconPath]) => el('a', { href, 'aria-current': section === key ? 'page' : null, onclick: closeMore },
     sectionIcon(iconPath), el('span', { class: 'long', text: label }), el('span', { class: 'short', text: SHORT[key] || label }));
-  const sections = SECTIONS.filter(([key]) => (key !== 'admin' || isAdmin()) && ((key !== 'movies' && key !== 'downloads' && key !== 'watchlist') || !isGuest()));
+  const sections = SECTIONS.filter(([key]) => (key !== 'admin' || isAdmin()) && (key !== 'movies' || seesFilms())
+    && (key !== 'downloads' || seesDownloads()) && (key !== 'watchlist' || !isGuest()));
   fill(document.getElementById('side'),
     el('div', { class: 'hub glow' }, starMark(), 'Family Hub'),
     el('nav', { 'aria-label': 'Family Hub sections' }, sections.filter(([key]) => PHONE_BAR.includes(key)).map(sectionLink),
@@ -356,7 +363,10 @@ async function route() {
   if (!appState.me) page = 'profiles';
   if (isGuest() && ['dashboard', 'mybooks', 'admin', 'sort', 'tags', 'copies', 'discover', 'devices', 'series', 'read', 'movies', 'downloads', 'watchlist'].includes(page)) page = 'library';
   if (!appState.series && (page === 'series' || page === 'read')) page = 'library';
-  if (['admin', 'sort', 'tags', 'copies'].includes(page) && !isAdmin()) page = 'home';
+  if (['admin', 'sort', 'tags', 'copies', 'details', 'rules', 'fix'].includes(page) && !isAdmin()) page = 'home';
+  // a link or bookmark to a section this person does not see goes home rather than to a page of set-up notes
+  if ((page === 'movies' && !seesFilms()) || (page === 'downloads' && !seesDownloads())) page = 'home';
+  if (page === 'movies' && parts[1] === 'search' && !isAdmin() && !canRequestMedia()) parts[1] = '';
   const section = page === 'profiles' ? 'profiles' : (PAGE_SECTION[page] || 'books');
   document.body.dataset.page = page;  // the stylesheet keeps some decoration for Home only
   let tab = { library: 'library', book: 'library', shelf: 'library', series: 'library', read: 'library', dashboard: 'dashboard',
@@ -429,7 +439,8 @@ function mediaState(item) {
 }
 
 function mediaTabs() {
-  return [['watch', 'Watch', '#/movies'], ['search', 'Search', '#/movies/search'], ['downloads', 'Downloads', '#/downloads']];
+  return [['watch', 'Watch', '#/movies'], isAdmin() || canRequestMedia() ? ['search', 'Search', '#/movies/search'] : null,
+    seesDownloads() ? ['downloads', 'Downloads', '#/downloads'] : null].filter(Boolean);
 }
 
 async function pageMovies(sub, id) {
@@ -914,6 +925,15 @@ async function pageWatchlist() {
 
 // Every download in one place: films, TV and books, with pause, reorder and (for admins) delete.
 async function pageDownloads() {
+  // No download client yet: one note saying so and where to add it, instead of a page of empty panels and errors.
+  // (Only admins get here then; for members the section is hidden until it is set up.)
+  if (!appState.media.downloads) {
+    setMain(pageHead('Downloads', 'Everything being downloaded for the hub, once there is something to download with.'),
+      el('section', { class: 'panel cut' }, head('Not set up yet'),
+        el('p', {}, 'Films, TV and books download through qBittorrent, behind the VPN. Add it under ',
+          el('a', { href: '#/admin', text: 'Admin, Hub, Connections' }), ', then press Connect everything. Family members see Downloads once it works.')));
+    return;
+  }
   const vpnLine = el('span', { class: 'small dim', text: 'Checking the VPN…' });
   const list = el('div', { class: 'stack' }, el('p', { class: 'small dim', role: 'status', text: 'Asking qBittorrent…' }));
   const added = el('div', { class: 'list' });
@@ -961,7 +981,8 @@ async function pageDownloads() {
       if (err instanceof Stale) return;
       // qBittorrent is often only away while the VPN restarts: keep asking, less often.
       last = null;
-      fill(list, el('p', { class: 'small bad', role: 'status', text: err.message }), el('p', { class: 'small dim', text: 'Trying again shortly.' }));
+      fill(list, el('p', { class: 'small bad', role: 'status', text: err.message }),
+        el('p', { class: 'small dim', text: 'Asked at ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + '; asking again every 20 seconds.' }));
       again(20000);
       return;
     }
@@ -983,9 +1004,9 @@ async function pageDownloads() {
   setMain(
     pageHead('Downloads', 'Everything being downloaded for the hub. Ask for films and TV in ', el('a', { href: '#/movies/search', text: 'Films and TV, Search' }),
       ' and for books in ', el('a', { href: '#/discover', text: 'Books, Discover' }), '.'),
-    el('section', { class: 'panel cut' }, head('Every download', vpnLine),
-      el('p', { class: 'small dim', text: 'In the order qBittorrent works through them. Three download at once; the rest wait their turn. '
-        + 'One nobody has shared for ten minutes goes to the back, paused, marked waiting for seed.' }), chips, list),
+    el('section', { class: 'panel cut' }, head('Every download', isAdmin() ? vpnLine : null),
+      el('p', { class: 'small dim', text: isAdmin() ? 'In the order qBittorrent works through them. Three download at once; the rest wait their turn. '
+        + 'One nobody has shared for ten minutes goes to the back, paused, marked waiting for seed.' : 'Three download at once; the rest wait their turn.' }), chips, list),
     speedPanel(),
     isAdmin() ? sortPanel() : null,
     el('div', { class: 'cols2' },
@@ -1430,14 +1451,19 @@ async function pageHome() {
       watchNews.hidden = false;
     }).catch(() => {});
   }
+  // Films lead once Jellyfin is connected. Until then members are not shown the gap at all, and admins find the
+  // reminder under the books rather than above them.
+  const filmsFirst = appState.media.jellyfin && !isGuest();
+  const filmsNote = !appState.media.jellyfin && isAdmin();
   setMain(
     pageHead('Welcome home', 'Everything on the family server, newest first.'),
     setPiece(appState.look),
     watchNews,
-    isGuest() ? null : latestMedia,
+    filmsFirst ? latestMedia : null,
     el('section', { class: 'panel cut' }, head('Latest books', el('span', { class: 'small dim', text: home.books_month ? plural(home.books_month,
         'book') + ' added this month' : 'Nothing new this month' }), el('a', { class: 'btn sm', href: '#/library', text: 'Open books' })),
-      books.length ? el('div', { class: 'reel' }, books) : el('p', { class: 'small dim', text: 'No books in the library yet.' })));
+      books.length ? el('div', { class: 'reel' }, books) : el('p', { class: 'small dim', text: 'No books in the library yet.' })),
+    filmsNote ? latestMedia : null);
 }
 
 // A section that is not built yet. Says so plainly, with no made-up content.
@@ -5135,15 +5161,22 @@ async function pageDiscover(prefill) {
       : el('p', { class: 'small dim', text: 'Nothing new right now.' }));
   }
 
+  if (!appState.discover_configured) {
+    searchBox.disabled = !withSites;
+    searchBox.setAttribute('aria-describedby', 'discover-off');
+  }
   setMain(
-    pageHead('Discover', 'Find new books, send them to the download client, and follow authors and tags.'),
+    pageHead('Discover', canRequest() ? 'Find new books, send them to the download client, and follow authors and tags.'
+      : 'What to read next: books like the ones you enjoyed, and the authors and tags you follow.'),
     canRequest() ? el('section', { class: 'panel cut' }, head('Search for a book'),
-      appState.discover_configured ? null : el('p', { class: 'warn' }, 'Book search is not set up yet. ', isAdmin() ? el('a',
+      appState.discover_configured ? null : el('p', { class: 'small dim', id: 'discover-off' }, 'Book search is not set up yet. ', isAdmin() ? el('a',
           { href: '#/admin',
-          text: 'Add the Prowlarr address and API key under Admin, Hub, Connections.' }) : 'Ask an admin to add the Prowlarr address and API key.'),
+          text: 'Add the Prowlarr address and API key under Admin, Hub, Connections.' }) : 'An admin can switch it on.'),
       withSites ? scope : null,
-      el('form', { class: 'row end', onsubmit: (event) => { event.preventDefault(); search(); } }, field('Title or author', searchBox,
-          'wide'), el('button', { class: 'btn pri', type: 'submit', text: 'Search' })),
+      // With nothing to search, the box and button say so rather than failing when pressed (reading sites still work without it).
+      el('form', { class: 'row end', onsubmit: (event) => { event.preventDefault(); search(); } }, field('Title or author', searchBox, 'wide'),
+        el('button', { class: 'btn pri', type: 'submit', text: 'Search', disabled: !appState.discover_configured && !withSites,
+          'aria-describedby': appState.discover_configured ? null : 'discover-off' })),
       sites, results) : el('p', { class: 'dim', text: 'This profile can browse suggestions but cannot download new books. Ask an admin to find one for you.' }),
     likeBox, authorBox, recBox, mangaBox,
     el('section', { class: 'panel cut' }, head("Similar to books you've read"), el('p', { class: 'small dim', text: 'Matches share tags or an author with the book you pick.' }), simBox),

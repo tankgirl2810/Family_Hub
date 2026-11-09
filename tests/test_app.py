@@ -149,6 +149,12 @@ def test_finishing_a_book_says_where_it_comes_in_the_year(client):
     assert theirs["name"] == "Nan" and theirs["count"] >= 1
 
 
+def test_state_says_whether_downloads_are_set_up(app, client):
+    assert client.get("/api/state").get_json()["media"]["downloads"] is False
+    app.hub.config.qbit_url = "http://gluetun:8080"
+    assert client.get("/api/state").get_json()["media"]["downloads"] is True
+
+
 def test_personal_and_admin_stats(client):
     login(client, "You")
     s = client.get("/api/stats/me").get_json()

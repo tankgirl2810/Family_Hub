@@ -295,7 +295,9 @@ def state():
         "visuals": {"version": visuals.version(family_hub),
                     "place": _home_place(family_hub) if who else None},
         "media": {"films": family_hub.media.configured("film"), "shows": family_hub.media.configured("show"),
-                  "jellyfin": bool(family_hub.config.jellyfin_url and family_hub.config.jellyfin_api_key)},
+                  "jellyfin": bool(family_hub.config.jellyfin_url and family_hub.config.jellyfin_api_key),
+                  # members only see Downloads once there is a download client to show
+                  "downloads": bool(family_hub.config.qbit_url)},
     })
 
 
