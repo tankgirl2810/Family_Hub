@@ -2798,6 +2798,42 @@ def admin_identify_undo(who, change_id):
     return jsonify({"ok": True, "message": "Put back to %s." % done["title"]})
 
 
+@bp.get("/admin/tagsync")
+@admin_only
+def admin_tagsync(who):
+    """Tags written back into the library: the switch, what is next, and every change with an Undo. See tagsync.py."""
+    return jsonify(hub().tagsync.summary())
+
+
+@bp.post("/admin/tagsync")
+@admin_only
+def admin_tagsync_switch(who):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get("auto"), bool):
+        return fail("Say whether tags are written to the library.")
+    hub().tagsync.set_auto(data["auto"])
+    return jsonify({"ok": True, "auto": data["auto"]})
+
+
+@bp.post("/admin/tagsync/undo/<int:change_id>")
+@admin_only
+def admin_tagsync_undo(who, change_id):
+    try:
+        done = hub().tagsync.undo(change_id)
+    except LookupError as exc:
+        return fail(str(exc), 404)
+    except (OSError, sqlite3.Error, librarymanager.ManagerError) as exc:
+        return fail(str(exc))
+    return jsonify({"ok": True, "message": "The tags of %s are back as they were. Family Hub leaves them alone now." % done["title"]})
+
+
+@bp.post("/admin/tagsync/release/<int:book_id>")
+@admin_only
+def admin_tagsync_release(who, book_id):
+    hub().tagsync.release(book_id)
+    return jsonify({"ok": True})
+
+
 # ------------------------------------------------------- a look inside
 # The first pages of one library entry (not its copies'), for the details editor and the copies queue. See peek.py.
 

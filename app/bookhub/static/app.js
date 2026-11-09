@@ -4118,6 +4118,48 @@ function tagsCard(tags) {
       el('span', { class: 'tag', text: 'Removed as clutter · ' + tags.removed }), tags.hidden ? el('span', { class: 'tag', text: 'Hidden or renamed by you · ' + tags.hidden }) : null));
 }
 
+// Tags written back into the library (tagsync.py), so Calibre-Web and reading apps see the same tags as Family
+// Hub. A switch, what is next, and every change with an Undo (which also leaves that book's tags alone after).
+function tagSyncPanel() {
+  const box = el('section', { class: 'panel cut' });
+  const chips = (list, sign) => list.map((tag) => el('span', { class: 'tag small' + (sign === '−' ? ' dim' : ''), text: sign + ' ' + tag }));
+  async function draw() {
+    let data;
+    try { data = await api('GET', '/api/admin/tagsync'); } catch (err) { if (!(err instanceof Stale)) box.hidden = true; return; }
+    const auto = el('input', { type: 'checkbox', checked: data.auto, onchange: async () => {
+      auto.disabled = true;
+      try { await api('POST', '/api/admin/tagsync', { auto: auto.checked }); toast(auto.checked ? 'Tags will be written to the library, ten books a minute.' : 'Tags stay in Family Hub only.'); draw(); }
+      catch (err) { if (!(err instanceof Stale)) oops(err); auto.checked = !auto.checked; auto.disabled = false; }
+    } });
+    const row = (title, bookId, added, removed, right) => el('div', { class: 'row between gap8' },
+      el('div', { class: 'stack', style: 'gap:4px;min-width:0;flex:1 1 260px' },
+        el('strong', { class: 'book' }, el('a', { href: '#/book/' + bookId, text: title })),
+        el('div', { class: 'row gap6' }, ...chips(added, '+'), ...chips(removed, '−'))),
+      right);
+    const changes = data.changes.map((change) => row(change.title, change.book_id, change.added, change.removed,
+      change.undone ? el('div', { class: 'row gap6' }, el('span', { class: 'small dim', text: 'Undone' }),
+        el('button', { class: 'btn sm', type: 'button', text: 'Look after it again', 'aria-label': 'Look after the tags of ' + change.title + ' again',
+          onclick: () => api('POST', '/api/admin/tagsync/release/' + change.book_id).then(() => { toast('Family Hub looks after its tags again.'); draw(); }).catch(oops) }))
+        : el('button', { class: 'btn sm', type: 'button', text: 'Undo', 'aria-label': 'Undo the tags of ' + change.title, onclick: async (ev) => {
+          ev.target.disabled = true;
+          try { toast((await api('POST', '/api/admin/tagsync/undo/' + change.id)).message); draw(); }
+          catch (err) { if (!(err instanceof Stale)) oops(err); ev.target.disabled = false; }
+        } })));
+    fill(box, head('Tags in the library'),
+      el('label', { class: 'check' }, auto, ' Write tags to the library'),
+      el('p', { class: 'small dim', text: 'Each book in Calibre gets the tags you see here: its own tags tidied (with your hidden and renamed tags), the best few from the catalogues, '
+        + 'and family tags. Personal tags never leave Family Hub. A copy of the library database is made before each batch. '
+        + (data.waiting ? plural(data.waiting, 'book') + ' still to write.' : 'Every book is up to date.') }),
+      data.blocked ? el('p', { class: 'small bad', text: data.blocked }) : null,
+      data.next.length ? el('h3', { class: 'small', text: data.auto ? 'Next' : 'Would change' }) : null,
+      data.next.length ? el('div', { class: 'list' }, data.next.map((item) => row(item.title, item.book_id, item.add, item.remove, null))) : null,
+      changes.length ? el('h3', { class: 'small', text: 'Written' }) : null,
+      changes.length ? el('div', { class: 'list' }, changes) : null);
+  }
+  draw();
+  return box;
+}
+
 async function pageTags() {
   nameThePage('Tidy tags');
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
@@ -4145,6 +4187,7 @@ async function pageTags() {
   setMain(back('#/admin/books', 'Back to books admin'),
     pageHead('Tidy tags',
         'Tags that come from book files and from catalogues. Hide the ones that say nothing, or rename two spellings to the same name to merge them. Merge tags, below, merges family tags as well. Personal tags are not listed: change those on the book itself.'),
+    tagSyncPanel(),
     el('section', { class: 'panel cut' }, head('Community tags from catalogues'),
       el('p', { class: 'small', role: 'status', text: lookupLine(tags.lookups) }),
       tags.lookups.on ? el('div', { class: 'row' },
@@ -4166,7 +4209,7 @@ async function pageTags() {
         el('button', { class: 'btn', type: 'button', text: 'Put back', 'aria-label': 'Put back ' + entry.tag, onclick: () => rule({ tag: entry.tag, restore: true }, 'Put back.') }))))) : null,
     tags.removed.length ? el('section', { class: 'panel cut' }, head('Removed as clutter'),
       el('p', { class: 'small dim',
-          text: 'Found in book files and left out automatically: ISBNs, dates, publishers, adverts and whole sentences. They are still in the files; Family Hub just does not show them.' }),
+          text: 'Found in book files and left out automatically: ISBNs, dates, publishers, adverts and whole sentences. Family Hub does not show them, and with Write tags to the library on, it takes them off the library entries too.' }),
       el('div', { class: 'row gap8' }, tags.removed.map((entry) => el('span', { class: 'tag small dim', text: entry.tag.length > 60 ? entry.tag.slice(0, 60) + '…' : entry.tag })))) : null);
   draw();
 }
