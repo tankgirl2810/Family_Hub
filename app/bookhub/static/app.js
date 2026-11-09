@@ -1496,21 +1496,16 @@ function setPiece(look) {
 
 async function pageHome() {
   const home = await api('GET', '/api/home');
-  const latestMedia = el('section', { class: 'panel cut' }, head('Latest films and TV', el('a', { class: 'btn sm', href: '#/movies', text: 'Open Films and TV' })),
-    el('p', { class: 'small dim', role: 'status',
-        text: appState.media.jellyfin ? 'Asking Jellyfin…' : 'Films and series arrive here once Jellyfin is connected' + (isAdmin() ? ' under Admin.' : ' by an admin.') }));
-  if (appState.media.jellyfin && !isGuest()) {
-    api('GET', '/api/media/latest').then((data) => latestMedia.replaceChildren(latestMedia.firstChild,
-      data.items.length ? el('div', { class: 'reel' }, data.items.map((item) => posterCard(Object.assign({}, item, { id: null }),
-        el('div', { class: 'small', text: niceDate(item.added) })))) : el('p', { class: 'small dim', text: 'No films or shows on the server yet.' })))
-      .catch((err) => latestMedia.replaceChildren(latestMedia.firstChild, el('p', { class: 'small warn', text: 'Jellyfin: ' + err.message })));
-  }
-  const books = home.books.map((book) => el('div', { class: 'book' },
+  // Films and shows join "This week at home" once Jellyfin is connected; until then an admin gets the reminder at the foot.
+  const filmsNote = !appState.media.jellyfin && isAdmin() ? el('section', { class: 'panel cut' }, head('Films and TV', el('a', { class: 'btn sm', href: '#/admin', text: 'Open Admin' })),
+    el('p', { class: 'small dim', text: 'Films and shows join the week here once Jellyfin is connected under Admin.' })) : null;
+  const bookCard = (book) => el('div', { class: 'book' },
     el('a', { class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title), title: book.title, href: '#/book/' + book.id,
         style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') },
       el('span', { class: 'fmt', text: book.formats.includes('EPUB') ? 'EPUB' : (book.formats[0] || '') }), el('span', { class: 't', text: book.title })),
     el('div', { class: 'small dim', text: book.author }),
-    el('div', { class: 'small', text: niceDate(book.added) })));
+    el('div', { class: 'small', text: dayWord(book.added) }));
+  const books = home.books.map(bookCard);
   // News from the watchlist: shown only when something new has turned up since the last visit to it.
   const watchNews = el('section', { class: 'panel cut', hidden: true });
   if (!isGuest()) {
@@ -1523,19 +1518,82 @@ async function pageHome() {
       watchNews.hidden = false;
     }).catch(() => {});
   }
-  // Films lead once Jellyfin is connected. Until then members are not shown the gap at all, and admins find the
-  // reminder under the books rather than above them.
-  const filmsFirst = appState.media.jellyfin && !isGuest();
-  const filmsNote = !appState.media.jellyfin && isAdmin();
   setMain(
     pageHead('Welcome home', 'Everything on the family server, newest first.'),
     setPiece(appState.look),
     watchNews,
-    filmsFirst ? latestMedia : null,
-    el('section', { class: 'panel cut' }, head('Latest books', el('span', { class: 'small dim', text: home.books_month ? plural(home.books_month,
-        'book') + ' added this month' : 'Nothing new this month' }), el('a', { class: 'btn sm', href: '#/library', text: 'Open books' })),
-      books.length ? el('div', { class: 'reel' }, books) : el('p', { class: 'small dim', text: 'No books in the library yet.' })),
-    filmsNote ? latestMedia : null);
+    thisWeek(home, books, bookCard),
+    filmsNote);
+}
+
+// "Today", "Yesterday", "Saturday", then a date: when something arrived, the way you would say it at home.
+function dayWord(iso) {
+  if (!iso) return '';
+  const day = new Date(iso.slice(0, 10) + 'T00:00:00'), today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((today - day) / 86400000);
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days > 1 && days < 7) return day.toLocaleDateString(undefined, { weekday: 'long' });
+  return niceDate(iso.slice(0, 10));
+}
+
+// Home under the visual: this week at home. Your book to carry on, the week in one line, and what arrived, books and
+// (once Jellyfin is connected) films and shows, newest first. A quiet week says so and shows the most recent instead.
+function thisWeek(home, latestBooks, bookCard) {
+  const week = home.week;
+  const mine = week.mine;
+  const reel = el('div', { class: 'reel' }, week.added.map(bookCard));
+  const facts = el('p', { class: 'week-facts', role: 'status' });
+  const counts = { added: week.added.length, films: 0, coming: 0 };
+  // The week in one line, leaving out what did not happen ("0 books added" says nothing); the first word gets a capital.
+  const drawFacts = () => {
+    const parts = [
+      counts.added ? plural(counts.added, 'book') + ' added' : null,
+      counts.films ? plural(counts.films, 'film or show', 'films and shows') + ' ready to watch' : null,
+      week.family_finished ? 'the family finished ' + plural(week.family_finished, 'book') : null,
+      counts.coming ? el('a', { href: '#/downloads', text: counts.coming + ' on the way' }) : null,
+    ].filter(Boolean);
+    if (!parts.length) parts.push(week.family_finished === null ? 'A quiet week so far' : 'A quiet week so far: nothing added or finished yet');
+    if (typeof parts[0] === 'string') parts[0] = parts[0][0].toUpperCase() + parts[0].slice(1);
+    fill(facts, ...parts.flatMap((part, index) => (index ? [' · ', part] : [part])));
+  };
+  drawFacts();
+  const quiet = el('div', { class: 'stack gap8' }, el('p', { class: 'small dim', text: 'Nothing new since ' + dayWord(week.since) + '. The most recent:' }),
+    latestBooks.length ? el('div', { class: 'reel' }, latestBooks) : el('p', { class: 'small dim', text: 'No books in the library yet.' }));
+  const showQuiet = () => { reel.hidden = !reel.childElementCount; quiet.hidden = !!reel.childElementCount; };
+  showQuiet();
+  if (appState.media.jellyfin && !isGuest()) {
+    api('GET', '/api/media/latest').then((data) => {
+      const fresh = data.items.filter((item) => (item.added || '').slice(0, 10) >= week.since);
+      counts.films = fresh.length; drawFacts();
+      reel.prepend(...fresh.map((item) => posterCard(Object.assign({}, item, { id: null }), el('div', { class: 'small', text: dayWord(item.added) }))));
+      showQuiet();
+    }).catch(() => { /* the books still show */ });
+  }
+  if (seesDownloads() && appState.media.downloads) {
+    api('GET', '/api/media/torrents').then((data) => { counts.coming = data.torrents.filter((item) => !item.done && !item.missing).length; drawFacts(); })
+      .catch(() => { /* the line just leaves it out */ });
+  }
+  let carry = null;
+  if (mine && mine.reading) {
+    const book = mine.reading;
+    carry = el('div', { class: 'week-carry' },
+      el('span', { class: 'lab', text: 'Carry on reading' }),
+      el('strong', { class: 'fs-lg', text: book.title }),
+      el('span', { class: 'small dim', text: [book.author, book.device ? 'on ' + book.device : '', book.updated ? ago(book.updated).toLowerCase() : ''].filter(Boolean).join(' · ') }),
+      bar(book.percent, book.percent + ' percent read'),
+      book.id ? el('a', { class: 'btn sm pri', href: '#/book/' + book.id, text: 'Open the book' })
+        : el('span', { class: 'small dim', text: 'Read outside the family library' }));
+  } else if (mine) {
+    carry = el('div', { class: 'week-carry' }, el('span', { class: 'lab', text: 'Carry on reading' }),
+      el('p', { class: 'small dim', text: 'Nothing on the go right now.' }), el('a', { class: 'btn sm', href: '#/library', text: 'Find something in the library' }));
+  }
+  const range = niceDate(week.since).replace(/\s\d{4}$/, '') + ' to today';
+  return el('section', { class: 'panel cut week' },
+    head('This week at home', el('span', { class: 'small dim', text: range }), el('a', { class: 'btn sm', href: '#/library', text: 'Open books' })),
+    el('div', { class: 'week-top' + (carry ? '' : ' solo') }, carry, el('div', { class: 'stack gap8' }, facts,
+      mine && mine.finished ? el('p', { class: 'small dim', text: 'You finished ' + plural(mine.finished, 'book') + ' this week.' }) : null)),
+    reel, quiet);
 }
 
 // A section that is not built yet. Says so plainly, with no made-up content.

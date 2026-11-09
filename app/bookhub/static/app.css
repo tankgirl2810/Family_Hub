@@ -688,3 +688,12 @@ dialog.ask .ask-remove { margin-right: auto; }
   .field :is(input, select), details > summary { min-height: 44px; }
   .who .arch { width: 44px; height: 44px; }
 }
+
+/* Home, This week at home (thisWeek): your book to carry on beside the week in one line, then what arrived. */
+.week-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px 28px; align-items: start; }
+.week-top.solo { grid-template-columns: minmax(0, 1fr); }
+.week-carry { display: flex; flex-direction: column; gap: 8px; padding: 16px; border: 1px solid var(--line2); background: var(--panel2); }
+.week-carry .btn { align-self: flex-start; margin-top: 4px; }
+.week-facts { margin: 0; font: 400 22px/1.35 var(--font-display); font-stretch: 110%; max-width: 32ch; }
+.week-facts a { color: var(--accent); }
+@media (max-width: 760px) { .week-top { grid-template-columns: minmax(0, 1fr); } .week-facts { font-size: 19px; } }

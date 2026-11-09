@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 import re
-from datetime import date
+from datetime import date, timedelta
 from urllib.parse import urlparse
 
 import requests
@@ -965,7 +965,33 @@ def home(who):
                    "added": book["added"][:10], "formats": sorted(book["formats"]), "has_cover": book["has_cover"] or book["key"] in chosen,
                    "cover_v": chosen.get(book["key"])} for book in library[:12]],
         "books_month": sum(1 for book in library if book["added"][:7] == month),
+        "week": _this_week(family_hub, who, library, chosen),
     })
+
+
+def _this_week(family_hub, who, library, chosen):
+    """Home's "This week at home": the last seven days. Books that arrived; for a profile, the book it is reading
+    and how many it finished; how many the whole family finished (a number only: whose is theirs to tell)."""
+    since = (date.today() - timedelta(days=6)).isoformat()
+    added = [{"id": book["id"], "title": book.get("shown_title") or book["title"], "author": book.get("shown_author", book["author"]),
+              "added": book["added"][:10], "formats": sorted(book["formats"]), "has_cover": book["has_cover"] or book["key"] in chosen,
+              "cover_v": chosen.get(book["key"])} for book in library if book["added"][:10] >= since][:12]
+    pid = pid_of(who)
+    if not pid:
+        return {"since": since, "added": added, "mine": None, "family_finished": None}
+    finished = lambda row: row["status"] == "finished" and (row["finished"] or "") >= since
+    keys = family_hub.library.keys()
+    rows = family_hub.reading_rows(pid)
+    going = sorted((row for row in rows if row["status"] == "reading"), key=lambda row: row["updated"] or "", reverse=True)
+    reading = None
+    if going:
+        row = going[0]
+        book = keys.get(row["book_key"]) or {}
+        reading = {"id": book.get("id"), "title": book.get("title") or row["title"] or row["book_key"], "author": row["author"] or "",
+                   "percent": round(row["percent"] or 0), "device": row["device"] or "", "updated": row["updated"]}
+    return {"since": since, "added": added,
+            "mine": {"reading": reading, "finished": sum(1 for row in rows if finished(row))},
+            "family_finished": sum(1 for row in family_hub.reading_rows() if finished(row))}
 
 
 @bp.get("/books")
