@@ -102,6 +102,43 @@ function toast(message, isError, ms) {
   later();
 }
 const oops = (err) => { if (!(err instanceof Stale)) toast(err.message, true); };
+
+// Asking before something that cannot be taken back, in the hub's own look rather than the browser's grey box.
+// A <dialog> shown as modal keeps focus inside it, closes on Esc, and puts focus back on the button that opened it.
+// ask(text, { yes: 'Delete book', danger: true }) -> true when the action is chosen. On a dangerous one Cancel
+// has the focus, so Enter alone never deletes. With passcode: {...} it resolves to { set: '…' }, { remove: true } or null.
+function ask(text, opts) {
+  const { yes = 'Yes', no = 'Cancel', danger = false, title = '', passcode = null } = opts || {};
+  return new Promise((resolve) => {
+    let answer = passcode ? null : false;
+    const box = el('dialog', { class: 'ask', 'aria-labelledby': 'ask-title', 'aria-describedby': 'ask-text' });
+    const done = (value) => { answer = value; box.close(); };
+    const yesBtn = el('button', { class: 'btn ' + (danger ? 'danger' : 'pri'), type: 'button', text: yes });
+    const noBtn = el('button', { class: 'btn', type: 'button', text: no, onclick: () => box.close() });
+    let field = null;
+    if (passcode) {
+      field = el('input', { type: 'password', id: 'ask-pass', autocomplete: 'new-password', inputmode: 'numeric' });
+      yesBtn.disabled = true;
+      field.addEventListener('input', () => { yesBtn.disabled = !field.value; });
+      field.addEventListener('keydown', (event) => { if (event.key === 'Enter' && field.value) done({ set: field.value }); });
+      yesBtn.addEventListener('click', () => done({ set: field.value }));
+    } else {
+      yesBtn.addEventListener('click', () => done(true));
+    }
+    box.append(...[
+      el('h2', { id: 'ask-title', text: title || (danger ? 'Are you sure?' : 'Check before going on') }),
+      el('p', { id: 'ask-text', text }),
+      field ? el('div', { class: 'field' }, el('label', { class: 'lab', for: 'ask-pass', text: 'New passcode' }), field) : null,
+      el('div', { class: 'row ask-buttons' },
+        passcode && passcode.removable ? el('button', { class: 'btn danger ask-remove', type: 'button', text: 'Remove passcode',
+          onclick: () => done({ remove: true }) }) : null,
+        noBtn, yesBtn)].filter(Boolean));
+    box.addEventListener('close', () => { box.remove(); resolve(answer); });
+    document.body.append(box);
+    box.showModal();
+    (field || (danger ? noBtn : yesBtn)).focus();
+  });
+}
 // "1st", "2nd", "3rd", "11th", "22nd"
 const ordinal = (n) => n + ([, 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || [, 'st', 'nd', 'rd'][n % 100] || 'th');
 // A book just finished: where it comes in the year. The first, and every tenth, get a word more.
@@ -803,7 +840,8 @@ async function pageMediaItem(kind, id) {
           el('p', { class: 'small dim',
               text: 'Deletes ' + (kind === 'film' ? 'the film' : 'every episode') + ' and stops looking for ' + (kind === 'film' ? 'it' : 'new ones') + '. This cannot be undone.' }),
           el('div', { class: 'row' }, el('button', { class: 'btn danger', type: 'button', text: 'Remove ' + item.title, onclick: async () => {
-            if (!window.confirm('Remove "' + item.title + '" from the server and delete its files' + (item.size ? ' (' + gb(item.size) + ')' : '') + '? This cannot be undone.')) return;
+            if (!(await ask('Remove "' + item.title + '" from the server and delete its files' + (item.size ? ' (' + gb(item.size) + ')' : '') + '? This cannot be undone.',
+                { yes: 'Remove ' + (kind === 'film' ? 'film' : 'show'), danger: true }))) return;
             try { await api('DELETE', '/api/media/' + kind + '/' + id); toast(item.title + ' was removed.'); location.hash = '#/movies'; } catch (err) { oops(err); }
           } }))) : null));
 }
@@ -954,7 +992,7 @@ async function pageDownloads() {
     const waiting = shown.filter((item) => !item.done && item.waiting_seed && !item.missing);
     // Downloads whose files were moved by hand: qBittorrent cannot find them. Forgetting them leaves the files alone.
     const forgetAll = el('button', { class: 'btn sm', type: 'button', text: 'Forget all ' + missing.length + ' (files stay)', onclick: async () => {
-      if (!window.confirm('Take these ' + missing.length + ' downloads off qBittorrent\'s list? Their files are not touched, wherever they are. A film or show you do not have can be asked for again.')) return;
+      if (!(await ask('Take these ' + missing.length + ' downloads off qBittorrent\'s list? Their files are not touched, wherever they are. A film or show you do not have can be asked for again.', { yes: 'Forget ' + missing.length }))) return;
       forgetAll.disabled = true;
       try { const result = await api('POST', '/api/media/torrents/forget',
           { hashes: missing.map((torrent) => torrent.hash) }); toast(result.message); } catch (err) { if (!(err instanceof Stale)) oops(err); }
@@ -1156,7 +1194,8 @@ function sortPanel() {
           item.status === 'ready' || item.status === 'better' ? el('button', { class: 'btn sm pri', type: 'button', text: 'File it',
             onclick: (event) => send(event.currentTarget, '/api/admin/media/sort', { path: item.path }, look) }) : null,
           item.status === 'have' || /short sample/.test(item.reason) ? el('button', { class: 'btn sm danger', type: 'button', text: 'Delete spare',
-            onclick: (event) => { if (window.confirm('Delete "' + item.name + '" for good? The copy in the library stays.')) send(event.currentTarget,
+            onclick: async (event) => { const button = event.currentTarget;
+              if (await ask('Delete "' + item.name + '" for good? The copy in the library stays.', { yes: 'Delete spare', danger: true })) send(button,
                 '/api/admin/media/sort/remove', { path: item.path }, look); } }) : null)),
       el('div', { class: 'small dim', text: facts.filter(Boolean).join(' · ') }),
       el('div', { class: 'small ' + (item.status === 'problem' ? 'bad' : item.status === 'have' ? 'warn' : ''), text: item.reason }),
@@ -1332,8 +1371,8 @@ function torrentRow(torrent, listing, reload) {
           : show ? 'Delete the whole show "' + show + '" everywhere: this download, every episode already on the server, and the show from Jellyfin. It will not be looked for again.'
           : torrent.type === 'Book' ? 'Delete the download "' + torrent.title + '" and its files. A book already added to the library stays there; delete it from its page in Books.'
           : 'Delete "' + torrent.title + '" and its downloaded files.';
-        if (!window.confirm(what + ' This cannot be undone.')) return;
         const btn = ev.currentTarget;
+        if (!(await ask(what + ' This cannot be undone.', { yes: 'Delete download', danger: true }))) return;
         btn.disabled = true;
         try { const result = await api('DELETE', '/api/media/torrents/' + torrent.hash); toast(result.message); } catch (err) { if (!(err instanceof Stale)) oops(err); }
         btn.blur();  // the list is left alone while focus is in it
@@ -1572,8 +1611,8 @@ function mySettings() {
       el('div', { class: 'stack' }, el('h3', { text: 'Passcode' }),
         el('div', { class: 'row end' }, field('New passcode (leave empty to remove)', pass),
           // An empty box removes the passcode, so say so before doing it rather than after.
-          el('button', { class: 'btn', type: 'button', text: 'Save passcode', onclick: () => {
-            if (!pass.value && !window.confirm('Remove your passcode? Anyone using this hub could then open your profile.')) return;
+          el('button', { class: 'btn', type: 'button', text: 'Save passcode', onclick: async () => {
+            if (!pass.value && !(await ask('Remove your passcode? Anyone using this hub could then open your profile.', { yes: 'Remove passcode', danger: true }))) return;
             save({ passcode: pass.value }, pass.value ? 'Passcode saved.' : 'Passcode removed.');
           } }))),
       el('div', { class: 'stack' }, el('h3', { text: 'Reading app sync' }),
@@ -1615,7 +1654,7 @@ function goodreadsBox(profileId) {
         el('button', { class: 'btn', type: 'button', text: 'Save link', onclick: () => send({ link: input.value }, input.value.trim() ? 'Link saved. Reading the shelves now.' : 'Link removed.') }),
         info.linked ? el('button', { class: 'btn', type: 'button', disabled: info.busy, text: 'Read shelves now', onclick: () => send({ sync: true }, 'Reading the shelves now.') }) : null,
         info.linked ? el('button', { class: 'btn', type: 'button', text: 'Remove link',
-            onclick: () => { if (window.confirm('Remove the Goodreads link? Reading history already taken from it stays; the "Available on Kindle" books from it are no longer listed.')) send({ link: '' },
+            onclick: async () => { if (await ask('Remove the Goodreads link? Reading history already taken from it stays; the "Available on Kindle" books from it are no longer listed.', { yes: 'Remove link', danger: true })) send({ link: '' },
             'Link removed.'); } }) : null),
       el('div', { class: 'row end' }, field('Or import a Goodreads export file (.csv)', file),
         el('button', { class: 'btn', type: 'button', text: 'Import file', onclick: async () => {
@@ -1671,7 +1710,7 @@ function devicesBox(profileId) {
           dev.link ? el('a', { class: 'btn', href: dev.link, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + dev.name + ' in a new tab', text: 'Open' }) : null,
           el('button', { class: 'btn', type: 'button', text: 'Change', 'aria-label': 'Change ' + dev.name, onclick: () => { editing = dev; draw(); } }),
           el('button', { class: 'btn danger', type: 'button', text: 'Remove', 'aria-label': 'Remove ' + dev.name, onclick: async () => {
-            if (!window.confirm('Remove ' + dev.name + ' from the list? Books already on it stay on it.')) return;
+            if (!(await ask('Remove ' + dev.name + ' from the list? Books already on it stay on it.', { yes: 'Remove device', danger: true }))) return;
             try { await api('DELETE', '/api/devices/' + dev.id); toast('Device removed.'); draw(); } catch (err) { oops(err); }
           } }))),
       help(dev)))) : el('p', { class: 'small dim', text: 'No devices yet.' });
@@ -2736,7 +2775,8 @@ async function pageSeries(id) {
         el('div', { class: 'row' },
           info.next ? el('a', { class: 'btn pri', href: '#/read/' + info.id + '/' + info.next.order, text: (info.read ? 'Continue: ' : 'Start: ') + info.next.name }) : null,
           !canRequest() ? null : el('button', { class: 'btn', type: 'button', text: info.following ? 'Stop following' : 'Follow', onclick: async () => {
-            if (info.following && !window.confirm('Stop following ' + info.title + '? New chapters will no longer be fetched. The chapters already kept stay on the server.')) return;
+            if (info.following && !(await ask('Stop following ' + info.title + '? New chapters will no longer be fetched. The chapters already kept stay on the server.',
+                { yes: 'Stop following' }))) return;
             try { const added = await api('POST', '/api/series/' + info.id + '/follow',
                 { on: !info.following }); toast(info.following ? 'No longer following.' : 'Following. ' + plural(added.queued,
                 'chapter') + ' queued to download.'); again(); } catch (err) { oops(err); }
@@ -2892,7 +2932,7 @@ async function pageBook(id) {
     const copies = (book.copies || []).length;
     more.push(el('button', { class: 'btn danger', type: 'button', text: 'Delete this book', onclick: async () => {
       const files = (book.formats.join(', ') || 'no file') + (copies ? ' and ' + plural(copies, 'other copy', 'other copies') : '');
-      if (!window.confirm('Delete "' + book.title + '" (' + files + ') from the library for good? Its files are removed. A copy of the library\'s database is saved first, and the nightly copy (if switched on) still has the book.')) return;
+      if (!(await ask('Delete "' + book.title + '" (' + files + ') from the library for good? Its files are removed. A copy of the library\'s database is saved first, and the nightly copy (if switched on) still has the book.', { yes: 'Delete book', danger: true }))) return;
       try { const result = await api('DELETE', '/api/books/' + book.id); toast('"' + result.removed + '" was deleted.'); location.hash = '#/library'; } catch (err) { oops(err); }
     } }));
   }
@@ -3627,11 +3667,16 @@ function profilesCard(stats) {
           el('td', {}, el('div', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' },
             el('a', { class: 'btn sm', href: '#/devices/' + person.id, 'aria-label': 'Devices for ' + person.name, text: 'Devices' }),
             el('button', { class: 'btn sm', type: 'button', text: 'Reset passcode',
-                onclick: () => { const passcode = window.prompt('New passcode for ' + person.name + ' (leave empty to remove it):',
-                ''); if (passcode !== null) patch(person.id, { passcode: passcode },
-                passcode ? 'Passcode updated.' : person.name + ' has no passcode now.'); } }),
+                onclick: async () => {
+                  const answer = await ask('Choose a new passcode for ' + person.name + '. Tell them what it is; it is not shown again.',
+                    { title: 'Reset passcode', yes: 'Set passcode', passcode: { removable: true } });
+                  if (!answer) return;
+                  if (answer.remove && !(await ask('Remove ' + person.name + '\'s passcode? Anyone using this hub could then open their profile.',
+                    { yes: 'Remove passcode', danger: true }))) return;
+                  patch(person.id, { passcode: answer.remove ? '' : answer.set }, answer.remove ? person.name + ' has no passcode now.' : 'Passcode updated.');
+                } }),
             person.id === appState.me.id ? null : el('button', { class: 'btn sm danger', type: 'button', text: 'Delete', onclick: async () => {
-              if (!window.confirm('Delete ' + person.name + ' and their ratings, tags and reading history? A backup is saved first.')) return;
+              if (!(await ask('Delete ' + person.name + ' and their ratings, tags and reading history? A backup is saved first.', { yes: 'Delete ' + person.name, danger: true }))) return;
               try { await api('DELETE', '/api/profiles/' + person.id); toast('Profile deleted.'); route(); } catch (err) { oops(err); }
             } }))));
       })))),
@@ -3858,7 +3903,7 @@ function tagMergePanel() {
     const preview = await api('POST', '/api/admin/tags/merge/preview', { tags: names, keep });
     if (!preview.names.length) { toast('Choose at least one other tag to merge into "' + keep + '".', true); return; }
     const from = preview.names.map((name) => '"' + name + '"').join(', ');
-    if (!window.confirm('Merge ' + from + ' into "' + keep + '"? ' + mergeSentence(preview))) return;
+    if (!(await ask('Merge ' + from + ' into "' + keep + '"? ' + mergeSentence(preview), { yes: 'Merge tags' }))) return;
     await api('POST', '/api/admin/tags/merge', { tags: preview.names, keep });
     toast('Merged into "' + keep + '".');
     pageTags().catch(oops);  // the tag list below changes too
@@ -4267,10 +4312,11 @@ function reviewPanel(only) {
       : 'Getting ready to sort the library again…') : 'Writing ' + job.done + ' of ' + plural(job.total, 'book') + ' to the library…';
     fill(jobArea, el('p', { class: 'small', role: 'status', text: words }), bar(job.total ? 100 * job.done / job.total : 2, words));
   }
-  function resort(event) {
-    if (!window.confirm('Sort every book in the library again? Books whose kind someone chose are left as they are. Reading the first pages of every PDF takes a while; '
-      + 'the suggestions fill in when it is done.')) return;
-    event.currentTarget.disabled = true;
+  async function resort(event) {
+    const button = event.currentTarget;
+    if (!(await ask('Sort every book in the library again? Books whose kind someone chose are left as they are. Reading the first pages of every PDF takes a while; '
+      + 'the suggestions fill in when it is done.', { yes: 'Sort again' }))) return;
+    button.disabled = true;
     api('POST', '/api/admin/review/resort').then((answer) => { data.job = answer.job; watch(); }).catch(oops);
   }
 
@@ -4281,9 +4327,9 @@ function reviewPanel(only) {
     drawList();
     load();
   }
-  function confirmAll(item, fields) {
-    if (!window.confirm('Confirm all ' + item.batch_size + ' books like this? Each keeps its own title and number; the game, edition, role, kind, publisher, '
-      + 'language and tags you see here go on all of them. The library database is copied first.')) return;
+  async function confirmAll(item, fields) {
+    if (!(await ask('Confirm all ' + item.batch_size + ' books like this? Each keeps its own title and number; the game, edition, role, kind, publisher, '
+      + 'language and tags you see here go on all of them. The library database is copied first.', { yes: 'Confirm all ' + item.batch_size }))) return;
     api('POST', '/api/admin/review/' + item.book_id, { action: 'confirm_all', batch: item.batch, fields, new_game: item.new_game })
       .then((answer) => { data.job = answer.job; watch(); }).catch(oops);
   }
@@ -4416,9 +4462,10 @@ function reviewPanel(only) {
         el('button', { class: 'btn sm', type: 'button', text: 'Edit', 'aria-label': 'Edit ' + item.title, onclick: () => row.replaceWith(itemCard(item, true)) }));
       return row;
     }));
-    const write = (event) => {
-      if (!window.confirm('Write ' + plural(group.count, 'book') + ' to the library? The library database is copied first.')) return;
-      event.currentTarget.disabled = true;
+    const write = async (event) => {
+      const button = event.currentTarget;
+      if (!(await ask('Write ' + plural(group.count, 'book') + ' to the library? The library database is copied first.', { yes: 'Write to the library' }))) return;
+      button.disabled = true;
       api('POST', '/api/admin/review/ready/' + group.rule).then((answer) => { data.job = answer.job; watch(); }).catch(oops);
     };
     return el('div', { class: 'rv stack rv-ready' },
@@ -4488,9 +4535,10 @@ async function pageRules() {
     } }))));
   const rules = data.rules.map((rule) => el('div', { class: 'stack gap8' },
     el('div', { class: 'row between gap8' }, el('strong', { style: 'flex:1 1 320px;min-width:0', text: rule.words }),
-      el('button', { class: 'btn sm danger', type: 'button', text: 'Delete', 'aria-label': 'Delete the rule: ' + rule.words, onclick: (event) => {
-        if (!window.confirm('Delete this rule? Books it sorted keep their sort; new ones like them will wait in the queue again.')) return;
-        event.currentTarget.disabled = true;
+      el('button', { class: 'btn sm danger', type: 'button', text: 'Delete', 'aria-label': 'Delete the rule: ' + rule.words, onclick: async (event) => {
+        const button = event.currentTarget;
+        if (!(await ask('Delete this rule? Books it sorted keep their sort; new ones like them will wait in the queue again.', { yes: 'Delete rule', danger: true }))) return;
+        button.disabled = true;
         api('DELETE', '/api/admin/review/rules/' + rule.id).then(() => { toast('Rule deleted.'); again(); }).catch(oops);
       } })),
     el('p', { class: 'small dim', text: 'From ' + plural(rule.confirmations, 'confirmation') + (rule.note ? ' (' + rule.note + ')' : '') + ', ' + niceDate(rule.created) + '.' }),
@@ -4555,7 +4603,7 @@ function spareEntry(book, extra) {
         target: '_blank', rel: 'noopener', text: 'Open in Calibre-Web' }) : null, extra || null));
 }
 function spareCopiesCard(data, again) {
-  const run = (body, sure) => { if (!window.confirm(sure)) return; api('POST', '/api/admin/duplicates', body).then(() => { toast('Started. This page follows it.'); again(); }).catch(oops); };
+  const run = async (body, sure) => { if (!(await ask(sure, { yes: 'Go ahead' }))) return; api('POST', '/api/admin/duplicates', body).then(() => { toast('Started. This page follows it.'); again(); }).catch(oops); };
   const busy = data.job.running;
   if (busy) setTimeout(() => { if (location.hash.startsWith('#/copies')) again(); }, 3000);
   const of = (cls) => data.sets.filter((set) => set.cls === cls);
