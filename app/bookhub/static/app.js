@@ -461,6 +461,25 @@ async function route() {
   if (moved && gen === routeGen && (!document.activeElement || document.activeElement === document.body)) main().focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', route);
+// The book page's top is washed in its cover's colour: the colour made from the title for a plain jacket, or the
+// average colour of the real cover art, read from a 1-pixel drawing of it once the picture has loaded.
+function coverWash(detail, book) {
+  detail.style.setProperty('--wash', coverColor(book.title));
+  if (book.has_cover) {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+        const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, 1, 1);
+        const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+        detail.style.setProperty('--wash', 'rgb(' + r + ' ' + g + ' ' + b + ')');
+      } catch (err) { /* a picture the page may not read keeps the title colour */ }
+    };
+    img.src = coverUrl(book);
+  }
+  return detail;
+}
+
 // Opening a book: the cover (or the spine, on a shelf) grows into the book's own cover on its page. A View Transition
 // does the drawing; where the browser has none, or motion is turned down, the page simply changes as before.
 let bookOpening = false;
@@ -3076,7 +3095,9 @@ async function pageBook(id) {
   const side = el('div', { class: 'bside' },
     el('div', Object.assign({ class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title),
         style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') + ';view-transition-name:book-cover' }, jacket(book)),
-      el('span', { class: 'fmt', text: book.formats.join(' · ') }), el('span', { class: 't t-hero', text: book.has_cover ? '' : book.title }), jacketAuthor(book)),
+      el('span', { class: 'fmt', text: book.formats.join(' · ') }), el('span', { class: 't t-hero', text: book.has_cover ? '' : book.title }), jacketAuthor(book),
+      book.status === 'reading' && !guest ? el('span', { class: 'ribbon', style: '--at:' + Math.max(16, Math.min(100, Math.round(book.percent || 0))) + '%',
+        title: Math.round(book.percent || 0) + '% read', 'aria-hidden': 'true' }, el('b', { text: Math.round(book.percent || 0) + '%' })) : null),
     book.formats.map((fmt, index) => el('a', { class: 'btn' + (index === 0 ? ' pri' : ''), href: '/api/books/' + id + '/download/' + fmt, text: 'Download ' + fmt })),
     book.formats.length || book.converted ? null : el('p', { class: 'small warn',
         text: 'The library has this book\'s details but no file for it, so there is nothing to download. Adding the file again in Calibre-Web fixes it.' }),
@@ -3223,7 +3244,7 @@ async function pageBook(id) {
   body.append(similarList('Similar books', sim.books));
   if (familyPanel) body.append(familyPanel);
   setMain(back('#/library', 'Back to the library'),
-    el('div', { class: 'detail' }, side, body));
+    coverWash(el('div', { class: 'detail' }, side, body), book));
   nameThePage(book.title);
 }
 
@@ -3448,11 +3469,36 @@ function yearShelf(stats) {
       ? el('a', { class: 'spine', href: '#/book/' + book.id, style: look, title: label, 'aria-label': label }, spine)
       : el('span', { class: 'spine away', role: 'img', tabindex: '0', style: look, title: label, 'aria-label': label }, spine));
   });
-  return el('section', { class: 'panel cut' }, head('Your ' + stats.year + ' shelf', books.length ? el('span', { class: 'small dim', text: plural(books.length, 'spine') }) : null),
+  return el('div', { class: 'stack gap10' },
     books.length ? el('div', { class: 'yearshelf', role: 'list', 'aria-label': 'Books finished in ' + stats.year + ', in order' },
       slots)
       : el('p', { class: 'small dim', text: 'Nothing on the shelf yet. Each book you finish this year stands here, in the order you finished them.' }),
     books.length ? el('p', { class: 'small dim', text: 'Longer books stand thicker. Striped spines were read outside the family library.' }) : null);
+}
+
+// The year written out: the recap page (Dashboard, "Your year so far", and in December "Your <year> in books").
+// Sentences, not a wall of numbers: what was read, the longest, the most-read author, how the year began and where it is.
+function pageRecap(base) {
+  const books = base.shelf || [];
+  const december = new Date().getMonth() === 11;
+  const longest = books.filter((book) => book.pages).sort((left, right) => right.pages - left.pages)[0];
+  const month = (iso) => (iso && iso.length >= 7 ? new Date(iso.slice(0, 7) + '-01T00:00:00').toLocaleDateString(undefined, { month: 'long' }) : '');
+  const elsewhere = books.filter((book) => !book.in_library).length;
+  const author = base.authors[0];
+  const tag = (base.top.epub[0] || base.top.community[0] || [])[0];
+  const big = (text) => el('strong', { class: 'recap-n', text });
+  const lines = books.length ? [
+    el('p', {}, 'You have read ', big(plural(base.read_year, 'book')), ' this year', base.pages_year ? [', ', big(base.pages_year.toLocaleString()), ' pages of them'] : '', '.'),
+    el('p', {}, 'It began with ', el('em', { text: books[0].title }), ' in ', month(books[0].finished),
+      books.length > 1 ? [' and, ' + (december ? 'as the year closes' : 'so far'), ', ends with ', el('em', { text: books[books.length - 1].title }), '.'] : '.'),
+    longest ? el('p', {}, 'The longest was ', el('em', { text: longest.title }), ', at ' + longest.pages.toLocaleString() + ' pages.') : null,
+    author ? el('p', {}, 'You read ', author[0], ' most', author[1] > 1 ? ' (' + plural(author[1], 'book') + ')' : '', tag ? '; mostly ' + tag.toLowerCase() + '.' : '.') : null,
+    elsewhere ? el('p', { text: plural(elsewhere, 'book') + ' came from outside the family library.' }) : null,
+  ] : [el('p', { text: 'Nothing finished yet this year. The recap writes itself as you go.' })];
+  setMain(back('#/dashboard', 'Back to my reading'),
+    pageHead(december ? 'Your ' + base.year + ' in books' : 'Your ' + base.year + ' so far'),
+    el('section', { class: 'recap' }, lines),
+    books.length ? el('section', { class: 'panel cut' }, head('The shelf'), yearShelf(base)) : null);
 }
 
 // The Library as a shelf: one spine per book (a series stands as one spine with its volume count), in the Library's
@@ -3489,12 +3535,31 @@ function libraryShelf(items, order) {
     : el('p', { class: 'small dim', text: 'No books to stand on the shelf here.' });
 }
 
+// The year on the Dashboard: one panel, the shelf by default and the month-by-month chart a switch away (remembered).
+function yearPanel(base, trend) {
+  let mode = 'shelf';
+  try { mode = localStorage.getItem('bookhub-year-view') || 'shelf'; } catch (err) { /* private browsing */ }
+  const shelf = yearShelf(base);
+  const box = el('div', {});
+  const pick = el('div', { class: 'tabs sm', role: 'radiogroup', 'aria-label': 'Show the year as' });
+  const draw = () => {
+    fill(pick, ...[['shelf', 'Shelf'], ['chart', 'Chart']].map(([key, label]) => el('button', { type: 'button', role: 'radio', 'aria-checked': String(mode === key), text: label,
+      onclick: () => { mode = key; try { localStorage.setItem('bookhub-year-view', key); } catch (err) { /* private browsing */ } draw(); } })));
+    fill(box, mode === 'chart' ? trend : shelf);
+  };
+  draw();
+  return el('section', { class: 'panel cut' },
+    head('Your ' + base.year, base.shelf.length ? el('span', { class: 'small dim', text: plural(base.shelf.length, 'book') }) : null, pick,
+      el('a', { class: 'btn sm', href: '#/dashboard/recap', text: 'Your year so far' })), box);
+}
+
 function titleHash(title) { let hash = 7; for (const char of title || '') hash = (hash * 33 + char.charCodeAt(0)) >>> 0; return hash; }
 
-async function pageDashboard() {
+async function pageDashboard(sub) {
   const view = { kind: '', value: '', metric: 'books' };
   const base = await api('GET', '/api/stats/me');
-  const trend = el('section', { class: 'panel cut' });
+  if (sub === 'recap') { nameThePage('Your year'); return pageRecap(base); }
+  const trend = el('div', { class: 'stack' });
   const chips = [{ kind: '', value: '', label: 'All books', src: '' }];
   base.top.epub.slice(0, 3).forEach(([tag]) => chips.push({ kind: 'genre', value: tag, label: tag, src: 'Genre' }));
   base.top.community.slice(0, 3).forEach(([tag]) => chips.push({ kind: 'community', value: tag, label: tag, src: 'Community' }));
@@ -3510,9 +3575,9 @@ async function pageDashboard() {
     // The chart starts at the first month anything was read, not with a row of empty months.
     const first = stats.months.findIndex((month) => month.library + month.outside + month.pages > 0);
     const months = first < 0 ? [] : stats.months.slice(first);
-    fill(trend, 
-      head('Reading trend', el('div', { class: 'row', role: 'group', 'aria-label': 'Measure' }, [['books', 'Books'], ['pages', 'Pages']].map(([key, label]) =>
-          el('button', { class: 'chip', type: 'button', 'aria-pressed': String(view.metric === key), text: label, onclick: () => { view.metric = key; drawTrend().catch(oops); } })))),
+    fill(trend,
+      el('div', { class: 'row', role: 'group', 'aria-label': 'Measure' }, [['books', 'Books'], ['pages', 'Pages']].map(([key, label]) =>
+          el('button', { class: 'chip', type: 'button', 'aria-pressed': String(view.metric === key), text: label, onclick: () => { view.metric = key; drawTrend().catch(oops); } }))),
       el('div', { class: 'row', role: 'group', 'aria-label': 'Filter the trend' }, el('span', { class: 'lab', text: 'Filter by' }),
         chips.map((chip) => el('button', { class: 'chip', type: 'button',
             'aria-pressed': String(view.kind === chip.kind && view.value === chip.value),
@@ -3567,8 +3632,9 @@ async function pageDashboard() {
       tile('Read this month', base.read_month, plural(base.month_books, 'book') + ' · ' + plural(base.month_graphic, 'graphic novel volume'), 'Nothing finished yet this month.'),
       tile('Pages read this year', base.pages_year.toLocaleString(), base.pages_unknown ? plural(base.pages_unknown, 'book') + ' without a page count' : 'From finished books'),
       tile('Authors read this year', base.authors_year, '', 'No named authors yet; books with an unknown author are not counted.')),
-    yearShelf(base),
-    trend,
+    new Date().getMonth() === 11 && base.shelf.length ? el('a', { class: 'panel cut recap-call', href: '#/dashboard/recap' },
+      el('strong', { text: 'Your ' + base.year + ' in books is ready' }), el('span', { class: 'small dim', text: plural(base.read_year, 'book') + ', written out ›' })) : null,
+    yearPanel(base, trend),
     el('div', { class: 'cols3' },
       barList('Top book file tags', base.top.epub, 'var(--accent)'), barList('Top community tags', base.top.community, 'var(--accent2)'),
       barList('Top family and personal tags', base.top.family.concat(base.top.mine).sort((left, right) => right[1] - left[1]),
