@@ -291,6 +291,7 @@ def state():
         "kinds": kinds.KINDS,
         "device_kinds": devices.KINDS,
         "look": looks.current(family_hub.con()),
+        "hues": looks.profile_hues(family_hub.con()),
         # The visuals' version (so a new one from GitHub is fetched) and, for someone signed in, the home town.
         "visuals": {"version": visuals.version(family_hub),
                     "place": _home_place(family_hub) if who else None},
@@ -445,6 +446,10 @@ def update_profile(who, profile_id):
     if "hardcover_token" in data:
         sets.append("hardcover_token=?")
         args.append(str(data["hardcover_token"] or "").strip() or None)
+    if "hue" in data:  # your own colour, used when an admin has switched on "each person's own colour"
+        error = looks.set_profile_hue(family_hub.con(), profile_id, data["hue"])
+        if error:
+            return fail(error)
     if admin:
         if "name" in data and clean(data["name"]):
             sets.append("name=?")

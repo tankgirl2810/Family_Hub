@@ -289,7 +289,14 @@ function applyLook(look) {
     root.dataset.design = look.design;
   }
   root.dataset.theme = look.theme;
-  setAccent(look.accent);
+  setAccent(ownHue() ?? look.accent);
+}
+// This person's own colour, when an admin lets each person have one and they picked one; otherwise null.
+function ownHue() {
+  const me = appState.me;
+  if (!appState.look || !appState.look.personal || !me || me.guest || !appState.hues) return null;
+  const hue = appState.hues[me.id];
+  return hue === undefined ? null : hue;
 }
 
 // The visuals at the top of Home run in sandboxed frames (visuals.py), which cannot read this page's
@@ -438,7 +445,7 @@ async function route() {
   Tracker.kick();
   // The design's screen-change effect, when moving to a different screen. Its stylesheet keeps it still for reduced motion.
   const moved = lastHash !== null && lastHash !== location.hash;
-  if (appState.look.transition && moved) SetPieces.transition();
+  if (appState.look.transition && moved && !bookOpening) SetPieces.transition();
   lastHash = location.hash;
   // A new screen starts at the top, not wherever the last one was scrolled to.
   if (moved) window.scrollTo(0, 0);
@@ -454,6 +461,21 @@ async function route() {
   if (moved && gen === routeGen && (!document.activeElement || document.activeElement === document.body)) main().focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', route);
+// Opening a book: the cover (or the spine, on a shelf) grows into the book's own cover on its page. A View Transition
+// does the drawing; where the browser has none, or motion is turned down, the page simply changes as before.
+let bookOpening = false;
+document.addEventListener('click', (event) => {
+  const link = event.target.closest && event.target.closest('a.cover[href^="#/book/"], a.spine[href^="#/book/"]');
+  if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (!document.startViewTransition || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  event.preventDefault();
+  link.style.viewTransitionName = 'book-cover';
+  bookOpening = true;
+  document.startViewTransition(async () => {
+    history.pushState(null, '', link.getAttribute('href'));  // no hashchange: route() runs here, inside the transition
+    await route();
+  }).finished.finally(() => { bookOpening = false; });
+});
 // "/" goes to the page's search box (Library, Discover, Films and TV), as on most sites; not while typing somewhere.
 document.addEventListener('keydown', (event) => {
   if (event.key !== '/' || event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
@@ -1660,7 +1682,9 @@ function pageProfiles() {
     pass.focus();
   }
   const doors = appState.profiles.map((profile, index) => {
-    const door = el('button', { class: 'door', type: 'button', 'aria-pressed': 'false', style: '--tone:' + TONES[index % TONES.length] },
+    const own = appState.look.personal && appState.hues ? appState.hues[profile.id] : undefined;
+    const door = el('button', { class: 'door', type: 'button', 'aria-pressed': 'false',
+      style: own === undefined ? '--tone:' + TONES[index % TONES.length] : '--door-h:' + own, 'data-own': own === undefined ? null : '' },
       el('span', { class: 'glass glow', 'aria-hidden': 'true', text: profile.name[0].toUpperCase() }),
       el('span', { class: 'name', text: profile.name }),
       el('span', { class: 'tag' + (profile.role === 'admin' ? ' on' : ''), text: profile.role === 'admin' ? 'Admin' : 'Member' }),
@@ -1697,9 +1721,19 @@ function mySettings() {
   const sync = el('input', { type: 'password', autocomplete: 'new-password' });
   const token = el('input', { type: 'password', autocomplete: 'off', placeholder: appState.me.tracker_linked ? 'Saved. Paste a new key to replace it' : '' });
   const syncUrl = location.origin + '/kosync';
+  // Your colour: only offered when an admin has switched on each person's own colour.
+  const mine = ownHue();
+  const colour = appState.look.personal ? el('div', { class: 'stack huepick' }, el('h3', { text: 'Your colour' }),
+    el('p', { class: 'small dim', text: 'The hub shows in this colour while you are signed in, on any device. Others keep theirs.' }),
+    el('div', { class: 'presets', role: 'group', 'aria-label': 'Your colour' },
+      el('button', { type: 'button', 'aria-pressed': String(mine === null), onclick: () => save({ hue: null }, 'You see the household colour again.') },
+        el('i', { style: '--sw:var(--accent2)' }), 'Household'),
+      appState.look.accents.map((accent) => el('button', { type: 'button', 'aria-pressed': String(mine === accent.hue),
+        onclick: () => save({ hue: accent.hue }, 'The hub is now ' + accent.name.toLowerCase() + ' for you.') },
+        el('i', { style: '--sw:oklch(.68 .16 ' + accent.hue + ')' }), accent.name)))) : null;
   return el('section', { class: 'panel cut' },
     head('Settings for ' + appState.me.name),
-    el('div', { class: 'list' },
+    el('div', { class: 'list' }, colour,
       el('div', { class: 'stack' }, el('h3', { text: 'Passcode' }),
         el('div', { class: 'row end' }, field('New passcode (leave empty to remove)', pass),
           // An empty box removes the passcode, so say so before doing it rather than after.
@@ -3041,7 +3075,7 @@ async function pageBook(id) {
   const guest = isGuest();
   const side = el('div', { class: 'bside' },
     el('div', Object.assign({ class: 'cover' + (book.has_cover ? ' has-img' : '') + titleSize(book.title),
-        style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') }, jacket(book)),
+        style: '--cv:' + coverColor(book.title) + (book.has_cover ? ';background-image:url(' + coverUrl(book) + ')' : '') + ';view-transition-name:book-cover' }, jacket(book)),
       el('span', { class: 'fmt', text: book.formats.join(' · ') }), el('span', { class: 't t-hero', text: book.has_cover ? '' : book.title }), jacketAuthor(book)),
     book.formats.map((fmt, index) => el('a', { class: 'btn' + (index === 0 ? ' pri' : ''), href: '/api/books/' + id + '/download/' + fmt, text: 'Download ' + fmt })),
     book.formats.length || book.converted ? null : el('p', { class: 'small warn',
@@ -3774,6 +3808,10 @@ function appearanceCard(data, reload) {
       el('div', { class: 'row gap10' },
         look.accent === null ? null : el('button', { class: 'btn sm', type: 'button', text: 'Reset to purple', onclick: () => save({ accent: null }, 'The accent is back to purple.') }),
         el('span', { class: 'small dim', text: 'Dark and Light use it as the accent; Blueprint prints everything in it. Paper is printed in black only and keeps no accent.' }))),
+    el('div', { class: 'line' }, el('div', { class: 'grow' }, el('div', { style: 'font-weight:600', text: 'Each person’s own colour' }),
+      el('div', { class: 'small dim', text: 'When on, anyone who picks a colour in their own settings sees the hub in it; everyone else, and guests, see the accent above.' })),
+      el('button', { class: 'chip', type: 'button', 'aria-pressed': String(look.personal), text: look.personal ? 'Own colours: on' : 'Own colours: off',
+        onclick: () => save({ personal: !look.personal }, look.personal ? 'Everyone sees the household accent again.' : 'Each person can now pick their own colour in their settings.') })),
     visualsChooser(look, save),
     el('div', { class: 'line' }, el('div', { class: 'grow' }, el('div', { style: 'font-weight:600', text: look.piece.transition }),
       el('div', { class: 'small dim', text: 'A sheet of grid paper passes down the page when anyone moves between screens. It stays off on devices set to reduce motion.' })),
