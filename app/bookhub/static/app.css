@@ -725,3 +725,13 @@ dialog.ask .ask-remove { margin-right: auto; }
   .detail .bside > .cover[data-kind] { padding: 10px; }
   .detail .bside > .cover[data-kind]::before { inset: 4px; }
 }
+
+/* Each person's own colour on their door (when an admin has switched own colours on), in the scheme's accent lightness. */
+.door[data-own] { --tone: oklch(.76 .15 var(--door-h)); }
+:root:is([data-theme="light"], [data-theme="paper"], [data-theme="blueprint"]) .door[data-own] { --tone: oklch(.44 .16 var(--door-h)); }
+.door[data-own] .glass { color: var(--tone); border-color: var(--tone); }
+
+/* Opening a book: the cover grows into the book page's cover; the rest of the page crossfades quickly underneath. */
+::view-transition-group(book-cover) { animation-duration: .42s; animation-timing-function: cubic-bezier(.16, 1, .3, 1); }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: .2s; }
+::view-transition-old(book-cover), ::view-transition-new(book-cover) { height: 100%; object-fit: cover; }

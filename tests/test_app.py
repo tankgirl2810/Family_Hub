@@ -1940,6 +1940,25 @@ def test_spare_copies_are_judged_and_removed_through_the_library_manager(app, cl
     assert client.get("/api/admin/duplicates").status_code == 403 and client.post("/api/admin/duplicates", json={"cls": "identical"}).status_code == 403
 
 
+def test_each_person_can_have_their_own_colour_when_an_admin_allows_it(client):
+    login(client, "Nan")
+    nan = client.get("/api/state").get_json()["me"]["id"]
+    assert client.patch("/api/profiles/%d" % nan, json={"hue": 165}).status_code == 200
+    assert client.patch("/api/profiles/%d" % nan, json={"hue": 400}).status_code == 400
+    state = client.get("/api/state").get_json()
+    assert state["hues"] == {str(nan): 165} and state["look"]["personal"] is False  # off until an admin says so
+    you = next(p["id"] for p in state["profiles"] if p["name"] == "You")
+    assert client.patch("/api/profiles/%d" % you, json={"hue": 20}).status_code == 403  # only your own
+    assert client.post("/api/admin/look", json={"personal": True}).status_code == 403  # the switch is an admin's
+    client.post("/api/logout")
+    login(client, "You")
+    assert client.post("/api/admin/look", json={"personal": True}).status_code == 200
+    assert client.get("/api/state").get_json()["look"]["personal"] is True
+    login(client, "Nan")
+    client.patch("/api/profiles/%d" % nan, json={"hue": None})
+    assert client.get("/api/state").get_json()["hues"] == {}
+
+
 def test_household_look_is_chosen_by_an_admin(app, client):
     login(client, "You")
     look = client.get("/api/state").get_json()["look"]

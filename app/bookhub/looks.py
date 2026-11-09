@@ -100,7 +100,24 @@ def current(con):
         scene = DAILY
     return {"design": design.id, "theme": theme, "scene": scene, "fonts": design.fonts, "piece": design.piece, "sep": design.sep,
             "transition": db.kv_get(con, "look:transition", "on") != "off",
-            "accent": _hue(db.kv_get(con, "look:accent"))}
+            "accent": _hue(db.kv_get(con, "look:accent")),
+            # an admin's switch: when on, each profile that picked a colour sees the hub in it instead of the household accent
+            "personal": db.kv_get(con, "look:personal", "off") == "on",
+            "accents": [{"name": name, "hue": hue} for name, hue in ACCENTS]}
+
+
+def profile_hues(con):
+    """Each profile's own accent hue, for those that picked one: {profile id: hue}."""
+    rows = con.execute("SELECT key, value FROM kv WHERE key LIKE 'look:hue:%'").fetchall()
+    return {int(row[0].rsplit(":", 1)[1]): hue for row in rows if (hue := _hue(row[1])) is not None}
+
+
+def set_profile_hue(con, profile_id, value):
+    """A profile's own colour, a hue from 0 to 359, or None to follow the household. Returns an error message or None."""
+    if value is not None and (isinstance(value, bool) or _hue(value) is None):
+        return "The colour is a hue from 0 to 359."
+    db.kv_set(con, "look:hue:%d" % profile_id, "" if value is None else str(_hue(value)))
+    return None
 
 
 def save(con, data):
@@ -121,6 +138,8 @@ def save(con, data):
         db.kv_set(con, "look:scene", data["scene"])
     if "transition" in data:
         db.kv_set(con, "look:transition", "on" if data["transition"] else "off")
+    if "personal" in data:
+        db.kv_set(con, "look:personal", "on" if data["personal"] else "off")
     if "accent" in data:
         # picking the default purple saves "nothing", so the stylesheet stays the boss of its own colour
         db.kv_set(con, "look:accent", "" if accent is None or _hue(accent) == DEFAULT_HUE else str(_hue(accent)))
