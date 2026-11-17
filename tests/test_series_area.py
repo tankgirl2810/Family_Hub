@@ -3,6 +3,7 @@ import io
 import json
 import re
 import zipfile
+from pathlib import Path
 
 from test_app import app, client, series_server  # noqa: F401
 
@@ -130,3 +131,53 @@ def test_while_the_queue_is_busy_the_shorter_copy_still_downloads_from_the_page(
     assert now["older"] is True and now["size"] > 0
     got = client.get("/api/series/7/file/1")
     assert got.status_code == 200 and sum(n.endswith(".jpg") for n in zipfile.ZipFile(io.BytesIO(got.data)).namelist()) == 4
+
+
+def test_titles_from_different_sites_are_matched_without_their_labels():
+    assert series.same_series("Please Divorce Me (Official)") == series.same_series("Please Divorce Me")
+    assert series.same_series("I Failed to Oust the Villain! [Official][Uncensored]") == series.same_series("I Failed To Oust The Villain")
+    assert series.same_series("I Only Need the Duke’s Child") == series.same_series("I Only Need the Duke's Child")
+    # a name in brackets can be part of the title: two different series called "You Are My World" stay apart
+    assert series.same_series("You Are My World (Bboong)") != series.same_series("You Are My World")
+
+
+def test_an_old_copy_from_a_site_no_longer_followed_is_set_aside_and_its_read_marks_kept(app, series_server, monkeypatch):
+    # The real case: re-found at a site without missing pages and followed there; the old copy's chapters
+    # were still on disk, so Komga showed the series twice.
+    fake_files(monkeypatch)
+    series_server.titles[9] = "Tower Climber [Official]"
+    series_server.chapters[9] = [row(90 + n, "Ch. %d" % n, float(n), n, read=n < 3) for n in (1, 2, 3)]
+    with app.app_context():
+        retire, both = app.hub.series.old_sources()
+        assert [(followed["id"], [old["id"] for old in olds]) for followed, olds in retire] == [(7, [9])] and both == []
+        done = app.hub.series.retire_old_sources(app.hub.config.attention_dir)
+    assert done == [{"title": "Tower Climber [Official]", "source": "Reading Site (EN)", "chapters": 3}]
+    aside = Path(app.hub.config.attention_dir) / "_old-sources" / "Tower Climber [Official] (Reading Site (EN))"
+    assert sorted(path.name for path in aside.iterdir()) == ["0001 Ch. 1.cbz", "0002 Ch. 2.cbz", "0003 Ch. 3.cbz"]
+    assert not any(c["isDownloaded"] for c in series_server.chapters[9])
+    # Chapter 2 was read on the old site: now it is read on the followed one too. The followed copy keeps its files.
+    assert [c["isRead"] for c in series_server.chapters[7]] == [True, True, False, False]
+    assert [c["isDownloaded"] for c in series_server.chapters[7]] == [True, True, False, False]
+
+
+def test_a_series_followed_at_two_sites_is_left_alone(app, series_server, monkeypatch):
+    fake_files(monkeypatch)
+    series_server.titles[9] = "Tower Climber (Official)"
+    series_server.chapters[9] = [row(91, "Ch. 1", 1.0, 1)]
+    series_server.following.add(9)
+    with app.app_context():
+        assert app.hub.series.old_sources() == ([], ["Tower Climber"])
+        assert app.hub.series.retire_old_sources(app.hub.config.attention_dir) == []
+    assert series_server.chapters[9][0]["isDownloaded"] is True
+
+
+def test_a_chapter_that_could_not_be_copied_stays_on_the_series_server(app, series_server, monkeypatch):
+    series_server.titles[9] = "Tower Climber"
+    series_server.chapters[9] = [row(91, "Ch. 1", 1.0, 1)]
+
+    def refuse(self, path, stream=False):
+        raise series.SeriesError("The series server does not have that (404).")
+    monkeypatch.setattr(series.Series, "raw", refuse)
+    with app.app_context():
+        assert app.hub.series.retire_old_sources(app.hub.config.attention_dir) == []
+    assert series_server.chapters[9][0]["isDownloaded"] is True

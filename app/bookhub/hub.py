@@ -995,6 +995,15 @@ def chores_due(hub, app, tick):
                 hub.series.rest_finished()
         except series.SeriesError as exc:
             app.logger.warning("could not put finished series aside: %s", exc)
+        try:
+            # a series now followed from another site: the old site's chapters go to needs-attention. Only while
+            # nothing is downloading, so the followed copy has caught up first
+            if hub.series.configured and hub.config.attention_dir and not hub.series.shelf()["queued"]:
+                for gone in hub.series.retire_old_sources(hub.config.attention_dir):
+                    app.logger.info("set aside %d chapters of %s from %s, no longer followed there",
+                                    gone["chapters"], gone["title"], gone["source"])
+        except (series.SeriesError, OSError) as exc:
+            app.logger.warning("could not set aside series from sites no longer followed: %s", exc)
         chapterfile.start(hub, app)
 
     def series_extensions():  # sources stop working when their site changes, until their extension is updated
