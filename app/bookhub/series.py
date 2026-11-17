@@ -14,9 +14,11 @@ import re
 import statistics
 import threading
 import time
+import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import requests
 
@@ -47,6 +49,24 @@ EXTRAS = re.compile(r"18\s*\+|\+\s*18\b|\br-?18\b|\buncensored\b|\buncut\b|\bune
 
 class SeriesError(Exception):
     pass
+
+
+OLD_SOURCES = "_old-sources"  # in needs-attention: chapters of copies from sites no longer followed
+# Labels sites put on a title that don't make it a different series. Others in brackets, like "(Bboong)", can.
+SITE_LABELS = re.compile(r"\[[^\]]*\]|\(\s*(?:official|uncensored|uncut|webtoon|manhwa|manhua|manga|colou?red|"
+                         r"digital|eng?|english|full colou?r)\s*\)", re.I)
+
+
+def same_series(title):
+    """A title to compare copies of a series from different sites by: "Please Divorce Me (Official)" and
+    "Please Divorce Me" are one series, and so are "Duke's Child" and "Duke’s Child"."""
+    return " ".join(re.sub(r"[\W_]+", " ", SITE_LABELS.sub(" ", title or "").lower()).split())
+
+
+def _safe_name(name, limit=150):
+    """A file or folder name that's fine on Windows and Linux alike."""
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", name or "").strip(" .")
+    return re.sub(r"\s+", " ", name)[:limit].strip(" .") or "Untitled"
 
 
 def blocked_ids(hub):
@@ -407,6 +427,75 @@ class Series:
         if ids:
             self.gql("mutation($ids: [Int!]!){deleteDownloadedChapters(input:{ids:$ids}){chapters{id}}}", {"ids": ids})
         return len(ids)
+
+    # ---------------------------------------------------- old sources
+
+    def old_sources(self):
+        """Series downloaded from more than one site where only one copy is still followed: that is the one kept.
+        Returns ([(followed, [old copies with chapters on disk])], [titles followed from two sites or more]).
+        A series followed twice is left alone, because which copy to keep is a person's call."""
+        nodes = self.gql("{mangas{nodes{id title inLibrary downloadCount sourceId source{displayName}}}}")["mangas"]["nodes"]
+        groups = {}
+        for manga in nodes:
+            # never the local folder: those are files someone put there by hand
+            if str(manga.get("sourceId")) != LOCAL and (manga.get("inLibrary") or manga.get("downloadCount")):
+                groups.setdefault(same_series(manga["title"]), []).append(manga)
+        retire, both = [], []
+        for copies in groups.values():
+            followed = [manga for manga in copies if manga.get("inLibrary")]
+            old = [manga for manga in copies if not manga.get("inLibrary") and manga.get("downloadCount")]
+            if len(followed) == 1 and old:
+                retire.append((followed[0], old))
+            elif len(followed) > 1:
+                both.append(sorted(manga["title"] for manga in followed)[0])
+        return retire, sorted(both)
+
+    def retire_old_sources(self, folder):
+        """Drop the copies from sites no longer followed, keeping the followed one. Read marks come across by
+        chapter number first; then each chapter file is copied into folder/_old-sources and only deleted from
+        the series server once its copy is safely there. Returns [{"title", "source", "chapters"}] set aside."""
+        retire, _ = self.old_sources()
+        done = []
+        for followed, old in retire:
+            kept = self.detail(followed["id"])["every_chapter"]
+            for copy in old:
+                chapters = self.detail(copy["id"])["every_chapter"]
+                read_there = {chapter["number"] for chapter in chapters if chapter["read"] and chapter["number"] is not None}
+                catch_up = [chapter["id"] for chapter in kept if not chapter["read"] and chapter["number"] in read_there]
+                if catch_up:
+                    self.mark(catch_up, True)
+                source = (copy.get("source") or {}).get("displayName") or "Unknown site"
+                saved = self._set_aside(copy["title"], source, [chapter for chapter in chapters if chapter["downloaded"]], folder)
+                if saved:
+                    self.gql("mutation($ids: [Int!]!){deleteDownloadedChapters(input:{ids:$ids}){chapters{id}}}", {"ids": saved})
+                    done.append({"title": copy["title"], "source": source, "chapters": len(saved)})
+        return done
+
+    def _set_aside(self, title, source, chapters, folder):
+        """Copy chapter files out of the series server into folder/_old-sources/<title> (<site>). The ids copied."""
+        from .chapterfile import room_for
+        target = Path(folder) / OLD_SOURCES / _safe_name("%s (%s)" % (title, source))
+        room_for(target)
+        target.mkdir(parents=True, exist_ok=True)
+        saved = []
+        for chapter in chapters:
+            # the reading order in front, so the folder sorts the way the series reads
+            path = target / ("%04d %s.cbz" % (chapter["order"], _safe_name(chapter["name"] or "Chapter", 100)))
+            if not (path.is_file() and zipfile.is_zipfile(path)):
+                unfinished = path.with_name(path.name + ".part")
+                try:
+                    with self.raw("/api/v1/chapter/%d/download" % chapter["id"], stream=True) as reply, open(unfinished, "wb") as file:
+                        for block in reply.iter_content(1 << 20):
+                            file.write(block)
+                except (SeriesError, OSError):
+                    unfinished.unlink(missing_ok=True)
+                    continue  # stays on the series server; tried again next time
+                if not zipfile.is_zipfile(unfinished):
+                    unfinished.unlink(missing_ok=True)
+                    continue
+                unfinished.replace(path)
+            saved.append(chapter["id"])
+        return saved
 
     def mark(self, chapter_ids, read):
         self.gql("mutation($ids: [Int!]!, $r: Boolean!){updateChapters(input:{ids:$ids,patch:{isRead:$r}}){chapters{id}}}",
