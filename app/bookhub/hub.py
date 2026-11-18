@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 
 from . import (bookfix, calibre, catalogues, covers, db, devices, duplicates, goodreads, identify, intake, kinds, librarymanager, media, mediasort,
-               peek, readers, review, secondcopy, series, settings, tabletop, tagmerge, tags, tagsync)
+               peek, player, readers, review, secondcopy, series, settings, tabletop, tagmerge, tags, tagsync)
 
 TAG_WEIGHTS = {"family": 3, "mine": 3, "community": 2, "epub": 1}
 SAME_AUTHOR_WEIGHT = 2
@@ -53,6 +53,7 @@ class Hub:
         self.covers = covers.Covers(self)
         self.series = series.Series(self)
         self.media = media.Media(self)
+        self.player = player.Player(self)  # watching inside the hub; see player.py
         self.manager = librarymanager.LibraryManager(self)
         self.duplicates = duplicates.Duplicates(self)
         self.sorter = mediasort.Sorter(self)

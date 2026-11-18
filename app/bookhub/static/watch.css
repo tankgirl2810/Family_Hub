@@ -1,0 +1,122 @@
+/* Watch mode (watch.js): Films and TV for the big screen, and the player.
+   Colours and type come from the design tokens, so it holds in every scheme. The player is the one place that is
+   always dark, whatever the household's scheme: a film sits on black. */
+
+/* ---------------------------------------------------------------- the frame */
+/* The sidebar and top bar step aside; Watch mode has its own bar with the way back. */
+body[data-page="watch"] .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
+body[data-page="watch"] :is(.side, #top, #strip) { display: none; }
+body[data-page="watch"] #main { max-width: none; padding: 22px clamp(16px, 4vw, 56px) 72px; }
+/* On a television across the room everything is a quarter bigger, in proportion. */
+@media (min-width: 1700px) { body[data-page="watch"] #main { zoom: 1.25; } }
+
+.wbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 22px; padding-bottom: 14px; border-bottom: 2px solid var(--ink); }
+.wbar .btn, .wplay { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
+.wbar-home { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; color: var(--ink); text-decoration: none;
+  font: 600 13px/1 var(--font-label); font-stretch: 75%; letter-spacing: .05em; text-transform: uppercase; }
+.wbar-home svg { width: 18px; height: 18px; color: var(--accent); }
+
+/* ---------------------------------------------------------------- rows of posters */
+.wreel { display: grid; grid-auto-flow: column; grid-auto-columns: clamp(136px, 13vw, 210px); gap: 20px; overflow-x: auto;
+  padding: 8px 8px 14px; margin: -8px -8px 0; scroll-snap-type: x proximity; scroll-padding-inline: 8px; overscroll-behavior-x: contain; scrollbar-width: thin; }
+.wcard { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--ink); text-decoration: none; scroll-snap-align: start; overflow-wrap: anywhere; }
+.wcard .cover { width: 100%; }
+.wcard-title { font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+/* The picked poster is ringed in the accent, wide enough to see from the couch. It does not lift. */
+.wcard:hover .cover { outline: 1px solid var(--line2); outline-offset: 3px; }
+.wcard:focus-visible { outline: none; }
+.wcard:focus-visible .cover { outline: 3px solid var(--accent); outline-offset: 3px; }
+.wcard:focus-visible .wcard-title { text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 600px) { .wreel { grid-auto-columns: 42vw; gap: 14px; } }
+
+/* ---------------------------------------------------------------- one film or show */
+/* Its wide picture is a faint wash behind the page top, like a book page in its cover's colour; faint enough that
+   the small grey words still clear 4.5:1 over the brightest or darkest picture. */
+.wtitle { position: relative; isolation: isolate; display: grid; grid-template-columns: minmax(0, clamp(170px, 22vw, 320px)) minmax(0, 1fr); gap: 32px; align-items: start; }
+.wtitle::before { content: ""; position: absolute; z-index: -1; inset: -28px calc(-1 * clamp(16px, 4vw, 56px)) -40px; pointer-events: none;
+  background: var(--backdrop) center 22% / cover no-repeat; opacity: .14;
+  -webkit-mask-image: linear-gradient(180deg, #000 30%, transparent); mask-image: linear-gradient(180deg, #000 30%, transparent); }
+:root[data-theme="dark"] .wtitle::before { opacity: .18; }
+.wtitle > .cover { width: 100%; }
+.wtitle-words { gap: 16px; }
+.wtitle-words .bar { max-width: 420px; }
+@media (max-width: 760px) {
+  .wtitle { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .wtitle > .cover { width: 140px; }
+}
+
+.wepisodes .wep { display: flex; align-items: center; gap: 14px; min-height: 56px; color: var(--ink); text-decoration: none; }
+.wep-words { flex: 1; min-width: 0; gap: 2px; }
+.wep-words .bar { max-width: 320px; margin-top: 4px; }
+.wep-play { flex: none; width: 36px; height: 36px; display: grid; place-items: center; border: 1.5px solid var(--ink); border-radius: 50%; }
+.wep.off { color: var(--dim); }
+.wep.off .wep-play { border: 1px dashed var(--line2); }
+a.wep:hover { background: var(--panel2); }
+a.wep:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; background: var(--panel2); }
+a.wep:is(:hover, :focus-visible) .wep-play { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+.field.grow { flex: 1 1 240px; }
+
+/* ---------------------------------------------------------------- the player */
+body.wp-open { overflow: hidden; }
+body.wp-open::after { display: none; }                       /* the print grain stays off the film */
+body.wp-open :is(.tracker, #crt) { display: none; }
+:root[data-accent="custom"] .wplayer { --accent: oklch(0.76 0.15 var(--accent-h)); }
+
+.wplayer { position: fixed; inset: 0; z-index: 65; background: #000; color: var(--ink); font-size: 15px; }
+.wplayer video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.wplayer video::cue { font-family: var(--font-body); color: #fff; background: rgb(0 0 0 / .62); }
+.wplayer[data-quiet] { cursor: none; }
+/* While the controls are up, the subtitles sit above them rather than under them (where the browser allows it). */
+.wplayer:not([data-quiet]) video::-webkit-media-text-track-container { transform: translateY(-104px); }
+
+.wp-head, .wp-controls { position: absolute; left: 0; right: 0; padding-inline: clamp(12px, 4vw, 56px); }
+.wp-head { top: 0; display: flex; align-items: center; gap: 16px; padding-top: max(14px, env(safe-area-inset-top)); padding-bottom: 44px;
+  background: linear-gradient(180deg, rgb(0 0 0 / .78), transparent); }
+.wp-controls { bottom: 0; display: flex; flex-direction: column; gap: 6px; padding-top: 56px; padding-bottom: max(14px, env(safe-area-inset-bottom));
+  background: linear-gradient(0deg, rgb(0 0 0 / .86), transparent); }
+.wplayer[data-quiet] :is(.wp-head, .wp-controls) { opacity: 0; pointer-events: none; }
+@media (prefers-reduced-motion: no-preference) { .wp-head, .wp-controls { transition: opacity .25s; } }
+.wp-name { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.wp-name strong { font-size: 18px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wp-name span { font-size: 13px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.wp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.wp-gap { flex: 1; }
+.wp-time { margin-left: 8px; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wp-btn { display: inline-grid; place-items: center; flex: none; min-width: 44px; height: 44px; padding: 0; border: 1.5px solid transparent; border-radius: 999px;
+  background: transparent; color: var(--ink); cursor: pointer; text-decoration: none; }
+.wp-btn.words { display: inline-flex; align-items: center; gap: 8px; padding: 0 16px; border-color: var(--line2);
+  font: 600 13px/1 var(--font-label); font-stretch: 75%; letter-spacing: .05em; }
+.wp-btn.words svg { margin-left: -4px; }
+.wp-btn:hover { background: color-mix(in srgb, var(--ink) 18%, transparent); }
+/* Focus fills with ink: on a television the thing the remote is on has to be unmistakable. */
+.wp-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; background: var(--ink); color: var(--bg); }
+
+.wp-seek { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 26px; margin: 0; background: transparent; cursor: pointer;
+  --track: linear-gradient(90deg, var(--accent) 0 var(--played, 0%), color-mix(in srgb, var(--ink) 55%, transparent) var(--played, 0%) var(--loaded, 0%),
+    color-mix(in srgb, var(--ink) 24%, transparent) var(--loaded, 0%)); }
+.wp-seek::-webkit-slider-runnable-track { height: 6px; background: var(--track); }
+.wp-seek::-moz-range-track { height: 6px; background: var(--track); }
+.wp-seek::-webkit-slider-thumb { -webkit-appearance: none; width: 6px; height: 22px; margin-top: -8px; border: 0; border-radius: 0; background: var(--ink); }
+.wp-seek::-moz-range-thumb { width: 6px; height: 22px; border: 0; border-radius: 0; background: var(--ink); }
+.wp-seek:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.wp-pop { position: relative; display: inline-flex; }
+.wp-menu { position: absolute; right: 0; bottom: calc(100% + 10px); z-index: 2; display: flex; flex-direction: column; min-width: 230px; max-width: min(360px, 80vw);
+  max-height: 50vh; overflow-y: auto; padding: 6px; background: var(--bg); border: 1.5px solid var(--ink); }
+.wp-menu button { position: relative; min-height: 44px; padding: 0 12px 0 36px; border: 0; background: none; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.wp-menu button[aria-checked="true"]::before { content: ""; position: absolute; left: 13px; top: 50%; width: 10px; height: 10px; transform: translateY(-50%); background: var(--accent); }
+.wp-menu button:hover { background: var(--panel2); }
+.wp-menu button:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; background: var(--panel2); }
+
+.wp-status { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: calc(100% - 32px); margin: 0; padding: 10px 18px;
+  background: rgb(0 0 0 / .72); border: 1px solid var(--line2); pointer-events: none; text-align: center; }
+.wp-over { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / .6); }
+.wp-card { display: flex; flex-direction: column; gap: 12px; width: min(480px, 100%); padding: 24px; background: var(--bg); border: 1.5px solid var(--ink); }
+.wp-card strong { font-size: 18px; font-weight: 600; line-height: 1.3; }
+.wp-card p { margin: 0; }
+@media (max-width: 600px) {
+  .wp-btn.words { padding: 0 12px; }
+  .wp-time { flex-basis: 100%; order: -1; margin: 0 0 2px; }
+}

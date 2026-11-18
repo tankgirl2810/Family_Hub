@@ -45,6 +45,7 @@ The demo library is rebuilt whenever the `demo` folder is missing.
 | `app/bookhub/integrations.py` | Prowlarr, qBittorrent, Hardcover |
 | `app/bookhub/media.py` | Films and TV: Radarr, Sonarr, Bazarr, Jellyfin, the VPN, Connect everything |
 | `app/bookhub/mediasort.py` | Films and TV to sort: recognising videos already on the disk, filing them, deleting spare copies |
+| `app/bookhub/player.py` | Watching inside the hub: asking Jellyfin how a film can be played in this browser, passing the video through so the Jellyfin key stays on the server, and the place reached in each film |
 | `app/bookhub/looks.py` | The design's colour schemes, accent and visual on Home, and the household's choice |
 | `app/bookhub/visuals.py` | The visuals on Home: the built-in ones, checking a GitHub repository for new ones, and the sealed frame they run in |
 | `app/bookhub/librarymanager.py` | Signing in to the library manager to merge or delete books |
@@ -67,7 +68,7 @@ The demo library is rebuilt whenever the `demo` folder is missing.
 | `app/bookhub/devices.py`, `opds.py` | Devices, Send to Kindle, and the reading-app catalogue |
 | `app/bookhub/recommend.py` | Weekly suggestions of books the library lacks |
 | `app/bookhub/setupfile.py` | The locked setup file |
-| `app/bookhub/static/` | The web pages: plain HTML, CSS and JavaScript, no build step. `looks/minimalist/` holds the design's stylesheets, `setpieces.js` the screen-change scan, `visuals/` the built-in visuals, their libraries and `frame.js` |
+| `app/bookhub/static/` | The web pages: plain HTML, CSS and JavaScript, no build step. `looks/minimalist/` holds the design's stylesheets, `setpieces.js` the screen-change scan, `visuals/` the built-in visuals, their libraries and `frame.js`, `watch.js` and `watch.css` Watch mode and its player, `vendor/` the one outside library the player needs (hls.js, with its licence) |
 | `tests/test_app.py` | Tests that run the whole app against the demo library |
 
 ## Ground rules

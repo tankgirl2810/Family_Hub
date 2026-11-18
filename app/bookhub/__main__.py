@@ -49,7 +49,9 @@ def main():
     print("Family Hub is running: http://localhost:%d\n" % config.port)
     try:
         from waitress import serve
-        serve(app, host=args.host, port=config.port, threads=8)
+        # A film passed straight through (player.py) holds one thread for as long as that browser keeps the film
+        # open, paused or not, so there are enough for a household watching in several rooms and still using the hub.
+        serve(app, host=args.host, port=config.port, threads=24)
     except ImportError:
         app.run(host=args.host, port=config.port)
 

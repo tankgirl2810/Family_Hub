@@ -26,6 +26,7 @@ from . import review  # the review queue: the sorter's suggestions, confirmed in
 from . import kindle  # a person's Kindle library and the diary of how far through each book they are
 from . import librarymanager  # its refusals, for the duplicates queue
 from . import peek  # a look inside a book's first pages, next to its details
+from . import player  # watching inside the hub: Jellyfin's video passed through
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -3283,6 +3284,128 @@ def media_watch(who, kind, arr_id):
     if not _kind(kind):
         return fail("Say films or shows.", 404)
     return media_call(lambda: jsonify(hub().media.watch(kind, arr_id)))
+
+
+# ------------------------------------------------------------ watching here
+#
+# The player's addresses (see player.py). Every one is for a signed-in profile, and every id and path is checked
+# against a strict pattern before Jellyfin is asked anything, so these cannot be used to reach the rest of Jellyfin.
+
+def _play_ids(*ids):
+    return all(isinstance(value, str) and player.ITEM.fullmatch(value) for value in ids)
+
+
+def _video_passed_on(reply):
+    """Jellyfin's reply handed to the browser as it arrives, a piece at a time, with only the headers a video needs."""
+    if reply.status_code not in (200, 206, 304, 416):
+        status = reply.status_code
+        reply.close()
+        return fail("The family server could not send that (%d)." % status, 404 if status == 404 else 502)
+    headers = {name: reply.headers[name] for name in ("Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag")
+               if reply.headers.get(name)}
+    # Only ever sent as video or sound: whatever Jellyfin answers, the browser must not run it as a page of Family Hub.
+    kind = (reply.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    headers["Content-Type"] = kind if kind.startswith(("video/", "audio/")) else "application/octet-stream"
+
+    def pieces():
+        try:
+            yield from reply.iter_content(player.PIECE)
+        finally:
+            reply.close()  # the browser went away (a seek, a closed tab): stop reading from Jellyfin too
+    return Response(pieces(), status=reply.status_code, headers=headers, direct_passthrough=True)
+
+
+@bp.post("/media/play/<item_id>/start")
+@profile_only
+def media_play_start(who, item_id):
+    """How this browser can play one film or episode: the stream, its subtitles and languages, where to carry on from."""
+    if not _play_ids(item_id):
+        return fail("Nothing to play there.", 404)
+    data = request.get_json(silent=True) or {}
+    audio = data.get("audio")
+    if audio is not None and (isinstance(audio, bool) or not isinstance(audio, int) or not 0 <= audio < 1000):
+        return fail("Say which language by its number.")
+    return media_call(lambda: jsonify(hub().player.start(item_id, data.get("can"), audio)))
+
+
+@bp.get("/media/play/<item_id>/file")
+@profile_only
+def media_play_file(who, item_id):
+    source = request.args.get("source")
+    if not _play_ids(item_id, source):
+        return fail("Nothing to play there.", 404)
+    return media_call(lambda: _video_passed_on(hub().player.file(item_id, source, request.headers.get("Range"))))
+
+
+@bp.get("/media/play/<item_id>/hls/<path:path>")
+@profile_only
+def media_play_hls(who, item_id, path):
+    if not _play_ids(item_id) or not player.HLS_PATH.fullmatch(path):
+        return fail("Nothing to play there.", 404)
+
+    # Only the settings the hub signed for this film go on to Jellyfin: a browser cannot change or add any.
+    query = hub().player.checked_query(item_id, request.query_string.decode("latin-1"))
+    if query is None:
+        return fail("Nothing to play there.", 404)
+
+    def go():
+        reply = hub().player.hls(item_id, path, query)
+        if not path.endswith(".m3u8") or reply.status_code != 200:
+            return _video_passed_on(reply)
+        answer = Response(hub().player.playlist(item_id, reply), mimetype="application/vnd.apple.mpegurl")
+        answer.headers["Cache-Control"] = "no-store"
+        return answer
+    return media_call(go)
+
+
+@bp.get("/media/play/<item_id>/subs/<source>/<int:index>.vtt")
+@profile_only
+def media_play_subtitles(who, item_id, source, index):
+    if not _play_ids(item_id, source) or index > 999:
+        return fail("No subtitles there.", 404)
+    return media_call(lambda: Response(hub().player.subtitle(item_id, source, index), mimetype="text/vtt"))
+
+
+@bp.post("/media/play/<item_id>/stop")
+@profile_only
+def media_play_stop(who, item_id):
+    """The viewer has left: Jellyfin stops converting for them."""
+    hub().player.stop((request.get_json(silent=True) or {}).get("session"))
+    return jsonify({"ok": True})
+
+
+@bp.post("/media/play/<item_id>/place")
+@profile_only
+def media_play_place(who, item_id):
+    """How far in the film or episode is now. The place is the household's: anyone carries on from it."""
+    if not _play_ids(item_id):
+        return fail("Nothing to play there.", 404)
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(hub().player.keep_place(item_id, data.get("at"), data.get("length"), data, who["id"]))
+    except ValueError:
+        return fail("That is not a place in a film.")
+
+
+@bp.get("/media/places")
+@profile_only
+def media_places(who):
+    """What has been started and how far in, the latest first: for Carry on watching and the ticks on episodes."""
+    return jsonify({"places": hub().player.places()})
+
+
+@bp.get("/media/backdrop/<kind>/<int:arr_id>")
+@profile_only
+def media_backdrop(who, kind, arr_id):
+    """The wide picture Radarr or Sonarr keeps for a film or show, behind its page in Watch mode."""
+    if not _kind(kind):
+        return fail("No picture.", 404)
+    try:
+        arr = hub().media.arr(kind)
+    except media.MediaError:
+        return fail("No picture.", 404)
+    return _image(lambda: requests.get("%s/api/v3/mediacover/%d/fanart.jpg" % (arr.url, arr_id),
+                                       headers={"X-Api-Key": arr.key}, timeout=15))
 
 
 @bp.get("/search-progress")
