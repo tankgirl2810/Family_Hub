@@ -60,8 +60,9 @@ class FakeJellyfin:
     def asked(self, method, ending):
         return [call for call in self.calls if call[0] == method and call[1].endswith(ending)]
 
-    def request(self, method, url, headers=None, params=None, json=None, data=None, timeout=0, stream=False):
+    def request(self, method, url, headers=None, params=None, json=None, data=None, timeout=0, stream=False, allow_redirects=True):
         assert url.startswith("http://jellyfin:8096/"), url
+        assert not (stream and allow_redirects), "video is fetched from Jellyfin's own address only"
         assert (headers or {}).get("Authorization") == 'MediaBrowser Token="%s"' % KEY
         path, _, query = url[len("http://jellyfin:8096"):].partition("?")
         self.calls.append((method, path, dict(params or {}), json, dict(headers or {}), query))
@@ -323,3 +324,36 @@ def test_a_nonsense_place_is_not_kept(client, jellyfin):
     assert keep(client, 100, title="x" * 5000, season="two").status_code == 200
     place = client.get("/api/media/places").get_json()["places"][0]
     assert len(place["title"]) == 200 and place["season"] is None
+
+
+# ------------------------------------------------------------ the page itself
+
+def test_the_page_brings_watch_mode_and_its_player_library(client):
+    page = client.get("/").get_data(as_text=True)
+    assert "/static/watch.css" in page and page.index("/static/app.js") < page.index("/static/watch.js")
+    library = client.get("/static/vendor/hls.min.js")
+    assert library.status_code == 200 and b"Hls" in library.data
+    assert client.get("/static/vendor/hls.LICENSE.txt").status_code == 200  # Apache 2.0: its licence travels with it
+
+
+def test_the_wide_picture_is_for_profiles_and_real_kinds_only(client):
+    assert client.get("/api/media/backdrop/film/1").status_code == 401
+    login(client, "Nan")
+    assert client.get("/api/media/backdrop/podcast/1").status_code == 404
+    assert client.get("/api/media/backdrop/film/1").status_code == 404  # Radarr is not connected: no picture, no fuss
+
+
+def test_what_is_passed_on_is_only_ever_video(client, jellyfin, monkeypatch):
+    login(client, "Nan")
+    real = jellyfin.request
+
+    def a_page_instead(method, url, **kw):
+        reply = real(method, url, **kw)
+        if "/hls1/" in url:
+            reply.headers["Content-Type"] = "text/html; charset=utf-8"
+            reply.headers["Set-Cookie"] = "jellyfin=secret"
+        return reply
+    monkeypatch.setattr(player.requests, "request", a_page_instead)
+    piece = client.get("/api/media/play/%s/hls/hls1/main/0.mp4" % BIG)
+    assert piece.mimetype == "application/octet-stream" and "jellyfin=secret" not in str(piece.headers)  # none of Jellyfin's cookies
+    assert piece.headers["X-Content-Type-Options"] == "nosniff"

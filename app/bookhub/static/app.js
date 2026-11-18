@@ -259,7 +259,7 @@ function starMark() {
   return svg;
 }
 // Which section each page belongs to, and the tabs along the top of that section.
-const PAGE_SECTION = { home: 'home', movies: 'movies', downloads: 'downloads', photos: 'photos', files: 'files', admin: 'admin',
+const PAGE_SECTION = { home: 'home', movies: 'movies', watch: 'movies', downloads: 'downloads', photos: 'photos', files: 'files', admin: 'admin',
     sort: 'admin', tags: 'admin', copies: 'admin', details: 'admin', rules: 'admin', fix: 'admin', watchlist: 'watchlist' };
 function sectionTabs(section) {
   if (section === 'books') {
@@ -428,11 +428,11 @@ async function route() {
   let page = parts[0] || (appState.me ? 'home' : 'profiles');
   if (appState.setup_needed) { shell('profiles'); return pageSetup(); }
   if (!appState.me) page = 'profiles';
-  if (isGuest() && ['dashboard', 'mybooks', 'admin', 'sort', 'tags', 'copies', 'discover', 'devices', 'series', 'read', 'movies', 'downloads', 'watchlist'].includes(page)) page = 'library';
+  if (isGuest() && ['dashboard', 'mybooks', 'admin', 'sort', 'tags', 'copies', 'discover', 'devices', 'series', 'read', 'movies', 'watch', 'downloads', 'watchlist'].includes(page)) page = 'library';
   if (!appState.series && (page === 'series' || page === 'read')) page = 'library';
   if (['admin', 'sort', 'tags', 'copies', 'details', 'rules', 'fix'].includes(page) && !isAdmin()) page = 'home';
   // a link or bookmark to a section this person does not see goes home rather than to a page of set-up notes
-  if ((page === 'movies' && !seesFilms()) || (page === 'downloads' && !seesDownloads())) page = 'home';
+  if (((page === 'movies' || page === 'watch') && !seesFilms()) || (page === 'downloads' && !seesDownloads())) page = 'home';
   if (page === 'movies' && parts[1] === 'search' && !isAdmin() && !canRequestMedia()) parts[1] = '';
   const section = page === 'profiles' ? 'profiles' : (PAGE_SECTION[page] || 'books');
   document.body.dataset.page = page;  // the stylesheet keeps some decoration for Home only
@@ -451,7 +451,7 @@ async function route() {
   if (moved) window.scrollTo(0, 0);
   setMain(el('p', { class: 'small dim', role: 'status', text: 'Loading…' }));
   if (moved) focusWanted = null;  // a new screen: the link pressed on the last one is not looked for on this one
-  const pages = { home: pageHome, movies: pageMovies, downloads: pageDownloads, shelf: pageShelf, photos: pageSoon, files: pageSoon, profiles: pageProfiles, library: pageLibrary, book: pageBook,
+  const pages = { home: pageHome, movies: pageMovies, watch: pageWatch, downloads: pageDownloads, shelf: pageShelf, photos: pageSoon, files: pageSoon, profiles: pageProfiles, library: pageLibrary, book: pageBook,
     dashboard: pageDashboard, admin: parts[1] === 'books' ? pageBooksAdmin : pageHubAdmin, sort: pageSort, tags: pageTags, copies: pageCopies, details: pageDetails, rules: pageRules, fix: pageFix, watchlist: pageWatchlist,
     discover: pageDiscover, devices: pageDevices, series: pageSeries, read: pageRead, mybooks: pageMyBooks, tabletop: pageTabletop };
   const gen = routeGen;
@@ -584,7 +584,8 @@ async function pageMovies(sub, id) {
   const nothing = !appState.media.films && !appState.media.shows;
   setMain(
     el('div', { class: 'row between end' }, pageHead('Watch', 'Films and series on the family server.'),
-      nothing ? null : field('Search title', search)),
+      // Watch mode (watch.js): the same films and shows laid out for a big screen, with the player.
+      nothing ? null : el('div', { class: 'row end' }, field('Search title', search), el('a', { class: 'btn pri', href: '#/watch', text: 'Watch mode' }))),
     nothing ? el('section', { class: 'panel cut' }, head('Not set up yet'),
       isAdmin() ? el('p', {}, 'Films and TV need Radarr and Sonarr. Start them with the media profile (',
           guide('14-films-tv-and-the-vpn.md', 'guide 14'), '), then press Connect everything under ', el('a', { href: '#/admin', text: 'Admin' }), '.')
@@ -3793,8 +3794,9 @@ function watchPanel(kind, id, item) {
   api('GET', '/api/media/watch/' + kind + '/' + id).then((data) => {
     if (kind === 'film') {
       if (!item.downloaded) { section.remove(); return; }
-      fill(box, data.watch_id ? el('div', { class: 'row' }, el('a', { class: 'btn pri', href: jellyfinWatch(data.jellyfin, data.watch_id),
-          target: '_blank', rel: 'noopener', text: 'Watch ' + item.title }))
+      // Watching happens here, in the hub's own player; Jellyfin's page stays one press away for anyone who prefers it.
+      fill(box, data.watch_id ? el('div', { class: 'row' }, el('a', { class: 'btn pri', href: Watch.playLink('film', id), text: 'Watch ' + item.title }),
+          el('a', { class: 'btn', href: jellyfinWatch(data.jellyfin, data.watch_id), target: '_blank', rel: 'noopener', text: 'Open in Jellyfin' }))
         : el('p', { class: 'small dim', text: 'On the server, but Jellyfin has not listed it yet. It usually appears within a few minutes.' }));
       return;
     }
@@ -3815,8 +3817,10 @@ function watchPanel(kind, id, item) {
           el('span', { class: 'small ' + (episode.downloading !== null && episode.downloading !== undefined && !episode.on_server ? 'ok' : 'dim'),
             text: [episode.aired ? niceDate(episode.aired) : 'Not aired yet',
                 episode.on_server ? '' : episode.downloading !== null && episode.downloading !== undefined ? 'downloading · ' + episode.downloading + '%' : episode.wanted ? 'being looked for' : 'not wanted'].filter(Boolean).join(' · ') })),
-        episode.on_server && episode.watch_id ? el('a', { class: 'btn sm pri', href: jellyfinWatch(data.jellyfin, episode.watch_id),
-            target: '_blank', rel: 'noopener', 'aria-label': 'Watch episode ' + episode.number + ', ' + episode.title, text: 'Watch' })
+        episode.on_server && episode.watch_id ? el('div', { class: 'row gap8', style: 'flex-wrap:nowrap' },
+            el('a', { class: 'small', href: jellyfinWatch(data.jellyfin, episode.watch_id), target: '_blank', rel: 'noopener',
+              'aria-label': 'Open episode ' + episode.number + ' in Jellyfin', text: 'In Jellyfin' }),
+            el('a', { class: 'btn sm pri', href: Watch.playLink('show', id, pick, episode.number), 'aria-label': 'Watch episode ' + episode.number + ', ' + episode.title, text: 'Watch' }))
           : episode.on_server ? el('span', { class: 'small dim', text: 'On the server' }) : null)));
     }
     draw();

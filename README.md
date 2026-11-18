@@ -89,6 +89,7 @@ both, and how two people can work on the code together.
 17. [The watchlist](docs/17-watchlist.md)
 18. [Comics in Paperback](docs/18-comics-in-paperback.md)
 19. [Books that put their own details right](docs/19-identifying-books.md)
+20. [Watch mode: films and TV on the big screen](docs/20-watch-mode.md)
 
 ## How the pieces fit
 

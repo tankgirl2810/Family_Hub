@@ -3295,14 +3295,17 @@ def _play_ids(*ids):
     return all(isinstance(value, str) and player.ITEM.fullmatch(value) for value in ids)
 
 
-def _passed_on(reply):
+def _video_passed_on(reply):
     """Jellyfin's reply handed to the browser as it arrives, a piece at a time, with only the headers a video needs."""
     if reply.status_code not in (200, 206, 304, 416):
         status = reply.status_code
         reply.close()
         return fail("The family server could not send that (%d)." % status, 404 if status == 404 else 502)
-    headers = {name: reply.headers[name] for name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag")
+    headers = {name: reply.headers[name] for name in ("Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag")
                if reply.headers.get(name)}
+    # Only ever sent as video or sound: whatever Jellyfin answers, the browser must not run it as a page of Family Hub.
+    kind = (reply.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    headers["Content-Type"] = kind if kind.startswith(("video/", "audio/")) else "application/octet-stream"
 
     def pieces():
         try:
@@ -3331,7 +3334,7 @@ def media_play_file(who, item_id):
     source = request.args.get("source")
     if not _play_ids(item_id, source):
         return fail("Nothing to play there.", 404)
-    return media_call(lambda: _passed_on(hub().player.file(item_id, source, request.headers.get("Range"))))
+    return media_call(lambda: _video_passed_on(hub().player.file(item_id, source, request.headers.get("Range"))))
 
 
 @bp.get("/media/play/<item_id>/hls/<path:path>")
@@ -3343,7 +3346,7 @@ def media_play_hls(who, item_id, path):
     def go():
         reply = hub().player.hls(item_id, path, request.query_string.decode("latin-1"))
         if not path.endswith(".m3u8") or reply.status_code != 200:
-            return _passed_on(reply)
+            return _video_passed_on(reply)
         answer = Response(hub().player.playlist(reply), mimetype="application/vnd.apple.mpegurl")
         answer.headers["Cache-Control"] = "no-store"
         return answer

@@ -129,8 +129,9 @@ class Player:
         if range_header:
             headers["Range"] = range_header
         try:
+            # no redirects: the hub's sign-in to Jellyfin goes to Jellyfin's own address and nowhere it points to
             return requests.request("GET", url + path + ("?" + query if query else ""), headers=headers, params=params,
-                                    stream=True, timeout=(10, wait))
+                                    stream=True, timeout=(10, wait), allow_redirects=False)
         except requests.RequestException:
             raise PlayError("The family server is not answering. Try again in a minute.")
 

@@ -21,8 +21,13 @@ Family Hub is only the front end. These programs do the work:
 | **Jellyfin** | Where the family watches | Port 8096 |
 
 A show's page lists **Seasons and episodes**: pick a season, and every
-episode on the server has a **Watch** button that opens it in Jellyfin. A
-film on the server has its own **Watch** button.
+episode on the server has a **Watch** button that plays it here, in Family
+Hub's own player (with **In Jellyfin** beside it for anyone who prefers
+Jellyfin's page). A film on the server has its own **Watch** button.
+
+The **Watch mode** button on the Watch tab opens the same films and shows laid
+out for a big screen, with a full-screen switch: see
+[guide 20](20-watch-mode.md).
 
 ## Who can do what
 
@@ -320,4 +325,5 @@ with a forwarded port, qBittorrent's traffic leaves through the VPN and stops
 when the VPN stops, Family Hub passes the forwarded port to qBittorrent, and
 Connect everything set up Radarr, Sonarr, Prowlarr, qBittorrent and Bazarr
 with every step done. **Not yet tried:** a real download from start to
-finish, subtitles arriving, and Jellyfin.
+finish, subtitles arriving, and Jellyfin (including playing through Family
+Hub's own player, guide 20).
