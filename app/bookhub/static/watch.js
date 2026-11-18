@@ -424,6 +424,7 @@ const Watch = (() => {
 
     let info = null, hls = null, length = 0, settled = false, ended = false, mended = false, quietTimer = null, keepTimer = null, countdown = null, stallTimer = null;
     let chosenAudio = null, closed = false;
+    let lastAt;  // the last place the film was really playing at: where Try again carries on from, however often it fails
     const total = () => (Number.isFinite(video.duration) && video.duration > 0 ? video.duration : length);
     const say = (words) => { status.textContent = words || ''; status.hidden = !words; };
 
@@ -452,6 +453,8 @@ const Watch = (() => {
 
     // ---- starting, and starting again (another language, or after a problem)
     async function begin(audio, at) {
+      if (overlay.contains(document.activeElement)) playBtn.focus({ preventScroll: true });  // Try again is about to be hidden
+      if (settled && !ended) keepPlace();  // changing language, or trying again: the place so far is kept before the stream goes
       overlay.hidden = true; ended = false; settled = false;
       say('Getting it ready…');
       expectPicture();
@@ -473,7 +476,8 @@ const Watch = (() => {
           hls = new window.Hls({ startPosition: startAt > 0 ? startAt : -1, maxBufferLength: 30, maxMaxBufferLength: 120 });
           hls.on(window.Hls.Events.ERROR, (event, data) => {
             if (!data.fatal) return;
-            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && !mended) { mended = true; hls.recoverMediaError(); }
+            // While the picture is being mended the clock reads 0:00 for a moment; that is not the place to keep.
+            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && !mended) { mended = true; settled = false; hls.recoverMediaError(); }
             else failed('The film stopped arriving from the family server.');
           });
           hls.loadSource(got.url);
@@ -491,7 +495,7 @@ const Watch = (() => {
       say(''); gotPicture();
       video.pause();
       overlay.hidden = false;
-      const at = settled ? video.currentTime : undefined;
+      const at = lastAt;
       fill(overlay, el('div', { class: 'wp-card', role: 'alert' }, el('strong', { text: 'This could not be played' }), el('p', { text: words }),
         el('div', { class: 'row' }, el('button', { class: 'btn pri', type: 'button', text: 'Try again', onclick: () => begin(chosenAudio, at) }),
           el('a', { class: 'btn', href: titlePage, text: 'Back to ' + item.title }))));
@@ -519,14 +523,17 @@ const Watch = (() => {
       seek.setAttribute('aria-valuetext', spoken(at) + ' of ' + spoken(all));
       time.textContent = clock(at) + ' / ' + clock(all);
     }
+    // Letting go moves the film there. A drag that ends where it began sends no "change", so letting go of the
+    // pointer or leaving the bar counts too; otherwise the clock would stay frozen on the dragged time.
+    const letGo = () => { if (!dragging) return; video.currentTime = Number(seek.value); dragging = false; draw(); };
     seek.addEventListener('input', () => { dragging = true; draw(); wake(); });
-    seek.addEventListener('change', () => { video.currentTime = Number(seek.value); dragging = false; draw(); });
+    for (const name of ['change', 'pointerup', 'pointercancel', 'blur']) seek.addEventListener(name, letGo);
     function showPlaying() {
       const paused = video.paused || video.ended;
       playBtn.replaceChildren(icon(paused ? ICON.play : ICON.pause));
       playBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause'); playBtn.title = (paused ? 'Play' : 'Pause') + ' (Space)';
       muteBtn.replaceChildren(icon(video.muted ? ICON.muted : ICON.sound));
-      muteBtn.setAttribute('aria-label', video.muted ? 'Sound on' : 'Mute'); muteBtn.setAttribute('aria-pressed', String(video.muted));
+      muteBtn.setAttribute('aria-pressed', String(video.muted));  // the name stays "Mute"; pressed says whether it is on
     }
     // The controls stay while paused, while a menu is open, or while something is being said; otherwise they slip away.
     function wake() {
@@ -578,7 +585,10 @@ const Watch = (() => {
     });
 
     // ---- what the video says back
-    video.addEventListener('timeupdate', () => { if (!dragging) draw(); });
+    video.addEventListener('timeupdate', () => {
+      if (settled && !video.seeking && video.currentTime > 0) lastAt = video.currentTime;
+      if (!dragging) draw();
+    });
     video.addEventListener('progress', draw);
     video.addEventListener('durationchange', draw);
     video.addEventListener('playing', () => { say(''); gotPicture(); showPlaying(); wake(); settled = true; });

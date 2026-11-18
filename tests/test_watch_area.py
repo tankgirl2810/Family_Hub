@@ -1,5 +1,6 @@
 """Watch mode: playing films and episodes inside Family Hub, with Jellyfin doing the work behind it (player.py)."""
 import json
+import re
 
 import pytest
 
@@ -55,6 +56,7 @@ class FakeJellyfin:
         self.sources = True
         self.user_data = {}       # item -> UserData as Jellyfin would send it
         self.refuse_user_data = False
+        self.other_names = False  # a film in several versions: its files are not named after the film
         self.film_bytes = bytes(range(256)) * 40
 
     def asked(self, method, ending):
@@ -70,7 +72,7 @@ class FakeJellyfin:
             return Reply(200, self.users)
         if path.endswith("/PlaybackInfo"):
             item = path.split("/")[2]
-            if not self.sources:
+            if not self.sources or (self.other_names and json.get("MediaSourceId")):
                 return Reply(200, {"MediaSources": [], "PlaySessionId": SESSION})
             direct = item == FILM and json.get("EnableDirectPlay")
             source = {"Id": SOURCE, "Container": "mp4" if item == FILM else "mkv", "RunTimeTicks": 6000 * 10_000_000,
@@ -99,7 +101,7 @@ class FakeJellyfin:
         if "/hls1/main/" in path:
             return Reply(200, b"\x00\x01piece", {"Content-Type": "video/mp4", "Content-Length": "7"})
         if path.endswith("/Stream.vtt"):
-            return Reply(200, "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nG'day\n".encode(), {"Content-Type": "text/vtt"})
+            return Reply(200, "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nG'day? Are you sure?\n".encode(), {"Content-Type": "text/vtt"})
         if path.endswith("/UserData"):
             return Reply(404, {"message": "no such thing"}) if self.refuse_user_data else Reply(200, {})
         if path == "/Videos/ActiveEncodings":
@@ -121,6 +123,19 @@ def start(client, item=FILM, **more):
     return client.post("/api/media/play/%s/start" % item, json=dict({"can": CAN}, **more))
 
 
+def addresses(playlist):
+    """The addresses a playlist points at, in order."""
+    return [line for line in playlist.splitlines() if line and not line.startswith("#")]
+
+
+def first_piece(client, item=BIG):
+    """Follow a converted stream the way a browser does: its offer, the two playlists, then the first piece's address."""
+    base = "/api/media/play/%s/hls/" % item
+    master = client.get(start(client, item).get_json()["url"]).get_data(as_text=True)
+    main = client.get(base + addresses(master)[0]).get_data(as_text=True)
+    return base + addresses(main)[0]
+
+
 # ------------------------------------------------------------ choosing how it plays
 
 def test_a_film_the_browser_can_play_is_passed_on_as_it_is(client, jellyfin):
@@ -134,6 +149,7 @@ def test_a_film_the_browser_can_play_is_passed_on_as_it_is(client, jellyfin):
     assert asked[2] == {"userId": ADMIN}  # the household account: the first administrator
     body = asked[3]
     assert body["SubtitleStreamIndex"] == -1 and body["EnableDirectPlay"] is True
+    assert body["MediaSourceId"] == FILM  # Jellyfin only honours the language and "no subtitles" for a file it is told by name
     direct = body["DeviceProfile"]["DirectPlayProfiles"]
     assert {"Container": "mp4,m4v,mov", "Type": "Video", "VideoCodec": "h264,vp9", "AudioCodec": "aac,mp3,opus"} in direct
     assert body["DeviceProfile"]["TranscodingProfiles"][0]["Protocol"] == "hls"
@@ -163,7 +179,8 @@ def test_subtitles_in_words_are_offered_and_pictures_are_left_out(client, jellyf
     assert play["subtitles"] == [{"index": 3, "label": "English - SRT", "lang": "eng",
                                   "url": "/api/media/play/%s/subs/%s/3.vtt" % (FILM, SOURCE)}]
     words = client.get(play["subtitles"][0]["url"])
-    assert words.status_code == 200 and words.mimetype == "text/vtt" and "G'day" in words.get_data(as_text=True)
+    assert words.status_code == 200 and words.mimetype == "text/vtt"
+    assert "G'day? Are you sure?\n" in words.get_data(as_text=True)  # the words exactly as they came, question marks and all
     assert jellyfin.asked("GET", "/Videos/%s/%s/Subtitles/3/0/Stream.vtt" % (FILM, SOURCE))
 
 
@@ -224,17 +241,49 @@ def test_the_file_is_passed_through_a_piece_at_a_time(client, jellyfin):
 def test_the_converted_stream_never_shows_the_key(client, jellyfin):
     login(client, "Nan")
     play = start(client, BIG).get_json()
+    base = "/api/media/play/%s/hls/" % BIG
     first = client.get(play["url"])
     assert first.status_code == 200 and first.mimetype == "application/vnd.apple.mpegurl"
     text = first.get_data(as_text=True)
-    assert KEY not in text and "api_key" not in text and "main.m3u8?DeviceId=hub-device&PlaySessionId=" + SESSION in text
-    # what Jellyfin was asked is what the browser asked, with the hub's own sign-in in the header instead
-    assert jellyfin.asked("GET", "/Videos/%s/master.m3u8" % BIG)[-1][5] == play["url"].split("?", 1)[1]
-    second = client.get("/api/media/play/%s/hls/main.m3u8?PlaySessionId=%s" % (BIG, SESSION)).get_data(as_text=True)
-    assert KEY not in second and "ApiKey" not in second
-    assert 'URI="hls1/main/-1.mp4?PlaySessionId=%s"' % SESSION in second and "\nhls1/main/0.mp4?PlaySessionId=%s\n" % SESSION in second
-    piece = client.get("/api/media/play/%s/hls/hls1/main/0.mp4?PlaySessionId=%s" % (BIG, SESSION))
+    assert KEY not in text and "api_key" not in text.lower()
+    main = addresses(text)[0]
+    assert main.startswith("main.m3u8?DeviceId=hub-device&PlaySessionId=%s&sig=" % SESSION)
+    # Jellyfin is asked for exactly what it offered, with the hub's own sign-in in the header instead of the key
+    assert jellyfin.asked("GET", "/Videos/%s/master.m3u8" % BIG)[-1][5] == play["url"].split("?", 1)[1].split("&sig=")[0]
+    second = client.get(base + main).get_data(as_text=True)
+    assert KEY not in second and "apikey" not in second.lower()
+    opening, piece_address = re.search(r'URI="([^"]+)"', second).group(1), addresses(second)[0]
+    assert opening.startswith("hls1/main/-1.mp4?PlaySessionId=%s&sig=" % SESSION)
+    assert piece_address.startswith("hls1/main/0.mp4?PlaySessionId=%s&sig=" % SESSION)
+    piece = client.get(base + piece_address)
     assert piece.status_code == 200 and piece.data == b"\x00\x01piece" and piece.mimetype == "video/mp4"
+    assert jellyfin.asked("GET", "/hls1/main/0.mp4")[-1][5] == "PlaySessionId=" + SESSION
+
+
+def test_the_browser_cannot_change_what_the_converter_is_told(client, jellyfin):
+    # these settings end up on the command line of Jellyfin's converter: only Jellyfin's own, unchanged, are passed on
+    login(client, "Nan")
+    good = start(client, BIG).get_json()["url"]
+    unsigned = good.split("&sig=")[0]
+    for bad in (good.replace("VideoCodec=h264", "VideoCodec=h264%20-f%20null"),   # a setting changed
+                good + "&VideoCodec=copy", good + "&static=true",               # a setting added
+                good.replace("&PlaySessionId=" + SESSION, ""),                   # a setting taken away
+                unsigned, unsigned + "&sig=" + "0" * 32, good + "&sig=" + "0" * 32,
+                good.replace("/play/" + BIG, "/play/" + FILM),                  # signed for another film
+                good + "&runtimeTicks=soon", good + "&actualSegmentLengthTicks=-1"):
+        assert client.get(bad).status_code == 404, bad
+    assert jellyfin.asked("GET", "/master.m3u8") == []
+    # the two numbers that differ from piece to piece may ride along, as plain numbers
+    assert client.get(good + "&runtimeTicks=60000000&actualSegmentLengthTicks=30000000").status_code == 200
+    assert jellyfin.asked("GET", "/master.m3u8")[-1][5] == unsigned.split("?", 1)[1] + "&runtimeTicks=60000000&actualSegmentLengthTicks=30000000"
+
+
+def test_a_film_whose_files_go_by_other_names_still_plays(client, jellyfin):
+    login(client, "Nan")
+    jellyfin.other_names = True
+    assert start(client).get_json()["kind"] == "direct"
+    named = [call[3].get("MediaSourceId") for call in jellyfin.asked("POST", "/PlaybackInfo")]
+    assert named == [FILM, None]  # asked by name first, then without
 
 
 def test_only_a_stream_address_is_passed_on(client, jellyfin):
@@ -353,7 +402,8 @@ def test_what_is_passed_on_is_only_ever_video(client, jellyfin, monkeypatch):
             reply.headers["Content-Type"] = "text/html; charset=utf-8"
             reply.headers["Set-Cookie"] = "jellyfin=secret"
         return reply
+    address = first_piece(client)
     monkeypatch.setattr(player.requests, "request", a_page_instead)
-    piece = client.get("/api/media/play/%s/hls/hls1/main/0.mp4" % BIG)
+    piece = client.get(address)
     assert piece.mimetype == "application/octet-stream" and "jellyfin=secret" not in str(piece.headers)  # none of Jellyfin's cookies
     assert piece.headers["X-Content-Type-Options"] == "nosniff"

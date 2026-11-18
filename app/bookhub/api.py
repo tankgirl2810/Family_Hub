@@ -3343,11 +3343,16 @@ def media_play_hls(who, item_id, path):
     if not _play_ids(item_id) or not player.HLS_PATH.fullmatch(path):
         return fail("Nothing to play there.", 404)
 
+    # Only the settings the hub signed for this film go on to Jellyfin: a browser cannot change or add any.
+    query = hub().player.checked_query(item_id, request.query_string.decode("latin-1"))
+    if query is None:
+        return fail("Nothing to play there.", 404)
+
     def go():
-        reply = hub().player.hls(item_id, path, request.query_string.decode("latin-1"))
+        reply = hub().player.hls(item_id, path, query)
         if not path.endswith(".m3u8") or reply.status_code != 200:
             return _video_passed_on(reply)
-        answer = Response(hub().player.playlist(reply), mimetype="application/vnd.apple.mpegurl")
+        answer = Response(hub().player.playlist(item_id, reply), mimetype="application/vnd.apple.mpegurl")
         answer.headers["Cache-Control"] = "no-store"
         return answer
     return media_call(go)

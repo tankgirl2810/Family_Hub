@@ -8,14 +8,21 @@ Jellyfin key stays on the server:
   hls      it cannot (most 2160p files, or sound a browser has no decoder for): Jellyfin converts it as it plays
            and the hub passes on the playlist and its pieces, with the key taken out of every address
 
+The settings of a converted stream (which codecs, which file, which viewer) are Jellyfin's to choose, never the
+browser's: they end up on the command line of Jellyfin's converter. Every address the hub hands out for a stream
+is signed, and the hub passes on to Jellyfin only settings that carry its signature unchanged.
+
 Jellyfin is used through one account, its first administrator, so the place reached in a film is the household's,
 not each person's. The hub keeps that place itself (table watch_places) and tells Jellyfin too, so Jellyfin's
 own apps carry on from the same spot; when playing starts, whichever was touched last wins.
 """
+import hashlib
+import hmac
 import math
+import os
 import re
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit
 
 import requests
 
@@ -28,6 +35,11 @@ SESSION = re.compile(r"[0-9a-zA-Z-]{8,64}")
 HLS_PATH = re.compile(r"(master|main)\.m3u8|hls1/[A-Za-z0-9_-]+/-?[0-9]+\.(ts|mp4|m4s)")
 KEY_IN_ADDRESS = re.compile(r"(?i)(?<=[?&])api_?key=[^&\s\"#]*&?")
 LOOSE_END = re.compile(r"[?&](?=[\"\s]|$)", re.M)
+# the addresses inside a playlist: a line of its own, or URI="..." inside a tag
+PLAYLIST_LINE = re.compile(r"^(?!#)(\S+)$", re.M)
+PLAYLIST_URI = re.compile(r'URI="([^"]+)"')
+# the two settings that differ from piece to piece; plain numbers, so the browser may send them unsigned
+PIECE_TIMES = {"runtimeticks", "actualsegmentlengthticks"}
 
 VIDEO = ("h264", "hevc", "av1", "vp9", "vp8")
 AUDIO = ("aac", "mp3", "opus", "flac", "vorbis", "ac3", "eac3")
@@ -103,6 +115,7 @@ class Player:
         self.hub = hub
         self._account = None    # (Jellyfin address, key, the administrator's id)
         self._sessions = {}     # play session -> the device name Jellyfin filed its conversion under
+        self._secret = os.urandom(32)  # signs stream addresses; a restart ends streams, and Try again starts them afresh
 
     # ------------------------------------------------------------ asking Jellyfin
 
@@ -141,6 +154,31 @@ class Player:
         text = LOOSE_END.sub("", KEY_IN_ADDRESS.sub("", text))
         return text.replace(key, "") if key else text
 
+    # ------------------------------------------------------------ signed stream settings
+
+    def _signature(self, item_id, pairs):
+        fixed = sorted((name, value) for name, value in pairs if name.lower() not in PIECE_TIMES and name != "sig")
+        words = item_id.lower() + "\n" + urlencode(fixed)
+        return hmac.new(self._secret, words.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+    def _signed(self, item_id, address):
+        """One address out of Jellyfin's playlist (or its stream offer), key removed, with the hub's signature added."""
+        path, _, query = self._clean(address).partition("?")
+        pairs = [(name, value) for name, value in parse_qsl(query, keep_blank_values=True) if name != "sig"]
+        return path + "?" + urlencode(pairs + [("sig", self._signature(item_id, pairs))], quote_via=quote)
+
+    def checked_query(self, item_id, query):
+        """The settings to pass on to Jellyfin for a stream address the browser asked for, or None when they are not
+        exactly the ones the hub signed for this film (changed, added to, taken from, or signed for another film)."""
+        pairs = parse_qsl(query, keep_blank_values=True)
+        given = [value for name, value in pairs if name == "sig"]
+        rest = [(name, value) for name, value in pairs if name != "sig"]
+        if len(given) != 1 or not hmac.compare_digest(given[0], self._signature(item_id, rest)):
+            return None
+        if any(name.lower() in PIECE_TIMES and not re.fullmatch(r"[0-9]{1,20}", value) for name, value in rest):
+            return None
+        return urlencode(rest, quote_via=quote)
+
     def forget_account(self):
         self._account = None
 
@@ -168,9 +206,15 @@ class Player:
                 "EnableDirectPlay": audio is None, "EnableDirectStream": True, "EnableTranscoding": True, "AutoOpenLiveStream": False}
         if audio is not None:
             body["AudioStreamIndex"] = audio  # a browser cannot switch language inside a file; Jellyfin picks it out
-        info = self._ask("POST", "/Items/%s/PlaybackInfo" % item_id, params={"userId": user}, json=body)
+        # Jellyfin only honours the chosen language and "no subtitles" for the file it is told about by name.
+        info = self._ask("POST", "/Items/%s/PlaybackInfo" % item_id, params={"userId": user}, json=dict(body, MediaSourceId=item_id))
         info = info if isinstance(info, dict) else {}
         sources = [source for source in info.get("MediaSources") or [] if isinstance(source, dict)]
+        if not sources and not info.get("ErrorCode"):
+            # a film kept in several versions may name its files differently: ask again without naming one
+            info = self._ask("POST", "/Items/%s/PlaybackInfo" % item_id, params={"userId": user}, json=body)
+            info = info if isinstance(info, dict) else {}
+            sources = [source for source in info.get("MediaSources") or [] if isinstance(source, dict)]
         if info.get("ErrorCode") or not sources:
             raise PlayError("The family server has no file for this that it can play (%s)." % (info.get("ErrorCode") or "no file listed"))
         source = sources[0]
@@ -184,8 +228,7 @@ class Player:
             parts = urlsplit(str(source["TranscodingUrl"]))
             if not parts.path.lower().endswith("/master.m3u8"):
                 raise PlayError("The family server offered a kind of stream Family Hub cannot pass on.")
-            query = self._clean("?" + parts.query)[1:]
-            kind, url = "hls", "/api/media/play/%s/hls/master.m3u8?%s" % (item_id, query)
+            kind, url = "hls", "/api/media/play/%s/hls/%s" % (item_id, self._signed(item_id, "master.m3u8?" + parts.query))
             device = (parse_qs(parts.query).get("DeviceId") or parse_qs(parts.query).get("deviceId") or [""])[0]
             if SESSION.fullmatch(session) and device:
                 if len(self._sessions) > 200:  # never stopped (a closed laptop): the oldest are let go
@@ -220,21 +263,30 @@ class Player:
         """One playlist or piece of a converted stream. The first piece can take a while: the converter is starting."""
         return self._fetch("/Videos/%s/%s" % (item_id, path), query=query, wait=120)
 
-    def playlist(self, reply):
-        """A playlist's text with the key out of every address in it."""
+    def playlist(self, item_id, reply):
+        """A playlist's text with the key out of every address in it, and each address signed."""
         try:
-            return self._clean(reply.content.decode("utf-8", "replace"))
+            text = reply.content.decode("utf-8", "replace")
+        except requests.RequestException:
+            raise PlayError("The family server stopped answering part-way. Try again in a minute.")
         finally:
             reply.close()
+        text = PLAYLIST_URI.sub(lambda found: 'URI="%s"' % self._signed(item_id, found.group(1)), text)
+        return self._clean(PLAYLIST_LINE.sub(lambda found: self._signed(item_id, found.group(1)), text))
 
     def subtitle(self, item_id, source_id, index):
         reply = self._fetch("/Videos/%s/%s/Subtitles/%d/0/Stream.vtt" % (item_id, source_id, index), wait=60)
         try:
             if reply.status_code != 200:
                 raise PlayError("Those subtitles could not be fetched.")
-            return self._clean(reply.content.decode("utf-8", "replace"))
+            words = reply.content.decode("utf-8", "replace")
+        except requests.RequestException:
+            raise PlayError("Those subtitles could not be fetched.")
         finally:
             reply.close()
+        # the words are passed on as they are (their question marks are theirs); only the key could never be in them
+        key = self.hub.config.jellyfin_api_key
+        return words.replace(key, "") if key else words
 
     def stop(self, session):
         """Tell Jellyfin a viewer has gone, so it stops converting for them. Only a session started here, and only that one."""
