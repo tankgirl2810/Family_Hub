@@ -92,8 +92,9 @@ Family Hub leaves these out and shows what is left. It also:
 - uses one spelling for common genres ("Thrillers" and "Thriller" are the
   same tag).
 
-Nothing is changed in the files or the library. To see what was left out,
-open **Admin → Books → Tidy tags** and look under **Removed as
+Nothing is changed in the files. With **Write tags to the library** on (see
+below) the clutter is taken off the library entries too. To see what was left
+out, open **Admin → Books → Tidy tags** and look under **Removed as
 clutter**.
 
 ## Community tags from catalogues
@@ -243,6 +244,36 @@ as it is.
 
 Merges, and the suggestions you said no to, are saved in the book-data
 backup ([guide 6](06-your-data-and-backups.md)).
+
+## Tags written into the library
+
+So that Calibre-Web, KOReader and every reading app see the same tags as
+Family Hub, the tags are written into the library itself. Each book gets:
+
+- its own tags, as they were typed, less the clutter (ISBNs, web addresses,
+  "Accessible book") and with your hidden and renamed tags applied;
+- the best few community tags (up to six, the ones most catalogues agree on
+  first);
+- its family tags.
+
+Personal tags never leave Family Hub. A tag somebody typed in Calibre-Web is
+kept, even if Family Hub has never heard of it; a tag Family Hub wrote and no
+longer wants (you took a family tag off, or hid a community tag) is taken off
+again.
+
+Ten books are written a minute, through Calibre-Web, after a copy of the
+library's database. **Admin → Books → Tidy tags → Tags in the library** shows:
+
+- the switch **Write tags to the library** (on to begin with);
+- how many books are still to write, and the next few with what will be
+  added (+) and taken off (−);
+- every book written, with an **Undo**. Undo puts that book's tags back as
+  they were and leaves them alone from then on; **Look after it again**
+  hands them back.
+
+Nothing is written until Calibre-Web's sign-in is saved under
+**Admin → Hub → Connections**. If Calibre-Web takes none of a batch's changes
+(its account may not edit books), writing stops by itself and says so.
 
 ## Kinds of book
 
