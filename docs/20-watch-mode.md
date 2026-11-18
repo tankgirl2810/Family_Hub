@@ -42,7 +42,7 @@ asked for waits under **On the way** until it is ready.
 | Play, Pause | **Space** or **K** (OK on a remote) | |
 | Back 10 seconds, Forward 30 seconds | **←** **→** (or **J** **L**) | |
 | The bar | drag it, or **↑** then **←** **→** | Moves through the film |
-| Subtitles | **C** | Off, or any subtitles in words that came with the film or that Bazarr fetched. Your choice is remembered on that device |
+| Subtitles | **C** | Off, or any subtitles in words that came with the film or that Bazarr fetched. Your choice is remembered on that device. The first time a language is picked for a film, Jellyfin has to pull it out of the file, which can take up to a minute; the film keeps playing meanwhile |
 | Language | | Shown when the film has more than one sound track |
 | Mute | **M** | |
 | Next episode | **N** | Shown when the next episode is on the server |
@@ -63,11 +63,12 @@ Jellyfin still keeps the films and does the work; Family Hub asks it how each on
 the browser that is asking, and passes the video through. So the browser only ever talks to Family
 Hub, and the Jellyfin key never leaves the server.
 
-- A file the browser can play is passed on as it is.
-- Anything else is converted by Jellyfin while it plays. That includes most 2160p films in browsers
-  that cannot play HEVC, and films whose sound a browser has no decoder for. Converting a 2160p film
-  is heavy work for the server: on a small one it may stutter. A browser that can play HEVC (Edge
-  and Chrome on a recent computer, Safari) is sent the picture untouched, which is light.
+- A file the browser can play is passed on as it is. If the browser turns out not to manage it after all, the
+  player asks for the converted stream instead, by itself.
+- Anything else is converted by Jellyfin while it plays. A browser that can play HEVC (Edge and Chrome
+  on a recent computer, Safari) is sent a 2160p picture untouched, with only the wrapping and the
+  sound changed, which is light work. A browser that cannot has the picture converted too. That is
+  heavy: the test PC kept up with one 2160p film, a small server may stutter.
 - Choosing another **Language** always goes through Jellyfin's converter, because a browser cannot
   switch sound tracks inside a file.
 - Subtitles drawn as pictures (from discs) are not offered here. Open the film in Jellyfin for those:
@@ -83,6 +84,7 @@ and lets people ask for more; it says that playing is not connected yet.
 | What you see | What to try |
 |---|---|
 | "Not ready to play yet" on something just downloaded | Jellyfin has not listed it yet. It usually has within a few minutes |
+| "Not ready to play yet" on everything, for good | Jellyfin is not listing the films as films. Open Jellyfin: if its Movies library shows only folders, another library is laid over the same folder (a Books library pointed at the whole media folder does this). Remove that library, or point it at its own folder, then on Movies and on TV Shows choose **Refresh metadata → Search for missing metadata**. A plain scan does not bring them back |
 | "This could not be played", **Try again** | The film stopped arriving, or Jellyfin could not start it. **Try again** carries on from the same place. If it keeps happening, an admin can look at Jellyfin's own page (its Dashboard shows what it is converting) |
 | It plays but stutters | The server is converting it and cannot keep up. A browser that plays HEVC avoids the conversion; so does asking for a 1080p copy under **Pick a version yourself** on the film's ordinary page |
 | No **Full screen** button | That browser does not allow it. On a phone, the button in the player fills the screen with the film |
@@ -91,6 +93,15 @@ and lets people ask for more; it says that playing is not connected yet.
 
 Tested in Edge against a stand-in that answers like Jellyfin, with a test clip: the rows, arrow-key
 moving, full screen, a file passed on as it is, a converted stream, subtitles, another language,
-carrying on, the next episode, leaving the player every way, and a stream that stops. **Not yet
-tried:** a real Jellyfin with real films (2160p conversion above all), Safari, an iPhone, and a
-television's own browser.
+carrying on, the next episode, leaving the player every way, and a stream that stops.
+
+**Tried on a real Jellyfin on 18 November 2026** (version 10.10.7, a fresh one started for the test,
+with the household's real Radarr, Sonarr and files, in Edge on the test PC): every film and episode
+Jellyfin listed played, with the first picture in about 3 seconds (10 at worst) and a jump to the
+middle of a 2160p film in about 4; files passed on as they are and converted ones; a 2160p film
+converted in full for a browser without HEVC (it kept up); subtitles; another language; carrying on,
+with Jellyfin told the place; the next episode; and Jellyfin's converter stopping when the player
+is left.
+
+**Not yet tried:** Safari, Firefox, an iPhone, a television's own browser, a server slower than
+the test PC, and two people watching at once.

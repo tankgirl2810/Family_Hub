@@ -3325,7 +3325,7 @@ def media_play_start(who, item_id):
     audio = data.get("audio")
     if audio is not None and (isinstance(audio, bool) or not isinstance(audio, int) or not 0 <= audio < 1000):
         return fail("Say which language by its number.")
-    return media_call(lambda: jsonify(hub().player.start(item_id, data.get("can"), audio)))
+    return media_call(lambda: jsonify(hub().player.start(item_id, data.get("can"), audio, convert=data.get("convert") is True)))
 
 
 @bp.get("/media/play/<item_id>/file")

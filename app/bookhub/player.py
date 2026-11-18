@@ -197,13 +197,15 @@ class Player:
 
     # ------------------------------------------------------------ starting
 
-    def start(self, item_id, can, audio=None):
+    def start(self, item_id, can, audio=None, convert=False):
         """How this browser can play one film or episode: where the video is, its subtitles and languages, and
-        where to carry on from."""
+        where to carry on from. convert: the browser tried the file as it is and could not play it after all
+        (Jellyfin counts some .mkv files as playable that only some browsers manage), so it must be converted."""
+        as_it_is = audio is None and not convert
         user = self.account()
         body = {"UserId": user, "DeviceProfile": device_profile(can), "MaxStreamingBitrate": 120_000_000,
                 "SubtitleStreamIndex": -1,  # subtitles are laid over by the browser, never burnt into the picture
-                "EnableDirectPlay": audio is None, "EnableDirectStream": True, "EnableTranscoding": True, "AutoOpenLiveStream": False}
+                "EnableDirectPlay": as_it_is, "EnableDirectStream": True, "EnableTranscoding": True, "AutoOpenLiveStream": False}
         if audio is not None:
             body["AudioStreamIndex"] = audio  # a browser cannot switch language inside a file; Jellyfin picks it out
         # Jellyfin only honours the chosen language and "no subtitles" for the file it is told about by name.
@@ -222,7 +224,7 @@ class Player:
         if not ITEM.fullmatch(source_id):
             raise PlayError("The family server answered in a way Family Hub did not expect.")
         streams = [stream for stream in source.get("MediaStreams") or [] if isinstance(stream, dict)]
-        if audio is None and source.get("SupportsDirectPlay"):
+        if as_it_is and source.get("SupportsDirectPlay"):
             kind, url = "direct", "/api/media/play/%s/file?source=%s" % (item_id, source_id)
         elif source.get("TranscodingUrl"):
             parts = urlsplit(str(source["TranscodingUrl"]))
@@ -275,7 +277,8 @@ class Player:
         return self._clean(PLAYLIST_LINE.sub(lambda found: self._signed(item_id, found.group(1)), text))
 
     def subtitle(self, item_id, source_id, index):
-        reply = self._fetch("/Videos/%s/%s/Subtitles/%d/0/Stream.vtt" % (item_id, source_id, index), wait=60)
+        # Jellyfin pulls the words out of the film file the first time they are asked for: minutes, for a long 2160p film
+        reply = self._fetch("/Videos/%s/%s/Subtitles/%d/0/Stream.vtt" % (item_id, source_id, index), wait=240)
         try:
             if reply.status_code != 200:
                 raise PlayError("Those subtitles could not be fetched.")
