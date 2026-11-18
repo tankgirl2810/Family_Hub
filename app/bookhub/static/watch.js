@@ -15,7 +15,7 @@ const Watch = (() => {
   const QUIET_AFTER = 3000;               // the controls go away after this long without a move
   const KEEP_EVERY = 15000;               // how often the place is kept while playing
   const UP_NEXT = 10;                     // seconds before the next episode starts by itself
-  const STALLED_AFTER = 60000;            // waiting this long for the next part means it is not coming
+  const STALLED_AFTER = 90000;            // waiting this long for the next part means it is not coming
   const WORTH_RESUMING = 60;              // matches player.py
   const ICON = {
     play: 'M7 5l12 7-12 7z', pause: 'M8 5v14M16 5v14', back: 'M4 12a8 8 0 1 0 3-6.2M4 4v5h5', on: 'M20 12a8 8 0 1 1-3-6.2M20 4v5h-5',
@@ -424,6 +424,8 @@ const Watch = (() => {
 
     let info = null, hls = null, length = 0, settled = false, ended = false, mended = false, quietTimer = null, keepTimer = null, countdown = null, stallTimer = null;
     let chosenAudio = null, closed = false;
+    let shownSubs = -1;  // which of info.subtitles is on the screen; -1 = none
+    let mustConvert = false;  // the file as it is would not play in this browser: ask for the converted stream from now on
     let lastAt;  // the last place the film was really playing at: where Try again carries on from, however often it fails
     const total = () => (Number.isFinite(video.duration) && video.duration > 0 ? video.duration : length);
     const say = (words) => { status.textContent = words || ''; status.hidden = !words; };
@@ -460,20 +462,27 @@ const Watch = (() => {
       expectPicture();
       if (info) dropStream();
       let got;
-      try { got = await api('POST', '/api/media/play/' + watchId + '/start', { can: canPlay(), audio: audio === null ? undefined : audio }); }
+      try { got = await api('POST', '/api/media/play/' + watchId + '/start', { can: canPlay(), audio: audio === null ? undefined : audio, convert: mustConvert || undefined }); }
       catch (err) { if (!(err instanceof Stale)) failed(err.message); return; }
       if (gen !== routeGen) return;
       info = got; length = got.length; chosenAudio = audio;
       const startAt = at !== undefined ? at : fromStart ? 0 : got.resume;
       seek.max = String(Math.floor(length)); draw();
-      for (const entry of got.subtitles) video.append(el('track', { kind: 'subtitles', label: entry.label, srclang: entry.lang || 'en', src: entry.url }));
+      shownSubs = -1;
       drawMenus();
       if (got.kind === 'hls') {
         const own = video.canPlayType('application/vnd.apple.mpegurl');
         try { if (!(own && apple())) await loadHls(); } catch (err) { /* the browser's own player may still manage */ }
         if (gen !== routeGen) return;
         if (window.Hls && window.Hls.isSupported() && !(own && apple())) {
-          hls = new window.Hls({ startPosition: startAt > 0 ? startAt : -1, maxBufferLength: 30, maxMaxBufferLength: 120 });
+          // Jellyfin can take a while over its first answer (it starts a converter, and after a jump starts it again),
+          // so the library waits far longer than its ten-second default before deciding a part is not coming.
+          const patient = (firstByte, whole) => ({ default: { maxTimeToFirstByteMs: firstByte, maxLoadTimeMs: whole,
+            timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 0 }, errorRetry: { maxNumRetry: 4, retryDelayMs: 1000, maxRetryDelayMs: 8000 } } });
+          hls = new window.Hls({ startPosition: startAt > 0 ? startAt : -1, maxBufferLength: 30, maxMaxBufferLength: 120,
+            manifestLoadPolicy: patient(30000, 60000), playlistLoadPolicy: patient(60000, 90000), fragLoadPolicy: patient(60000, 180000),
+            // subtitles are the hub's own business (below); the library must not touch the video's text tracks
+            enableWebVTT: false, enableIMSC1: false, enableCEA708Captions: false, renderTextTracksNatively: false });
           hls.on(window.Hls.Events.ERROR, (event, data) => {
             if (!data.fatal) return;
             // While the picture is being mended the clock reads 0:00 for a moment; that is not the place to keep.
@@ -559,14 +568,37 @@ const Watch = (() => {
       wake();
     }
     const menuItem = (label, on, onclick) => el('button', { type: 'button', role: 'menuitemradio', 'aria-checked': String(on), text: label, onclick });
+    // Only the subtitles that are picked are ever fetched. Jellyfin has to pull each language out of the film file,
+    // which can take half a minute the first time; fetching every language at once held up the film itself.
+    function showSubtitles(index) {
+      for (const old of [...video.querySelectorAll('track')]) old.remove();
+      shownSubs = -1;
+      const entry = info && info.subtitles[index];
+      if (!entry) return;
+      const node = el('track', { kind: 'subtitles', label: entry.label, srclang: entry.lang || 'en', src: entry.url });
+      node.addEventListener('error', () => { if (node.isConnected) toast('Those subtitles could not be fetched.', true, 6000); });
+      video.append(node);
+      node.track.mode = 'showing';
+      shownSubs = index;
+    }
+    const savedSubtitles = () => { try { return localStorage.getItem('watch-subtitles') || ''; } catch (err) { return ''; } };
+    // The language to turn on: the one used last time on this device, else English, else the first there is.
+    function usualSubtitles(fallBack) {
+      const wanted = savedSubtitles();
+      const find = (test) => info.subtitles.findIndex(test);
+      const same = wanted ? find((entry) => entry.lang === wanted) : -1;
+      if (same >= 0 || !fallBack) return same;
+      const english = find((entry) => /^en/i.test(entry.lang));
+      return english >= 0 ? english : 0;
+    }
     function pickSubtitles(index, fromMenu) {
-      [...video.textTracks].forEach((track, position) => { track.mode = position === index ? 'showing' : 'disabled'; });
+      showSubtitles(index);
       try { localStorage.setItem('watch-subtitles', index < 0 ? '' : (info.subtitles[index].lang || 'on')); } catch (err) { /* private browsing */ }
       drawMenus(); closeMenus();
       if (fromMenu) subsBtn.focus();
     }
     function drawMenus() {
-      const showing = [...video.textTracks].findIndex((track) => track.mode === 'showing');
+      const showing = shownSubs;
       subsBtn.hidden = !info.subtitles.length;
       fill(subsMenu, menuItem('Off', showing < 0, () => pickSubtitles(-1, true)), info.subtitles.map((entry, index) => menuItem(entry.label, showing === index, () => pickSubtitles(index, true))));
       soundBtn.hidden = info.audio.length < 2;
@@ -577,10 +609,8 @@ const Watch = (() => {
     }
     // Subtitles stay as they were last time (off, or that language), on this device.
     video.addEventListener('loadedmetadata', () => {
-      let wanted = '';
-      try { wanted = localStorage.getItem('watch-subtitles') || ''; } catch (err) { /* private browsing */ }
-      const index = wanted ? Math.max(info.subtitles.findIndex((entry) => entry.lang === wanted), wanted === 'on' ? 0 : -1) : -1;
-      [...video.textTracks].forEach((track, position) => { track.mode = position === index ? 'showing' : 'disabled'; });
+      if (!info) return;
+      showSubtitles(savedSubtitles() === 'on' ? usualSubtitles(true) : usualSubtitles(false));
       drawMenus();
     });
 
@@ -597,7 +627,12 @@ const Watch = (() => {
     video.addEventListener('volumechange', showPlaying);
     video.addEventListener('waiting', () => { if (!video.paused) { say('Getting the next part ready…'); expectPicture(); } });
     video.addEventListener('canplay', () => { gotPicture(); if (status.textContent.startsWith('Getting')) say(''); });
-    video.addEventListener('error', () => { if (!hls && video.error) failed('The film stopped arriving from the family server, or this browser cannot play it.'); });
+    video.addEventListener('error', () => {
+      if (hls || !video.error || !video.getAttribute('src')) return;
+      // Passed on as it is, and this browser cannot play it after all: have it converted instead, once, without a fuss.
+      if (info && info.kind === 'direct' && !mustConvert) { mustConvert = true; begin(chosenAudio, lastAt); return; }
+      failed('The film stopped arriving from the family server, or this browser cannot play it.');
+    });
     video.addEventListener('ended', () => {
       // A stream that gives out part-way can look like the end to the browser. Only the real end counts as watched.
       if (length > 0 && video.currentTime < length * 0.9) { failed('The film stopped arriving from the family server.'); return; }
@@ -654,8 +689,7 @@ const Watch = (() => {
       else if (letter === 'l') { event.preventDefault(); skip(SKIP_ON); }
       else if (letter === 'c' && info && info.subtitles.length) {
         event.preventDefault();
-        const showing = [...video.textTracks].findIndex((track) => track.mode === 'showing');
-        pickSubtitles(showing < 0 ? 0 : -1);
+        pickSubtitles(shownSubs < 0 ? usualSubtitles(true) : -1);
       }
       else if (letter === 'n' && nextBtn) { event.preventDefault(); location.hash = nextBtn.getAttribute('href'); }
       else if (key === 'Backspace' || key === 'BrowserBack') { event.preventDefault(); location.hash = titlePage; }

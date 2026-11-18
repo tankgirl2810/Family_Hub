@@ -195,6 +195,14 @@ def test_another_language_is_played_as_a_converted_stream(client, jellyfin):
     assert start(client, audio="two").status_code == 400
 
 
+def test_a_file_the_browser_could_not_play_after_all_is_converted(client, jellyfin):
+    login(client, "Nan")
+    assert start(client).get_json()["kind"] == "direct"
+    again = start(client, convert=True).get_json()
+    assert again["kind"] == "hls" and jellyfin.asked("POST", "/PlaybackInfo")[-1][3]["EnableDirectPlay"] is False
+    assert start(client, convert="yes").get_json()["kind"] == "direct"  # only a plain true counts
+
+
 def test_a_jellyfin_that_cannot_help_says_so_in_plain_words(app, client, jellyfin):
     login(client, "Nan")
     jellyfin.sources = False
