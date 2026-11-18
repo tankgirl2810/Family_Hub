@@ -1431,6 +1431,8 @@ class FakeSeriesServer:
         if "mangas(condition:{inLibrary:true})" in query:
             return {"mangas": {"nodes": [self.manga(m) for m in sorted(self.following)]},
                     "downloadStatus": {"queue": [{"state": "QUEUED"}] * len(self.queued)}}
+        if query.startswith("{mangas{nodes"):  # every series the server knows, followed or not
+            return {"mangas": {"nodes": [self.manga(m) for m in sorted(self.titles)]}}
         if "fetchMangaAndChapters" in query:
             if v["id"] == 8 and not self.chapters[8]:
                 self.chapters[8] = [{"id": 81, "name": "Chapter 1", "chapterNumber": 1.0, "sourceOrder": 1, "isRead": False,
