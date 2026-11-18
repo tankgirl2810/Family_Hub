@@ -20,12 +20,9 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
-from . import calibre, catalogues, covers, db, kinds, librarymanager
+from . import calibre, catalogues, covers, db, identify, kinds, librarymanager
 
-OPEN_LIBRARY = "https://openlibrary.org/search.json"
-OL_FIELDS = "key,title,author_name,first_publish_year,publisher,isbn,cover_i"
 PDF_PAGES = 10          # pages of a PDF read for an ISBN: the copyright page is near the front
-MAX_CANDIDATES = 8
 FILE_LIKE = re.compile(r"\.(pdf|epub|mobi|azw3?|docx?|cb[zr]|txt|rtf|djvu)$|_|~|\d{5,}|^[A-Z]{2,6}\d{3,}", re.I)
 ISBN_RE = re.compile(r"(?<![\dX])(97[89][\d\- ]{10,14}|\d[\d\- ]{8,11}[\dXx])(?![\d])")
 # Family Hub's records that follow a book to its new name. Community tags and their look-ups are dropped
@@ -86,6 +83,8 @@ def problems(book):
 
 def tidy_title(title):
     """A title as a person would type it into a search."""
+    title = re.sub(r"^microsoft (word|powerpoint) - ", "", title or "", flags=re.I)  # "Microsoft Word - DDEX13 Shadows.docx"
+    title = re.sub(r"\.(docx?|pptx?|indd|rtf)$", "", title, flags=re.I)
     title = catalogues.query_title(calibre.unmangle(title))
     title = re.sub(r"~.*$", "", title)                       # "Story Circle~tqw~ darksiderg"
     title = re.sub(r"\b(retail|ebook|e-book|epub|pdf|digital|scan)\b", " ", title, flags=re.I)
@@ -119,12 +118,12 @@ def _epub_clues(path):
 
 
 def _pdf_clues(path):
-    """(isbns, title, author) from a PDF's own details and the text of its first pages."""
+    """(isbns, title, author, dois, cover title) from a PDF's own details, the text of its first pages and the
+    biggest words on its first page."""
     from pypdf import PdfReader
     reader = PdfReader(str(path))
-    meta = reader.metadata or {}
-    title, author = str(meta.get("/Title") or "").strip(), str(meta.get("/Author") or "").strip()
-    isbns = []
+    title, author = identify.pdf_meta(reader)
+    isbns, dois = [], []
     for page in reader.pages[:PDF_PAGES]:
         try:
             text = page.extract_text() or ""
@@ -132,7 +131,9 @@ def _pdf_clues(path):
             continue
         if "isbn" in text.lower():
             isbns += [isbn for isbn in isbns_in(text) if isbn not in isbns]
-    return isbns, title, author
+        if "10." in text:
+            dois += [doi for doi in identify.dois_in(text) if doi not in dois]
+    return isbns, title, author, dois[:2], identify.cover_title(path)
 
 
 def pdf_text(path, pages=3):
@@ -178,94 +179,70 @@ class BookFix:
         db.kv_set(self.hub.con(), "bookfix:ok", json.dumps(sorted(ok)))
 
     def clues(self, book):
-        """What the entry and its files say about it: {"isbns": [(isbn, where)], "titles": [(title, author, where)]}."""
-        isbns, titles = [], []
+        """What the entry and its files say about it: {"isbns": [(isbn, where)], "dois": [(doi, where)],
+        "titles": [(title, author, where)]}."""
+        isbns, dois, titles = [], [], []
 
         def isbn(value, where):
             if value and value not in [known for known, _ in isbns]:
                 isbns.append((value, where))
 
+        def title_clue(title, author, where, strict=True):
+            title = re.sub(r"\s+", " ", title or "").strip()
+            if not title or (strict and (FILE_LIKE.search(title) or identify.junk_meta(title))):
+                return
+            if tidy_title(title).lower() in [tidy_title(known).lower() for known, _, _ in titles]:
+                return
+            real_author = author if catalogues.author_known(author) and not username_like(author) else ""
+            titles.append((title, real_author, where))
+
         isbn(valid_isbn(book["isbn"]), "in the library entry")
         for found in isbns_in(book["title"]):
             isbn(found, "in the title")
-        readers = {"EPUB": _epub_clues, "PDF": _pdf_clues}
         for fmt, rel in sorted(book["own_formats"].items(), key=lambda pair: pair[0] != "EPUB"):  # EPUB first
             for found in isbns_in(Path(rel).stem):
                 isbn(found, "in the file name")
             path = Path(self.hub.config.library_dir) / rel
-            if fmt not in readers or not path.is_file():
+            if fmt not in ("EPUB", "PDF") or not path.is_file():
                 continue
             try:
-                found_isbns, own_title, own_author = readers[fmt](path)
+                if fmt == "EPUB":
+                    found_isbns, own_title, own_author = _epub_clues(path)
+                    found_dois, cover = [], ""
+                else:
+                    found_isbns, own_title, own_author, found_dois, cover = _pdf_clues(path)
             except Exception:  # a busted file tells us nothing, but the other clues still count
                 continue
             for found in found_isbns:
                 isbn(found, "inside the %s" % fmt)
-            if own_title and not FILE_LIKE.search(own_title) and tidy_title(own_title).lower() != tidy_title(book["title"]).lower():
-                real_author = own_author if catalogues.author_known(own_author) and not username_like(own_author) else ""
-                titles.append((own_title, real_author, "the %s's own details" % fmt))
+            for found in found_dois:
+                if found not in [known for known, _ in dois]:
+                    dois.append((found, "inside the %s" % fmt))
+            if own_title and tidy_title(own_title).lower() != tidy_title(book["title"]).lower():
+                title_clue(own_title, own_author, "the %s's own details" % fmt)
+            if cover:
+                where = "the biggest words on the %s's first page" % fmt
+                title, byline = identify.split_byline(cover)
+                title_clue(title, byline or own_author, where)
+                if byline:  # "Death by Chocolate Cake" is a title, not a book by Chocolate Cake
+                    title_clue(cover, own_author, where)
         guess = tidy_title(book["title"])
         if guess and not valid_isbn(guess):
-            author = book["author"] if catalogues.author_known(book["author"]) and not username_like(book["author"]) else ""
-            titles.append((guess, author, "the title, tidied"))
-        return {"isbns": isbns[:4], "titles": titles[:3]}
+            title_clue(guess, book["author"], "the title, tidied", strict=False)
+        return {"isbns": isbns[:4], "dois": dois[:2], "titles": titles[:3]}
 
     def candidates(self, book_id):
-        """Books the entry may be, best first, each with the clue that found it."""
+        """Books the entry may be, best first, each with the clue that found it and how sure we are."""
         book = self.hub.library.get(book_id)
         if not book:
             raise FixError("That book is not in the library any more.")
-        clues = self.clues(book)
-        found, seen = [], set()
-
-        def add(doc, why):
-            title, authors = (doc.get("title") or "").strip(), doc.get("author_name") or []
-            if not title:
-                return
-            mark = (db.slug(title), db.slug(authors[0]) if authors else "")
-            if mark in seen:
-                return
-            seen.add(mark)
-            found.append({"title": title, "authors": authors[:4], "year": doc.get("first_publish_year"),
-                        "publisher": (doc.get("publisher") or [""])[0], "isbn": next(iter(doc.get("isbn") or []), ""),
-                        "cover": "https://covers.openlibrary.org/b/id/%s-M.jpg" % doc["cover_i"] if doc.get("cover_i") else "",
-                        "synopsis": doc.get("description") or "", "why": why})
-
-        errors = []
-        for value, where in clues["isbns"]:
-            try:
-                for doc in catalogues._get(OPEN_LIBRARY, {"q": "isbn:" + value, "fields": OL_FIELDS, "limit": 2}).get("docs") or []:
-                    add(doc, "ISBN %s, found %s" % (value, where))
-            except catalogues.LookupError_ as exc:
-                errors.append(str(exc))
-        for title, author, where in clues["titles"]:
-            params = {"title": title, "author": author, "fields": OL_FIELDS, "limit": 4} if author else {"q": title, "fields": OL_FIELDS, "limit": 4}
-            try:
-                for doc in catalogues._get(OPEN_LIBRARY, params).get("docs") or []:
-                    add(doc, "Searched for %s, from %s" % ('"%s"' % title + (" by " + author if author else ""), where))
-            except catalogues.LookupError_ as exc:
-                errors.append(str(exc))
-        key = self.hub.config.google_books_key
-        query = ""
-        if clues["isbns"]:
-            query = "isbn:" + clues["isbns"][0][0]
-        elif clues["titles"]:
-            query = 'intitle:"%s"' % clues["titles"][0][0]
-        if key and query and len(found) < MAX_CANDIDATES:
-            try:
-                for item in catalogues._get(catalogues.GOOGLE, {"q": query, "maxResults": 4, "key": key}).get("items") or []:
-                    info = item.get("volumeInfo") or {}
-                    ids = [ident.get("identifier") for ident in info.get("industryIdentifiers") or []]
-                    # dress Google's answer up like an Open Library one so add() can take it
-                    add({"title": info.get("title"), "author_name": info.get("authors"), "first_publish_year": (info.get("publishedDate") or "")[:4] or None,
-                         "publisher": [info.get("publisher") or ""], "isbn": ids, "description": info.get("description") or ""},
-                        "Google Books: " + query.replace("intitle:", "title "))
-            except catalogues.LookupError_ as exc:
-                errors.append(str(exc))
+        status, _, why, found, clues, errors = self.hub.identify.look(book)
         return {"book": {"id": book["id"], "title": book["shown_title"], "author": book["shown_author"], "synopsis": bool(book["synopsis"].strip())},
                 "clues": {"isbns": [{"isbn": isbn, "where": where} for isbn, where in clues["isbns"]],
+                          "dois": [{"doi": doi, "where": where} for doi, where in clues["dois"]],
                           "titles": [{"title": title, "author": author, "where": where} for title, author, where in clues["titles"]]},
-                "candidates": found[:MAX_CANDIDATES], "errors": errors[:2]}
+                "status": status, "why": why,
+                "candidates": [dict(candidate) for candidate in found], "errors": errors[:2]}
 
     def ready(self):
         if not librarymanager.configured(self.hub.config):

@@ -4306,6 +4306,44 @@ function detailsCard() {
   return box;
 }
 
+// Books Family Hub put right by itself (identify.py): only when the catalogues and the file agree. Each change
+// has an Undo, and the switch turns it off; doubtful matches wait in the review queue below instead.
+function identifyPanel() {
+  const box = el('section', { class: 'panel cut' });
+  async function draw() {
+    let data;
+    try { data = await api('GET', '/api/admin/identify'); } catch (err) { if (!(err instanceof Stale)) box.hidden = true; return; }
+    const auto = el('input', { type: 'checkbox', checked: data.auto, onchange: async () => {
+      auto.disabled = true;
+      try { await api('POST', '/api/admin/identify', { auto: auto.checked }); toast(auto.checked ? 'Clear cases will be put right by themselves.' : 'Every change now waits for you.'); }
+      catch (err) { if (!(err instanceof Stale)) oops(err); auto.checked = !auto.checked; }
+      auto.disabled = false;
+    } });
+    const c = data.counts;
+    const tally = [c.fixed ? plural(c.fixed, 'book') + ' put right' : '', c.doubt ? c.doubt + ' waiting for you below' : '',
+      c.unknown ? c.unknown + ' no catalogue knew' : '', data.waiting ? data.waiting + ' still to look up' : ''].filter(Boolean).join(' · ');
+    const changes = data.changes.map((change) => el('div', { class: 'row between gap8' },
+      el('div', { class: 'stack', style: 'gap:2px;min-width:0;flex:1 1 240px' },
+        el('strong', { class: 'book' }, el('a', { href: '#/book/' + change.book_id, text: change.after.title })),
+        el('span', { class: 'small book', text: 'by ' + change.after.authors.join(' & ') + ' · was "' + change.before.title + '" by ' + (change.before.authors.join(' & ') || 'nobody') }),
+        el('span', { class: 'small dim', text: change.why + ' ' + ago(change.at) })),
+      change.undone ? el('span', { class: 'small dim', text: 'Undone' })
+        : el('button', { class: 'btn sm', type: 'button', text: 'Undo', 'aria-label': 'Undo: ' + change.after.title, onclick: async (ev) => {
+          ev.target.disabled = true;
+          try { toast((await api('POST', '/api/admin/identify/undo/' + change.id)).message); draw(); }
+          catch (err) { if (!(err instanceof Stale)) oops(err); ev.target.disabled = false; }
+        } })));
+    fill(box, head('Put right by itself'),
+      el('label', { class: 'check' }, auto, ' Put clear cases right by themselves'),
+      el('p', { class: 'small dim', text: 'Clear means the ISBN or DOI inside the file matched, or two catalogues and the file agree. Anything less certain waits for you in the review queue, already filled in. '
+        + (tally ? tally + '.' : 'Nothing looked up yet; a couple of books are looked up each minute.') }),
+      data.blocked && data.auto ? el('p', { class: 'small bad', text: 'Nothing can be put right until Calibre-Web\'s sign-in is set up, so clear cases wait in the queue for now.' }) : null,
+      changes.length ? el('div', { class: 'list' }, changes) : null);
+  }
+  draw();
+  return box;
+}
+
 // One book at a time: what its files say, matches from Open Library and Google Books, and a form to type the
 // details in. The library manager makes the change, after a copy of the library's database.
 async function pageDetails() {
@@ -4341,10 +4379,12 @@ async function pageDetails() {
         } catch (err) { if (!(err instanceof Stale)) oops(err); btn.disabled = false; }
       };
       const clues = [...result.clues.isbns.map((found) => 'ISBN ' + found.isbn + ' ' + found.where),
+          ...(result.clues.dois || []).map((found) => 'DOI ' + found.doi + ' ' + found.where),
           ...result.clues.titles.map((found) => '"' + found.title + '"' + (found.author ? ' by ' + found.author : '') + ' from ' + found.where)];
       fill(area,
         el('p', { class: 'small dim', text: clues.length ? 'Clues: ' + clues.join(' · ') : 'The file gave no clues; type the details in below.' }),
         result.errors.length ? el('p', { class: 'small bad', text: 'A catalogue did not answer: ' + result.errors[0] }) : null,
+        result.why && result.candidates.length ? el('p', { class: 'small', text: result.why }) : null,
         result.candidates.length ? el('div', { class: 'list' }, result.candidates.map((candidate) => el('div', { class: 'row', style: 'gap:12px;align-items:flex-start' },
           candidate.cover ? el('img', { class: 'thumb', src: candidate.cover, alt: '', loading: 'lazy' }) : el('span', { class: 'thumb' }),
           el('div', { class: 'stack', style: 'gap:2px;flex:1;min-width:0' }, el('strong', { class: 'book', text: candidate.title }),
@@ -4383,10 +4423,11 @@ async function pageDetails() {
   }
   draw();
   setMain(back('#/admin/books', 'Back to books admin'),
-    pageHead('Books without real details', 'Titles that are file names and authors that are user names. Find details reads the file for an ISBN and its own title, then asks Open Library '
-      + '(and Google Books, when its key is saved). Saving changes the title and author in the library through Calibre-Web, after a copy of the library database. '
+    pageHead('Books without real details', 'Titles that are file names and authors that are user names. Find details reads the file for an ISBN, a DOI, its own title and the biggest words on its first page, then asks Open Library, '
+      + 'Crossref (and Google Books, when its key is saved). Saving changes the title and author in the library through Calibre-Web, after a copy of the library database. '
       + 'Reading progress, tags and ratings stay with the book. Afterwards, Copies of the same book may find more spare copies.'),
     data.blocked ? el('p', { class: 'bad' }, data.blocked + ' ', el('a', { href: '#/admin', text: 'Open Admin, Hub' })) : null,
+    identifyPanel(),
     reviewPanel(),
     el('section', { class: 'panel cut' }, head(plural(data.books.length, 'book') + ' to look at', el('button', { class: 'btn sm', type: 'button', text: 'Look again', onclick: again })),
       data.books.length ? list : el('p', { class: 'small dim', text: 'Every book has a real title and author.' }), more));
