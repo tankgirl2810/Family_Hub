@@ -93,10 +93,11 @@ function toast(message, isError, ms) {
   const close = isError ? el('button', { class: 'toast-x', type: 'button', 'aria-label': 'Close this message', text: '×', onclick: hide }) : null;
   box.replaceChildren(el('span', { text: message }), ...(close ? [close] : []));
   box.className = 'show' + (isError ? ' err' : '');
+  box.setAttribute('role', isError ? 'alert' : 'status');  // an error is read out straight away, a notice waits its turn
   clearTimeout(toastTimer);
   box.onpointerenter = box.onfocusin = box.onpointerleave = box.onfocusout = null;
   if (isError && !ms) return;
-  const later = () => { toastTimer = setTimeout(hide, ms || 3000); };
+  const later = () => { toastTimer = setTimeout(hide, ms || Math.min(9000, Math.max(3000, String(message).length * 70))); };  // long notices stay long enough to read
   box.onpointerenter = box.onfocusin = () => clearTimeout(toastTimer);
   box.onpointerleave = box.onfocusout = later;
   later();
@@ -143,7 +144,7 @@ function ask(text, opts) {
 const ordinal = (n) => n + ([, 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || [, 'st', 'nd', 'rd'][n % 100] || 'th');
 // A book just finished: where it comes in the year. The first, and every tenth, get a word more.
 function finishedToast(done, title) {
-  if (!done) return toast('Marked finished.');
+  if (!done) return toast('Finished. Back on the shelf.');
   const whose = done.name ? done.name + "'s" : 'your';
   const extra = done.count === 1 ? ' The first of the year.' : done.count % 10 === 0 ? ' A shelf of ' + done.count + ' now.' : '';
   toast((title ? title + ': ' : 'Finished: ') + whose + ' ' + ordinal(done.count) + ' book of ' + done.year + '.' + extra, false, 5000);
@@ -588,7 +589,7 @@ async function pageMovies(sub, id) {
     nothing ? el('section', { class: 'panel cut' }, head('Not set up yet'),
       isAdmin() ? el('p', {}, 'Films and TV need Radarr and Sonarr. Start them with the media profile (',
           guide('14-films-tv-and-the-vpn.md', 'guide 14'), '), then press Connect everything under ', el('a', { href: '#/admin', text: 'Admin' }), '.')
-        : el('p', { text: 'Films and TV need Radarr and Sonarr. Ask an admin to set them up.' }),
+        : el('p', { text: 'Films and TV are not set up on the server yet. Ask an admin to switch them on.' }),
       isAdmin() ? el('a', { class: 'btn pri', href: '#/admin', text: 'Open Admin' }) : null) : null,
     latest,
     problems.length ? el('p', { class: 'warn', role: 'status', text: problems.join(' ') }) : null,
@@ -790,7 +791,7 @@ async function pageMediaItem(kind, id) {
   // Versions appear as each site answers. Radarr or Sonarr check every one in the meantime; when they are done
   // their list (with what would not be picked, and why) takes over. Stop searching keeps what has been found.
   let polling = null;
-  const sent = () => toast('Sent to qBittorrent. Happy to keep this one? Press Stop looking once it is on the server, or it may be swapped for a better copy later.', false, 7000);
+  const sent = () => toast('On its way. Happy to keep this one? Press Stop looking once it is on the server, or it may be swapped for a better copy later.', false, 7000);
   function checkedTable(rows) {
     return rows.length ? el('div', { class: 'scroll' }, el('table', {},
       el('thead', {}, el('tr', {}, ['Title', 'Quality', 'Size', 'Indexer', 'Seeders', ''].map((heading, index) => el('th', { scope: 'col',
@@ -1644,7 +1645,7 @@ function pageSoon() {
     files: ['Files', 'Shared folders on the home server.'] }[page] || ['Coming soon', ''];
   setMain(pageHead(what[0], what[1]),
     el('section', { class: 'panel cut soon' }, head('Coming soon'),
-      el('p', { text: 'This part of Family Hub is not built yet, so there is nothing here to set up or change.' })));
+      el('p', { text: 'This room of the house is not built yet, so there is nothing here to set up or change.' })));
 }
 
 // ----------------------------------------------------------------- setup
@@ -3312,7 +3313,7 @@ async function pageMyBooks() {
           el('button', { class: 'btn', type: 'button', 'aria-label': 'Take off my list: ' + book.title, text: 'Take off my list', onclick: () => setShelf(book.id, false).then(again).catch(oops) }));
       })) : el('p', { class: 'small dim', text: 'Nothing on your list yet. Press "Add to my books" under a book in the Library.' })),
     el('section', { class: 'panel cut' }, head('Reading now'),
-      reading.books.length ? grid(reading.books) : el('p', { class: 'small dim', text: 'Nothing in progress.' })),
+      reading.books.length ? grid(reading.books) : el('p', { class: 'small dim', text: 'Nothing on the go right now.' })),
     el('section', { class: 'panel cut' }, head('Finished'),
       finished.length ? el('p', { class: 'small dim', text: plural(finished.length, 'book') + ', the most recent first.' }) : null,
       finished.length ? grid(finished) : el('p', { class: 'small dim', text: 'Nothing finished yet.' })));
@@ -3604,7 +3605,7 @@ async function pageDashboard(sub) {
       book.in_library || book.percent ? bar(book.percent, Math.round(book.percent) + ' percent read') : null,
       el('span', { class: 'small dim',
           text: (book.in_library || book.percent ? Math.round(book.percent) + '% · ' : 'Started ' + niceDate(book.started) + ' · place not reported · ') + (book.device ? 'last read on ' + book.device + ' · ' : '') + 'updated ' + ago(book.updated).toLowerCase() }))))
-      : el('p', { class: 'small dim', text: 'Nothing in progress.' }));
+      : el('p', { class: 'small dim', text: 'Nothing on the go right now.' }));
 
   const oTitle = el('input', { type: 'text' }), oAuthor = el('input', { type: 'text' }), oPages = el('input', { type: 'number', min: 1 });
   const oStatus = el('select', {}, el('option', { value: 'finished', text: 'Finished' }), el('option', { value: 'reading', text: 'Reading now' }));
@@ -5417,7 +5418,7 @@ async function pageDiscover(prefill) {
               btn.textContent = 'Sent';
               keepDiscover({ sent: (discoverKept.sent || []).concat(result.guid) });
               Tracker.follow('book', result.title);
-              toast('Sent to qBittorrent. Follow it in the corner, or in Downloads.');
+              toast('On its way. Follow it in the corner, or in Downloads.');
               loadQueue();
             } catch (err) { btn.disabled = false; oops(err); }
           } });
@@ -5436,7 +5437,7 @@ async function pageDiscover(prefill) {
       data.requests.length ? el('div', { class: 'list' }, data.requests.slice(0, 6).map((request) => el('div', { class: 'row between' },
           el('span', { text: request.title }), el('span', { class: 'small dim',
           text: (request.swapped ? 'swapped in for a copy nobody was sharing · ' : '') + 'by ' + request.by + ' · ' + ago(request.created).toLowerCase() })))) : el('p',
-          { class: 'small dim', text: 'No requests yet.' }),
+          { class: 'small dim', text: 'No requests yet. Anything the family asks for shows up here.' }),
       el('h3', { text: 'Added to the library' }),
       data.imported.length ? el('div', { class: 'list' }, data.imported.slice(0, 6).map((file) => el('div', { class: 'row between' },
           el('span', { text: file.name }), el('span', { class: 'small ok', text: ago(file.at) })))) : el('p', { class: 'small dim',
@@ -5591,7 +5592,7 @@ async function pageDiscover(prefill) {
     searchBox.setAttribute('aria-describedby', 'discover-off');
   }
   setMain(
-    pageHead('Discover', canRequest() ? 'Find new books, send them to the download client, and follow authors and tags.'
+    pageHead('Discover', canRequest() ? 'Find new books, ask for them to be downloaded, and follow authors and tags.'
       : 'What to read next: books like the ones you enjoyed, and the authors and tags you follow.'),
     canRequest() ? el('section', { class: 'panel cut' }, head('Search for a book'),
       appState.discover_configured ? null : el('p', { class: 'small dim', id: 'discover-off' }, 'Book search is not set up yet. ', isAdmin() ? el('a',
