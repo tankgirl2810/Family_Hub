@@ -325,5 +325,5 @@ with a forwarded port, qBittorrent's traffic leaves through the VPN and stops
 when the VPN stops, Family Hub passes the forwarded port to qBittorrent, and
 Connect everything set up Radarr, Sonarr, Prowlarr, qBittorrent and Bazarr
 with every step done. **Not yet tried:** a real download from start to
-finish, subtitles arriving, and Jellyfin (including playing through Family
-Hub's own player, guide 20).
+finish and subtitles arriving. Playing through Family Hub's own player was
+tried on a real Jellyfin on 18 November 2026 (guide 20).
