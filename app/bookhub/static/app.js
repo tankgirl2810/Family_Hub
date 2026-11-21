@@ -1075,7 +1075,8 @@ async function pageDownloads() {
     // leave it alone while its buttons are in use (opening or closing a fold of chapters is not that: it keeps its place)
     const active = document.activeElement;
     if (!force && list.contains(active) && !active.hasAttribute('data-fold')) return;
-    fill(list, hasClient && show !== 'Chapter' ? torrentParts() : null, hasSeries && (show === 'all' || show === 'Chapter') ? chapterParts() : null);
+    // flat(Infinity): the two parts are lists that hold lists of rows, and fill() only opens one list inside another
+    fill(list, [hasClient && show !== 'Chapter' ? torrentParts() : null, hasSeries && (show === 'all' || show === 'Chapter') ? chapterParts() : null].flat(Infinity));
   }
   function torrentParts() {
     if (lastError) return [el('p', { class: 'small bad', role: 'status', text: lastError.message }),
