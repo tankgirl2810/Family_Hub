@@ -157,6 +157,13 @@ def made_parts(hub, series_id):
     return len({file.name[:6] for file in place.glob("part*.cbz")}) if place.is_dir() else 0
 
 
+def forget(hub, series_id):
+    """A series was deleted: its comic files go, with what is remembered about making them."""
+    shutil.rmtree(folder(hub, series_id), ignore_errors=True)
+    for key in [key for key in _failed if key[0] == series_id]:
+        _failed.pop(key, None)
+
+
 def _comicinfo(info, title, part_no, count, starts, pages):
     marks = "".join('<Page Image="%d" Bookmark="%s"/>' % (at, escape(name, {'"': "&quot;"})) for at, name in starts)
     return ('<?xml version="1.0" encoding="utf-8"?>\n<ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'

@@ -1177,6 +1177,7 @@ def chapter_items(family_hub, who, tags, ratings):
             "status": status, "percent": round(100 * followed["read"] / followed["chapters"]) if followed["chapters"] else 0,
             "finished": None, "device": None, "file_parts": chapterfile.made_parts(family_hub, followed["id"]),
             "rating": ratings.get(series_key(followed["title"]), 0), "on_shelf": followed["id"] in mine,
+            "also": followed.get("also", []),  # followed from another site too: the card says so
             "kindle": False, "goodreads_id": "", "readers": None,
         })
     return items
@@ -2522,14 +2523,54 @@ def series_mark(who):
     return jsonify({"ok": True})
 
 
+@bp.get("/series/queue")
+@series_only
+def series_queue(who):
+    """The chapters the series server is downloading, has waiting and gave up on, for the Downloads page."""
+    family_hub = hub()
+    if not family_hub.series.configured:
+        return jsonify({"configured": False, "running": False, "chapters": [], "more_waiting": 0,
+                        "counts": {"downloading": 0, "waiting": 0, "failed": 0}})
+    return jsonify(dict(family_hub.series.queue(), configured=True))
+
+
 @bp.get("/series/<int:series_id>")
 @series_only
 def series_detail(who, series_id):
     from . import chapterfile
-    info = hub().series.detail(series_id, refresh=request.args.get("refresh") == "1")
-    detail = dict(info, mine=series_id in series.my_books(hub(), who["id"]), files=chapterfile.files(hub(), info))
+    family_hub = hub()
+    info = family_hub.series.detail(series_id, refresh=request.args.get("refresh") == "1")
+    # the same title followed from another site as well: shown on the page, so the spare copy can be told from the keeper
+    also = [{key: other[key] for key in ("id", "source", "chapters", "downloaded", "read")}
+            for other in family_hub.series.twins(info, family_hub.series.shelf_cached()["series"])]
+    admin = is_admin(who)
+    detail = dict(info, mine=series_id in series.my_books(family_hub, who["id"]), files=chapterfile.files(family_hub, info), also=also,
+                  can_delete=admin and not info["local"],
+                  set_aside=series.set_aside(family_hub, info["title"], info["source"]) if admin else 0)
     detail.pop("every_chapter", None)  # the twice-listed copies are not shown
     return jsonify(detail)
+
+
+@bp.delete("/series/<int:series_id>")
+@series_only
+def series_delete(who, series_id):
+    """Delete one copy of a series by chapter for good: the follow, its queued chapters, its chapter files and
+    what the hub made of them. Admins only, like deleting a book or a film."""
+    if not is_admin(who):
+        return fail("Only an admin can delete a series.", 403)
+    gone = hub().series.delete(series_id)
+    parts = ["It is no longer followed"]
+    if gone["queued"]:
+        parts.append("%d chapter%s came off the download queue" % (gone["queued"], "" if gone["queued"] == 1 else "s"))
+    if gone["chapters"]:
+        parts.append("%d chapter%s kept on the server %s deleted" % (gone["chapters"], "" if gone["chapters"] == 1 else "s",
+                                                                    "was" if gone["chapters"] == 1 else "were"))
+    if gone["set_aside"]:
+        parts.append("%d set aside in needs-attention went too" % gone["set_aside"])
+    message = "Deleted %s%s. %s." % (gone["title"], " (%s)" % gone["source"] if gone["source"] else "", ", ".join(parts))
+    if gone["read_carried"]:
+        message += " What was read in it is marked read in the copy from %s." % " and ".join(gone["read_carried"])
+    return jsonify(dict(gone, ok=True, message=message))
 
 
 @bp.get("/series/<int:series_id>/file/<int:part>")

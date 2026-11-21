@@ -6,7 +6,7 @@
 |---|---|
 | **Watch** | Every film and series on the list, with what is already on the server and what is still being looked for. Above it, "New on the server" from Jellyfin, with a **Watch** button |
 | **Search** | Search for a film or show and request it |
-| **Downloads** | Its own section in the sidebar (also a tab here and in Books): every download in qBittorrent, films, TV and books, with **Pause**, **Continue**, buttons to move it up or down the line, and **Delete** for admins; what was added lately |
+| **Downloads** | Its own section in the sidebar (also a tab here and in Books): every download in qBittorrent, films, TV and books, with **Pause**, **Continue**, buttons to move it up or down the line, and **Delete** for admins; what was added lately. With a series server, the chapters of followed manga and manhwa being fetched are listed here too ([guide 13](13-manga-and-series-by-chapter.md)) |
 
 Family Hub is only the front end. These programs do the work:
 

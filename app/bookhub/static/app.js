@@ -214,9 +214,10 @@ const isGuest = () => appState.me && appState.me.guest;
 const isAdmin = () => appState.me && appState.me.role === 'admin';
 // Films and TV, and Downloads, are for the people who can use them. Admins always see them (that is where they get
 // set up); a member sees Films and TV once something is connected, and Downloads once there is a download client
-// and they may ask for books or films. Nobody else is shown server plumbing they cannot do anything about.
+// (or a series server fetching chapters) and they may ask for books or films. Nobody else is shown server plumbing
+// they cannot do anything about.
 const seesFilms = () => !!appState.me && !isGuest() && (isAdmin() || !!(appState.media.films || appState.media.shows || appState.media.jellyfin));
-const seesDownloads = () => !!appState.me && !isGuest() && (isAdmin() || (!!appState.media.downloads && !!(appState.me.can_request || appState.me.can_request_media)));
+const seesDownloads = () => !!appState.me && !isGuest() && (isAdmin() || ((!!appState.media.downloads || !!appState.series) && !!(appState.me.can_request || appState.me.can_request_media)));
 const canSort = () => appState.me && !appState.me.guest && (appState.me.role === 'admin' || appState.me.can_tag);
 // Add a book to someone's "My books" or take it off, then say what happened. profile is for admins acting for someone else.
 async function setShelf(bookId, on, profile) {
@@ -1037,11 +1038,13 @@ async function pageWatchlist() {
   if (data.news) api('POST', '/api/watchlist/seen').catch(() => {});  // looked at now: marked as seen for next time
 }
 
-// Every download in one place: films, TV and books, with pause, reorder and (for admins) delete.
+// Every download in one place: films, TV and books, with pause, reorder and (for admins) delete, and the chapters
+// of followed manga and manhwa the series server is fetching.
 async function pageDownloads() {
-  // No download client yet: one note saying so and where to add it, instead of a page of empty panels and errors.
+  const hasClient = !!appState.media.downloads, hasSeries = !!appState.series;
+  // Nothing to download with yet: one note saying so and where to add it, instead of a page of empty panels and errors.
   // (Only admins get here then; for members the section is hidden until it is set up.)
-  if (!appState.media.downloads) {
+  if (!hasClient && !hasSeries) {
     setMain(pageHead('Downloads', 'Everything being downloaded for the hub, once there is something to download with.'),
       el('section', { class: 'panel cut' }, head('Not set up yet'),
         el('p', {}, 'Films, TV and books download through qBittorrent, behind the VPN. Add it under ',
@@ -1049,19 +1052,35 @@ async function pageDownloads() {
     return;
   }
   const vpnLine = el('span', { class: 'small dim', text: 'Checking the VPN…' });
-  const list = el('div', { class: 'stack' }, el('p', { class: 'small dim', role: 'status', text: 'Asking qBittorrent…' }));
+  const list = el('div', { class: 'stack' }, el('p', { class: 'small dim', role: 'status', text: hasClient ? 'Asking qBittorrent…' : 'Asking the series server…' }));
   const added = el('div', { class: 'list' });
   const addedBooks = el('div', { class: 'list' });
   const gen = routeGen;
-  let show = 'all', last = null;
-  const types = [['all', 'Everything'], ['Film', 'Films'], ['TV', 'TV'], ['Book', 'Books']];
+  // last: qBittorrent's answer (lastError when it gave none). chapters: the series server's (chaptersError likewise).
+  let show = hasClient ? 'all' : 'Chapter', last = null, lastError = null, chapters = null, chaptersError = '';
+  const folds = { failed: false, waiting: false };  // which folded parts of the chapter list are open, kept from one redraw to the next
+  const types = [['all', 'Everything'], ['Film', 'Films'], ['TV', 'TV'], ['Book', 'Books']].concat(hasSeries ? [['Chapter', 'Manga and manhwa']] : []);
   const chips = el('div', { class: 'row gap8', role: 'group', 'aria-label': 'Show' });
   function drawChips() {
     fill(chips, types.map(([key, label]) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(show === key), text: label,
-      onclick: () => { show = key; drawChips(); draw(); } })));
+      onclick: () => { show = key; drawChips(); draw(true); } })));
   }
-  function draw() {
-    if (!last || list.contains(document.activeElement)) return;  // leave it alone while its buttons are in use
+  // The chapters of followed series being downloaded, under the films, TV and books (or alone, under their own chip).
+  function chapterParts() {
+    if (chaptersError) return [el('p', { class: 'small bad', role: 'status', text: chaptersError })];
+    if (!chapters) return hasClient ? [] : [el('p', { class: 'small dim', role: 'status', text: 'Asking the series server…' })];
+    return chapterQueue(chapters, folds, show === 'Chapter');
+  }
+  function draw(force) {
+    // leave it alone while its buttons are in use (opening or closing a fold of chapters is not that: it keeps its place)
+    const active = document.activeElement;
+    if (!force && list.contains(active) && !active.hasAttribute('data-fold')) return;
+    fill(list, hasClient && show !== 'Chapter' ? torrentParts() : null, hasSeries && (show === 'all' || show === 'Chapter') ? chapterParts() : null);
+  }
+  function torrentParts() {
+    if (lastError) return [el('p', { class: 'small bad', role: 'status', text: lastError.message }),
+      el('p', { class: 'small dim', text: 'Asked at ' + lastError.at + '; asking again every 20 seconds.' })];
+    if (!last) return [el('p', { class: 'small dim', role: 'status', text: 'Asking qBittorrent…' })];
     const shown = last.torrents.filter((torrent) => show === 'all' || torrent.type === show);
     const missing = shown.filter((item) => item.missing);
     const going = shown.filter((item) => !item.done && !item.waiting_seed && !item.missing), finished = shown.filter((item) => item.done && !item.missing);
@@ -1075,7 +1094,7 @@ async function pageDownloads() {
       forgetAll.blur();
       loadTorrents();
     } });
-    fill(list, missing.length ? el('section', { class: 'panel stack gap8' },
+    return [missing.length ? el('section', { class: 'panel stack gap8' },
       el('div', { class: 'row between' }, el('h3', { class: 'small bad', style: 'margin:0', text: 'Files are missing (' + missing.length + ')' }), last.can_delete ? forgetAll : null),
       el('p', { class: 'small dim', style: 'margin:0',
           text: 'qBittorrent cannot find these downloads\' files, usually because they were moved by hand (or the downloads folder changed). If you already have them, Forget takes them off the list. Nothing is deleted.' }),
@@ -1086,17 +1105,30 @@ async function pageDownloads() {
       waiting.length ? [el('h3', { class: 'small warn', style: 'margin:8px 0 0', text: 'Waiting for seed (' + waiting.length + ')' }),
         ...waiting.map((torrent) => torrentRow(torrent, last, loadTorrents))] : null,
       finished.length ? el('details', {}, el('summary', { class: 'small', text: 'Finished (' + finished.length + ')' }),
-        el('div', { class: 'stack', style: 'margin-top:12px' }, finished.map((torrent) => torrentRow(torrent, last, loadTorrents)))) : null);
+        el('div', { class: 'stack', style: 'margin-top:12px' }, finished.map((torrent) => torrentRow(torrent, last, loadTorrents)))) : null];
   }
   async function loadTorrents() {
     clearTimeout(list.timer);
     const again = (ms) => { list.timer = setTimeout(() => { if (gen === routeGen && document.body.contains(list)) loadTorrents(); }, ms); };
-    try { last = await api('GET', '/api/media/torrents'); } catch (err) {
+    try { last = await api('GET', '/api/media/torrents'); lastError = null; } catch (err) {
       if (err instanceof Stale) return;
       // qBittorrent is often only away while the VPN restarts: keep asking, less often.
       last = null;
-      fill(list, el('p', { class: 'small bad', role: 'status', text: err.message }),
-        el('p', { class: 'small dim', text: 'Asked at ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + '; asking again every 20 seconds.' }));
+      lastError = { message: err.message, at: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) };
+      draw(true);
+      again(20000);
+      return;
+    }
+    draw();
+    again(5000);
+  }
+  // The series server is asked on its own, so chapters still show while qBittorrent is away (and the other way round).
+  async function loadChapters() {
+    const again = (ms) => setTimeout(() => { if (gen === routeGen && document.body.contains(list)) loadChapters(); }, ms);
+    try { chapters = await api('GET', '/api/series/queue'); chaptersError = ''; } catch (err) {
+      if (err instanceof Stale) return;
+      chapters = null; chaptersError = err.message;
+      draw();
       again(20000);
       return;
     }
@@ -1104,29 +1136,85 @@ async function pageDownloads() {
     again(5000);
   }
   const when = (at, by) => el('span', { class: 'small dim', text: [niceDate(at), by ? 'requested by ' + by : ''].filter(Boolean).join(' · ') });
-  api('GET', '/api/media/queue').then((data) => {
+  if (hasClient) api('GET', '/api/media/queue').then((data) => {
     vpnLine.textContent = data.vpn.message;
     vpnLine.className = 'small ' + (data.vpn.ok ? 'ok' : 'warn');
     fill(added, data.history.length ? data.history.map((entry) => el('div', { class: 'row between' }, el('span', { text: entry.title }), when(entry.at, entry.requested_by)))
       : el('p', { class: 'small dim', text: 'No films or TV added yet.' }));
   }).catch((err) => { if (!(err instanceof Stale)) fill(added, el('p', { class: 'small dim', text: err.message })); });
-  api('GET', '/api/discover/queue').then((data) => {
+  if (hasClient) api('GET', '/api/discover/queue').then((data) => {
     fill(addedBooks, data.imported.length ? data.imported.slice(0, 8).map((file) => el('div', { class: 'row between' }, el('span', { text: file.name }), when(file.at)))
       : el('p', { class: 'small dim', text: 'No books added from downloads yet.' }));
   }).catch((err) => { if (!(err instanceof Stale)) fill(addedBooks, el('p', { class: 'small dim', text: err.message })); });
   drawChips();
+  if (!hasClient) {
+    // A series server but no qBittorrent: the chapters are the whole page.
+    setMain(pageHead('Downloads', 'The chapters of followed manga and manhwa being fetched. Follow a series in ',
+        el('a', { href: '#/library/graphic', text: 'Books, Graphic novels' }), '.'),
+      el('section', { class: 'panel cut' }, head('Every download'),
+        el('p', { class: 'small dim', text: 'In the order the series server works through them.' }), list));
+    loadChapters();
+    return;
+  }
   setMain(
     pageHead('Downloads', 'Everything being downloaded for the hub. Ask for films and TV in ', el('a', { href: '#/movies/search', text: 'Films and TV, Search' }),
       ' and for books in ', el('a', { href: '#/discover', text: 'Books, Discover' }), '.'),
     el('section', { class: 'panel cut' }, head('Every download', isAdmin() ? vpnLine : null),
-      el('p', { class: 'small dim', text: isAdmin() ? 'In the order qBittorrent works through them. Three download at once; the rest wait their turn. '
-        + 'One nobody has shared for ten minutes goes to the back, paused, marked waiting for seed.' : 'Three download at once; the rest wait their turn.' }), chips, list),
+      el('p', { class: 'small dim', text: (isAdmin() ? 'In the order qBittorrent works through them. Three download at once; the rest wait their turn. '
+        + 'One nobody has shared for ten minutes goes to the back, paused, marked waiting for seed.' : 'Three download at once; the rest wait their turn.')
+        + (hasSeries ? ' Chapters of followed manga and manhwa come after them, in the series server\'s own order.' : '') }), chips, list),
     speedPanel(),
     isAdmin() ? sortPanel() : null,
     el('div', { class: 'cols2' },
       el('section', { class: 'panel cut' }, head('Films and TV added'), added),
       el('section', { class: 'panel cut' }, head('Books added'), addedBooks)));
   loadTorrents();
+  if (hasSeries) loadChapters();
+}
+
+// One chapter in the series server's download queue, drawn like a film or book download: what it is, how it is
+// going, and how far along. Its name opens the series.
+function chapterRow(item) {
+  const name = item.series + ' · ' + item.chapter;
+  const failed = item.state === 'failed', going = item.state === 'downloading';
+  const facts = [going || item.progress ? item.progress + '%' : '', item.position ? 'number ' + item.position + ' in line' : '',
+    failed ? 'tried ' + plural(item.tries, 'time') : item.tries ? 'tried ' + plural(item.tries, 'time') + ' so far' : ''];
+  return el('div', { class: 'line torrent', style: 'display:block' },
+    el('div', { class: 'row between gap8' },
+      el('div', { class: 'row', style: 'gap:8px;min-width:0;flex:1 1 240px' }, el('span', { class: 'chip xs', text: 'Chapter' }),
+        el('a', { href: '#/series/' + item.series_id, class: 'torrent-title', text: name, title: name })),
+      el('span', { class: 'small ' + (failed ? 'bad' : ''), text: failed ? 'Failed' : going ? 'Downloading' : 'Waiting its turn' })),
+    going || item.progress ? el('div', { style: 'margin:8px 0' }, bar(item.progress, item.progress + ' percent downloaded')) : null,
+    el('div', { class: 'small dim', text: facts.filter(Boolean).join(' · ') }));
+}
+
+// The chapters part of the Downloads list: the ones downloading now, then the ones the series server gave up on,
+// then the line waiting. A queue can be a thousand chapters long, so the last two are folded away and only drawn
+// while open. open says which folds are open; the page keeps it, so a fold stays as it was left when the list is
+// drawn again every few seconds. alone: nothing else is listed with them (the "Manga and manhwa" chip).
+function chapterQueue(data, open, alone) {
+  const counts = data.counts, total = counts.downloading + counts.waiting + counts.failed;
+  if (!total) return alone ? [el('p', { class: 'small dim', text: 'No chapters downloading.' })] : [];
+  const rows = (state) => data.chapters.filter((item) => item.state === state).map(chapterRow);
+  const fold = (key, cls, words, note) => {
+    const body = el('div', { class: 'stack', style: 'margin-top:12px' });
+    const box = el('details', { open: !!open[key] }, el('summary', { class: 'small ' + cls, 'data-fold': key, text: words }), body);
+    const drawBody = () => fill(body, box.open ? note : null, box.open ? rows(key) : null);
+    box.addEventListener('toggle', () => { open[key] = box.open; drawBody(); });
+    drawBody();
+    return box;
+  };
+  return [
+    el('h3', { class: 'small', style: 'margin:8px 0 0', text: 'Manga and manhwa chapters (' + total + ')' }),
+    !data.running && counts.waiting + counts.downloading ? el('p', { class: 'small warn', style: 'margin:0', role: 'status',
+        text: 'The series server has stopped downloading, so these are not moving.' }) : null,
+    ...rows('downloading'),
+    !counts.downloading && data.running && counts.waiting ? el('p', { class: 'small dim', style: 'margin:0', text: 'None downloading this minute; the next one starts shortly.' }) : null,
+    counts.failed ? fold('failed', 'bad', 'Failed (' + counts.failed + ')', el('p', { class: 'small dim', style: 'margin:0',
+        text: 'The series server tried each of these chapters a few times and gave up. The reading site may have been away, or may not have the chapter any more. They are not in line any longer.' })) : null,
+    counts.waiting ? fold('waiting', '', 'Waiting their turn (' + counts.waiting + ')', data.more_waiting ? el('p', { class: 'small dim', style: 'margin:0',
+        text: 'The next ' + (counts.waiting - data.more_waiting) + ' in line; ' + data.more_waiting + ' more are behind them.' }) : null) : null,
+  ];
 }
 
 const speed = (bytes) => bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB/s' : Math.round(bytes / 1024) + ' KB/s';
@@ -2825,7 +2913,10 @@ function chapterCard(item, onChange) {
     el('div', { class: 'card-rating small' }, !isGuest() && item.rating ? el('div', { text: 'Series rating: ' + item.rating + ' of 5' }) : null),
     el('div', { class: 'card-foot' },
       el('div', { class: 'row gap6' }, el('span', { class: 'badge', text: 'Chapter by chapter' }),
-        item.publication ? el('span', { class: 'badge ' + (PUB_BADGE[item.publication] || ''), text: item.publication }) : null),
+        item.publication ? el('span', { class: 'badge ' + (PUB_BADGE[item.publication] || ''), text: item.publication }) : null,
+        // the same title is followed from another site as well: one of the two is a spare (its page says which is which)
+        item.also && item.also.length ? el('span', { class: 'badge warn', text: 'Followed twice',
+            title: 'Also followed from ' + item.also.map((other) => other.source || 'another site').join(' and ') }) : null),
       // The chapters kept so far as one comic file, to keep or give someone; a long series has a file per 50 chapters.
       item.file_parts === 1 ? el('a', { class: 'btn sm', href: '/api/series/' + item.series_id + '/file/1', download: '',
           'aria-label': 'Download ' + item.title + ' as a comic file', text: 'Download CBZ' })
@@ -2878,7 +2969,14 @@ function seriesShelf() {
         'series') + ' followed, shown with the other graphic novels below and tagged "Chapter by chapter"' + (data.queued ? ' · ' + plural(data.queued,
         'chapter') + ' still downloading' : '') + '.'
       : (canRequest() ? 'No series followed yet. Search below to follow one.' : 'No series followed yet.');
+    // The same title followed from two sites: named here, each copy a link, so the spare is easy to find.
+    const spare = data.series.filter((followed) => followed.also && followed.also.length);
+    twice.hidden = !spare.length;
+    fill(twice, 'Followed from more than one site: ', spare.flatMap((followed, index) => [index ? ', ' : '',
+      el('a', { href: '#/series/' + followed.id, text: followed.title + (followed.source ? ' (' + followed.source + ')' : '') })]),
+      '. One copy of each is enough; an admin can delete the spare from its page.');
   }
+  const twice = el('p', { class: 'small warn', role: 'status', hidden: true });
   async function search() {
     if (searchBox.value.trim().length < 2) return;
     fill(found, el('p', { class: 'dim', role: 'status', text: 'Searching the reading sites…' }));
@@ -2906,6 +3004,7 @@ function seriesShelf() {
         onclick: async () => { try { await api('POST',
         '/api/series/check'); toast('Checking every series. New chapters appear here as they are found.'); } catch (err) { oops(err); } } })),
     el('div', { class: 'row between' }, note, open),
+    twice,
     more);
 }
 
@@ -2938,6 +3037,19 @@ function scheduleLine(info) {
   return el('p', { class: 'small ' + (plan.late || plan.paused ? 'warn' : 'dim'), text: lastText + rhythm + next });
 }
 
+// What is asked before a series is deleted: the series and its site by name, and plainly what goes.
+function deleteSeriesWords(info) {
+  const going = [info.following ? 'It will no longer be followed' : 'It is not followed now',
+    'any of its chapters still waiting to download come off the queue',
+    info.downloaded ? 'the ' + plural(info.downloaded, 'chapter') + ' kept on the server ' + (info.downloaded === 1 ? 'is' : 'are') + ' deleted'
+      + (info.files.length ? ', with the comic file' + (info.files.length > 1 ? 's' : '') + ' made from them' : '') : '',
+    info.set_aside ? 'the ' + plural(info.set_aside, 'chapter') + ' of it set aside in needs-attention ' + (info.set_aside === 1 ? 'goes' : 'go') + ' too' : ''];
+  const kept = info.also.map((other) => other.source || 'another site').join(' and ');
+  return 'Delete "' + info.title + '"' + (info.source ? ' from ' + info.source : '') + ' for good? ' + going.filter(Boolean).join(', ') + '. It comes out of everyone\'s My books. '
+    + (kept ? 'The copy from ' + kept + ' stays, and what was read here is marked read there. ' : 'No other copy of it is followed, so it will be gone from the library. ')
+    + 'This cannot be undone.';
+}
+
 async function pageSeries(id) {
   const info = await api('GET', '/api/series/' + encodeURIComponent(id));
   nameThePage(info.title);
@@ -2960,6 +3072,11 @@ async function pageSeries(id) {
             'chapter') + ' twice. Only one copy of each is kept: the 18+ or uncensored one when there is one.' }) : null,
         info.status === 'Finished' || info.status === 'Cancelled' ? el('p', { class: 'small dim',
             text: 'Publication is ' + (info.status === 'Finished' ? 'finished' : 'cancelled') + ', so new chapters are not looked for. Every chapter found is kept. "Look for new chapters" below still checks once.' }) : null,
+        // The same title followed from another site too: say where, with enough to tell the keeper from the spare.
+        info.also.length ? el('p', { class: 'small warn' }, 'Also followed from ',
+          info.also.flatMap((other, index) => [index ? ' and ' : '', el('a', { href: '#/series/' + other.id, text: other.source || 'another site' }),
+            ' (' + plural(other.chapters, 'chapter') + ', ' + other.downloaded + ' kept, ' + other.read + ' read)']),
+          '. One copy is enough: ' + (info.can_delete ? 'Delete series, on the copy you do not want, removes it for good.' : 'an admin can delete the spare.')) : null,
         info.description ? clampText(info.description) : null,
         el('div', { class: 'row' },
           info.next ? el('a', { class: 'btn pri', href: '#/read/' + info.id + '/' + info.next.order, text: (info.read ? 'Continue: ' : 'Start: ') + info.next.name }) : null,
@@ -2983,7 +3100,19 @@ async function pageSeries(id) {
           el('button', { class: 'btn', type: 'button', text: 'Look for new chapters', onclick: async () => { try { await api('GET',
               '/api/series/' + info.id + '?refresh=1'); toast('Chapter list refreshed.'); again(); } catch (err) { oops(err); } } }),
           info.unread ? el('button', { class: 'btn', type: 'button', text: 'Mark all as read',
-              onclick: () => mark(info.chapters_list.filter((chapter) => !chapter.read).map((chapter) => chapter.id), true) }) : null))),
+              onclick: () => mark(info.chapters_list.filter((chapter) => !chapter.read).map((chapter) => chapter.id), true) }) : null,
+          // Admins: this copy gone for good (Stop following keeps its chapters). For the spare of a series followed twice.
+          info.can_delete ? el('button', { class: 'btn danger', type: 'button', text: 'Delete series', 'aria-label': 'Delete ' + info.title + ' for good',
+            onclick: async (event) => {
+              const btn = event.currentTarget;
+              if (!(await ask(deleteSeriesWords(info), { yes: 'Delete series', danger: true }))) return;
+              btn.disabled = true;
+              try {
+                const gone = await api('DELETE', '/api/series/' + info.id);
+                toast(gone.message, false, 10000);
+                location.hash = info.also.length ? '#/series/' + info.also[0].id : '#/library/graphic';  // to the copy kept, when there is one
+              } catch (err) { btn.disabled = false; oops(err); }
+            } }) : null))),
     info.files.length ? el('section', { class: 'panel cut stack' }, head('As comic files'),
       el('p', { class: 'small dim',
           text: 'Every kept chapter joined into one comic file (CBZ), with a chapter list inside, ' + (info.files.length > 1 ? 'in parts of 50 chapters. ' : '') + 'The server makes it by itself as chapters arrive; only the last part changes when new ones come.' }),

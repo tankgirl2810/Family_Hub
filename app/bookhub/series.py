@@ -11,6 +11,7 @@ Written against Suwayomi-Server v2.4.
 """
 import json
 import re
+import shutil
 import statistics
 import threading
 import time
@@ -52,6 +53,8 @@ class SeriesError(Exception):
 
 
 OLD_SOURCES = "_old-sources"  # in needs-attention: chapters of copies from sites no longer followed
+QUEUE_STATES = {"DOWNLOADING": "downloading", "QUEUED": "waiting", "ERROR": "failed"}  # the series server's words as the hub's
+WAITING_SHOWN = 100  # chapters waiting their turn that Downloads lists one by one; the rest are counted
 # Labels sites put on a title that don't make it a different series. Others in brackets, like "(Bboong)", can.
 SITE_LABELS = re.compile(r"\[[^\]]*\]|\(\s*(?:official|uncensored|uncut|webtoon|manhwa|manhua|manga|colou?red|"
                          r"digital|eng?|english|full colou?r)\s*\)", re.I)
@@ -108,6 +111,49 @@ def set_my_book(hub, profile_id, series_id, on):
     if on:
         ids.insert(0, series_id)  # newest first
     db.kv_set(hub.con(), "series:mine:%d" % profile_id, json.dumps(ids))
+
+
+def aside_folder(hub, title, source):
+    """Where chapters of a copy from a site no longer followed are set aside (needs-attention/_old-sources), or
+    None when there is no needs-attention folder."""
+    folder = hub.config.attention_dir
+    return Path(folder) / OLD_SOURCES / _safe_name("%s (%s)" % (title, source or "Unknown site")) if folder else None
+
+
+def set_aside(hub, title, source):
+    """How many chapters of this copy of a series are set aside in needs-attention."""
+    folder = aside_folder(hub, title, source)
+    return len(list(folder.glob("*.cbz"))) if folder and folder.is_dir() else 0
+
+
+def forget(hub, series_id):
+    """Take away everything Family Hub itself keeps for a series by chapter: its comic files, the books made of
+    it for reading apps and the apps' places in them, its place in everyone's My books, and when it was last
+    looked at. The series server is not asked anything. Tags and ratings go by title, not by copy, so they stay
+    for another copy of the same series."""
+    from . import chapterfile
+    con, data_dir = hub.con(), Path(hub.config.data_dir).resolve()
+    for row in con.execute("SELECT hash, path FROM joined_books WHERE kind='chapters' AND name=?", (str(series_id),)).fetchall():
+        con.execute("DELETE FROM kv WHERE key LIKE ?", ("joined:%:" + row["hash"],))
+        made = Path(row["path"]) if row["path"] else None
+        if made and data_dir in made.resolve().parents:  # only ever a file the hub made itself
+            try:
+                made.unlink(missing_ok=True)
+            except OSError:
+                pass  # in use this minute; it is only a copy
+    con.execute("DELETE FROM joined_books WHERE kind='chapters' AND name=?", (str(series_id),))
+    # "fetched:<profile>:chapters:<series>:<part>": which copy of each part a reading app last fetched
+    con.execute("DELETE FROM kv WHERE key=? OR key LIKE ?", ("series:looked:%d" % series_id, "fetched:%%:chapters:%d:%%" % series_id))
+    for row in con.execute("SELECT key, value FROM kv WHERE key LIKE 'series:mine:%'").fetchall():
+        try:
+            kept = [int(mine) for mine in json.loads(row["value"] or "[]")]
+        except (ValueError, TypeError):
+            continue
+        if series_id in kept:
+            con.execute("UPDATE kv SET value=? WHERE key=?", (json.dumps([mine for mine in kept if mine != series_id]), row["key"]))
+    con.commit()
+    chapterfile.forget(hub, series_id)
+    hub.touch()
 
 
 def _genres(given):
@@ -326,7 +372,43 @@ class Series:
         self._ready()
         data = self.gql("{mangas(condition:{inLibrary:true}){nodes{%s}} downloadStatus{queue{state}}}" % SERIES_FIELDS)
         items = sorted((_series(manga) for manga in data["mangas"]["nodes"]), key=lambda followed: followed["title"].lower())
+        # the same title followed from two sites: each copy says where the others are, so a spare is easy to spot
+        for followed in items:
+            followed["also"] = [{"id": other["id"], "source": other["source"]} for other in self.twins(followed, items)]
         return {"series": items, "queued": len(data["downloadStatus"]["queue"])}
+
+    def twins(self, this, followed):
+        """The other followed copies of a series (the same title from another site), out of the followed series given."""
+        name = same_series(this["title"])
+        return [other for other in followed if other["id"] != this["id"] and not other["local"] and not this.get("local")
+                and same_series(other["title"]) == name]
+
+    def queue(self, most_waiting=WAITING_SHOWN):
+        """What the series server is downloading, in its order: the chapters being downloaded now, the ones it gave
+        up on (all of them: they are the ones someone has to know about), and the next most_waiting waiting their
+        turn. counts has the real totals; a queue can be a thousand chapters long, so the rest are only counted."""
+        status = self.gql("{downloadStatus{state queue{state progress tries chapter{id name chapterNumber} manga{id title}}}}")["downloadStatus"]
+        counts = {"downloading": 0, "waiting": 0, "failed": 0}
+        chapters, place = [], 0
+        for entry in status["queue"]:
+            state = QUEUE_STATES.get(entry.get("state"))
+            if not state:  # FINISHED: about to leave the queue
+                continue
+            counts[state] += 1
+            if state != "failed":
+                place += 1  # its place in line; a chapter given up on is not in line any more
+            if state == "waiting" and counts["waiting"] > most_waiting:
+                continue
+            chapter, manga = entry.get("chapter") or {}, entry.get("manga") or {}
+            number = chapter.get("chapterNumber")
+            chapters.append({
+                "id": chapter.get("id"), "series_id": manga.get("id"), "series": manga.get("title") or "",
+                "chapter": chapter.get("name") or ("Chapter %g" % number if number is not None and number >= 0 else "Chapter"),
+                "state": state, "progress": round(100 * min(1.0, max(0.0, entry.get("progress") or 0.0))),
+                "tries": entry.get("tries") or 0, "position": place if state != "failed" else None,
+            })
+        return {"running": status.get("state") == "STARTED", "counts": counts, "chapters": chapters,
+                "more_waiting": max(0, counts["waiting"] - most_waiting)}
 
     def search(self, query):
         """Ask every source in the chosen languages at once. One slow or broken site must not spoil the rest."""
@@ -392,6 +474,53 @@ class Series:
         """Stop following. Chapters already downloaded stay on disk."""
         self.gql("mutation($id: Int!){updateManga(input:{id:$id,patch:{inLibrary:false}}){manga{id}}}", {"id": series_id})
         self._shelf_kept = (0, None)
+
+    def _known(self, series_id):
+        """A series and every chapter the series server already lists for it, without a visit to the reading site
+        (detail() goes and looks when a series has no chapters; a site that has gone must not stop a delete)."""
+        data = self.gql("query($id: Int!){manga(id:$id){id title inLibrary sourceId source{displayName}} chapters(condition:{mangaId:$id}){nodes{%s}}}"
+                        % CHAPTER_FIELDS, {"id": series_id})
+        if not data.get("manga"):
+            raise SeriesError("That series is not on the series server.")
+        return data["manga"], [_chapter(chapter) for chapter in data["chapters"]["nodes"]]
+
+    def delete(self, series_id):
+        """Delete one copy of a series for good, so the spare of a series followed twice can go and stay gone.
+        Stop following only stops the fetching; this also takes its chapters off the download queue, deletes its
+        chapter files from the series server, and removes what Family Hub keeps for it (forget) and any of its
+        chapters set aside in needs-attention. Chapters read in it are first marked read in the other followed
+        copies of the same title, so nobody loses their place. The series server keeps its own entry for the
+        series, not followed and with nothing downloaded: nothing looks at it again, and it can be followed
+        afresh from a search. Returns what went."""
+        manga, chapters = self._known(series_id)
+        if str(manga.get("sourceId")) == LOCAL:
+            raise SeriesError("This series is files someone put in the series server's own folder, so Family Hub does not "
+                              "delete it. Take the files out of that folder; Stop following takes it off the shelf.")
+        title, source = manga.get("title") or "", (manga.get("source") or {}).get("displayName") or ""
+        read_here = {chapter["number"] for chapter in chapters if chapter["read"] and chapter["number"] is not None}
+        carried = []
+        if read_here:  # before anything goes, so a failure here leaves the series as it was
+            for other in self.twins({"id": series_id, "title": title, "local": False}, self.shelf()["series"]):
+                theirs = self._known(other["id"])[1]
+                catch_up = [chapter["id"] for chapter in theirs if not chapter["read"] and chapter["number"] in read_here]
+                if catch_up:
+                    self.mark(catch_up, True)
+                    carried.append(other["source"] or "the other copy")
+        self.unfollow(series_id)  # before the queue is cleared, so the series server queues nothing new for it meanwhile
+        ids = [chapter["id"] for chapter in chapters]
+        queued = sum(entry["series_id"] == series_id for entry in self.queue(most_waiting=10 ** 9)["chapters"]) if ids else 0
+        if ids:  # ids not in the queue are passed over by the series server
+            self.gql("mutation($ids: [Int!]!){dequeueChapterDownloads(input:{ids:$ids}){downloadStatus{state}}}", {"ids": ids})
+        # asked again now the queue is clear: a chapter that finished downloading a moment ago is deleted too
+        kept = [chapter["id"] for chapter in self._known(series_id)[1] if chapter["downloaded"]]
+        if kept:
+            self.gql("mutation($ids: [Int!]!){deleteDownloadedChapters(input:{ids:$ids}){chapters{id}}}", {"ids": kept})
+        forget(self.hub, series_id)
+        aside, was_aside = aside_folder(self.hub, title, source), set_aside(self.hub, title, source)
+        if aside and aside.is_dir():
+            shutil.rmtree(aside, ignore_errors=True)
+        self._shelf_kept = (0, None)
+        return {"title": title, "source": source, "queued": queued, "chapters": len(kept), "set_aside": was_aside, "read_carried": carried}
 
     def download(self, series_id, refresh=False):
         chapters = self.detail(series_id, refresh=refresh)["chapters_list"]
@@ -474,7 +603,7 @@ class Series:
     def _set_aside(self, title, source, chapters, folder):
         """Copy chapter files out of the series server into folder/_old-sources/<title> (<site>). The ids copied."""
         from .chapterfile import room_for
-        target = Path(folder) / OLD_SOURCES / _safe_name("%s (%s)" % (title, source))
+        target = Path(folder) / OLD_SOURCES / _safe_name("%s (%s)" % (title, source))  # the same place as aside_folder()
         room_for(target)
         target.mkdir(parents=True, exist_ok=True)
         saved = []

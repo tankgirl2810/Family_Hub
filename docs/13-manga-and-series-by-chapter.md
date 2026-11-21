@@ -108,6 +108,23 @@ chapter already found is downloaded, and it is put in the series server's catego
 cancelled (not checked for new chapters)", which its updates leave out. If the site later says it is
 ongoing again, it comes back out. **Look for new chapters** on its page still checks once.
 
+### Watching chapters download
+
+**Downloads** lists the chapters the series server is fetching, under the
+films, TV and books (press **Manga and manhwa** to see them alone). Each row
+names the series and the chapter, and its name opens the series.
+
+- **Downloading**: a bar shows how far along it is.
+- **Failed**: the series server tried the chapter a few times and gave up,
+  usually because the reading site was away or no longer has it. Failed
+  chapters are folded under **Failed**, with how far each one got. They are
+  no longer in line, so they do not hold the others up.
+- **Waiting their turn**: folded under that name, in the order they will be
+  fetched. A long queue lists the next hundred and counts the rest.
+
+The list refreshes every few seconds. Everyone who can read series sees it;
+it shows even while qBittorrent is away.
+
 ### Chapters the site lists twice
 
 Some sites list a chapter twice: two translations, or "Ch. 21" and "Ch. 21 (18+)". Family Hub keeps
@@ -129,6 +146,37 @@ community tags. All of these can be searched and picked like any tag, and the se
 be sorted with the rest. Each card shows how many chapters have been read and how many
 are new, and has **Add to my books** and, once the comic file is made, **Download CBZ**; the title opens the series, where chapters can be
 read in the browser.
+
+### The same series followed twice, and deleting one
+
+It is easy to follow one series from two sites: the same title turns up on
+each. Family Hub leaves both alone, because which copy to keep is your call,
+but it points them out:
+
+- each copy's card says **Followed twice**;
+- the series panel at the top of Graphic novels names them, each a link;
+- each copy's page says where the other is from, with its chapters, how many
+  are kept and how many are read, so you can tell the better copy.
+
+To remove the spare, an admin opens it and presses **Delete series**. Family
+Hub asks first, naming the series and its site and saying what will go:
+
+- it is no longer followed, and any of its chapters still waiting come off
+  the download queue;
+- the chapters kept on the server are deleted, with the comic file made from
+  them, and it comes out of everyone's My books;
+- any of its chapters set aside in needs-attention go too.
+
+Chapters read in the copy you delete are marked read in the copy you keep,
+so nobody loses their place. Tags and ratings belong to the title, so the
+copy you keep still has them. A deleted series stays gone: nothing looks for
+its chapters again. If you change your mind, search for it and follow it
+afresh.
+
+**Delete series** is for admins only, like deleting a book or a film. It
+works on any series from a reading site, followed twice or not. A series made
+of files you put in the series server's own folder is not deleted this way:
+take the files out of that folder.
 
 ## One comic file for the whole series
 
@@ -209,7 +257,8 @@ and read marks that differ per account.
 ## Things to know
 
 - **Stopping does not delete.** **Stop following** ends the search for new
-  chapters. Chapters already kept stay on the disk.
+  chapters. Chapters already kept stay on the disk. **Delete series** (admins)
+  is the one that removes them: see "The same series followed twice" above.
 - **Tachimanga's own list is not copied.** Series you follow inside
   Tachimanga from a reading site are not brought here; follow them again in
   Family Hub.
@@ -247,6 +296,10 @@ Tested on the test PC against Suwayomi v2.4.2366 and Komga 1.28.1:
   file, the browser reader, read marks and the File download;
 - Komga finding the chapters in the series folder and a reader account
   seeing them.
+
+The chapter list on Downloads and **Delete series** were tried against a
+stand-in series server (the one the tests use), with the queue's layout read
+from the real one. Deleting a real series has not been tried yet.
 
 Not yet tested: Tachimanga on a real iPad, the sites you use in Tachimanga,
 and a series with hundreds of chapters.

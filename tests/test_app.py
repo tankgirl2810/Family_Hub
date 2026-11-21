@@ -1400,13 +1400,17 @@ class FakeSeriesServer:
         self.genres = {}
         self.categories = {0: "Default"}
         self.in_category = {}
+        self.sources = {}    # series id -> (source id, the site's name); the rest are from Reading Site (EN)
+        self.downloads = {}  # chapter id -> what the downloader says of it in the queue, when not just waiting
+        self.downloader = "STARTED"
 
     def manga(self, mid):
         chapters = self.chapters[mid]
         unread = [c for c in chapters if not c["isRead"]]
+        source_id, site = self.sources.get(mid, ("55", "Reading Site (EN)"))
         return {"id": mid, "title": self.titles[mid], "author": "Someone", "status": self.status.get(mid, "ONGOING"), "genre": self.genres.get(mid, ["Action"]),
-                "unreadCount": len(unread), "downloadCount": sum(c["isDownloaded"] for c in chapters), "sourceId": "55",
-                "source": {"displayName": "Reading Site (EN)"}, "chapters": {"totalCount": len(chapters)},
+                "unreadCount": len(unread), "downloadCount": sum(c["isDownloaded"] for c in chapters), "sourceId": source_id,
+                "source": {"displayName": site}, "chapters": {"totalCount": len(chapters)},
                 "firstUnreadChapter": unread[0] if unread else None, "description": "About a tower.",
                 "inLibrary": mid in self.following, "realUrl": "https://example.org/tower"}
 
@@ -1428,6 +1432,12 @@ class FakeSeriesServer:
             return {"sources": {"nodes": [{"id": "55", "displayName": "Reading Site (EN)", "lang": "en", "isNsfw": False},
                                           {"id": "66", "displayName": "Broken Site (EN)", "lang": "en", "isNsfw": False},
                                           {"id": "77", "displayName": "Reading Site (FR)", "lang": "fr", "isNsfw": False}]}}
+        if query.startswith("{downloadStatus"):  # the whole download queue, in the downloader's order
+            where = {c["id"]: (mid, c) for mid, chapters in self.chapters.items() for c in chapters}
+            return {"downloadStatus": {"state": self.downloader, "queue": [
+                dict({"state": "QUEUED", "progress": 0.0, "tries": 0}, **self.downloads.get(cid, {}),
+                     chapter={"id": cid, "name": where[cid][1]["name"], "chapterNumber": where[cid][1]["chapterNumber"]},
+                     manga={"id": where[cid][0], "title": self.titles[where[cid][0]]}) for cid in self.queued if cid in where]}}
         if "mangas(condition:{inLibrary:true})" in query:
             return {"mangas": {"nodes": [self.manga(m) for m in sorted(self.following)]},
                     "downloadStatus": {"queue": [{"state": "QUEUED"}] * len(self.queued)}}
